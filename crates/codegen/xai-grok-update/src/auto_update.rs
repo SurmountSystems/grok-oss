@@ -1497,6 +1497,15 @@ pub async fn install_internal_from_bases(
                 // Left unwrapped so telemetry classification sees the typed failure
                 return Err(e);
             }
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<ChecksumVerifyFailure>(),
+                    Some(ChecksumVerifyFailure::Mismatch)
+                ) =>
+            {
+                // SHA-256 mismatch is a property of the published pin, not the CDN.
+                return Err(e);
+            }
             Err(e) => {
                 let e = wrap_download_err(e);
                 if i + 1 < bases.len() {
@@ -1683,8 +1692,21 @@ async fn download_verified_from_base(
 
     eprintln!("  Downloading grok v{} ({})...", version, platform);
 
-    // The downloaded binary is already +x (see `publish_downloaded_artifact`)
-    download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
+    // Pending sibling: a failed SHA-256 pin must not replace previous-good.
+    let pending = tmp_download_path(&binary_path);
+    let artifact_url =
+        match download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &pending, true).await {
+            Ok(url) => url,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&pending).await;
+                return Err(err);
+            }
+        };
+    if let Err(fail) = verify_published_artifact_sha256(&artifact_url, &pending).await {
+        let _ = tokio::fs::remove_file(&pending).await;
+        return Err(fail.into());
+    }
+    publish_downloaded_artifact(&pending, &binary_path).await?;
 
     // Smoke-test: run the binary before activating it
     // A truncated or corrupt download is caught here and never becomes the active grok
@@ -2335,6 +2357,45 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         );
     }
     Ok(())
+}
+
+/// Download the published `${artifact}.sha256` next to a CDN artifact URL and
+/// compare it to `pending`. Fail-closed on a missing file, an unreadable
+/// digest, or a mismatch. SHA-256 only. Not SHA-1. Does not publish `pending`.
+async fn verify_published_artifact_sha256(
+    artifact_url: &str,
+    pending: &std::path::Path,
+) -> std::result::Result<(), ChecksumVerifyFailure> {
+    // Compression is transport. The published pin is `${artifact}.sha256`
+    // (or `${artifact}.exe.sha256`), not a `.zst` / `.gz` sidecar name.
+    let logical = artifact_url
+        .strip_suffix(".zst")
+        .or_else(|| artifact_url.strip_suffix(".gz"))
+        .unwrap_or(artifact_url);
+    let checksum_url = artifact_checksum_url(logical);
+    let client = download_client().map_err(|err| ChecksumVerifyFailure::Io(err.to_string()))?;
+    let resp = match client.get(&checksum_url).send().await {
+        Ok(resp) => resp,
+        Err(_) => {
+            return Err(ChecksumVerifyFailure::Missing { url: checksum_url });
+        }
+    };
+    if !resp.status().is_success() {
+        return Err(ChecksumVerifyFailure::Missing { url: checksum_url });
+    }
+    let bytes = match resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => return Err(ChecksumVerifyFailure::Io(err.to_string())),
+    };
+    let Some(expected) = parse_sha256_file_bytes(&bytes) else {
+        return Err(ChecksumVerifyFailure::Unreadable { url: checksum_url });
+    };
+    let pending = pending.to_path_buf();
+    match tokio::task::spawn_blocking(move || verify_file_against_digest(&pending, &expected)).await
+    {
+        Ok(result) => result,
+        Err(err) => Err(ChecksumVerifyFailure::Io(err.to_string())),
+    }
 }
 
 /// Download the published `${artifact}.sha256` asset and compare it to

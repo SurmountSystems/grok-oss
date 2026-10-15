@@ -20,6 +20,14 @@ pub(super) struct ParentMessageOrigin {
     source: ActiveAgentMessageSource,
 }
 
+impl ParentMessageOrigin {
+    /// The Operator's own parent text keeps the green rail.
+    /// Agent-authored parent text must not be submitted as that prompt.
+    fn is_operator_speech(&self) -> bool {
+        matches!(self.source, ActiveAgentMessageSource::Human)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PendingParentAgentMessage {
     prompt_id: String,
@@ -448,12 +456,16 @@ impl SessionActor {
                 let ordered: Vec<&_> =
                     super::parent_interject::order_for_delivery(messages).collect();
                 for message in &ordered {
-                    let update = acp::SessionUpdate::UserMessageChunk(
-                        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
-                            message.content().text.to_string(),
-                        )))
-                        .meta(user_chunk_meta.clone()),
-                    );
+                    let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                        acp::TextContent::new(message.content().text.to_string()),
+                    ))
+                    .meta(user_chunk_meta.clone());
+                    // Agent words do not take the green operator accent.
+                    let update = if message.source().is_operator_speech() {
+                        acp::SessionUpdate::UserMessageChunk(chunk)
+                    } else {
+                        acp::SessionUpdate::AgentMessageChunk(chunk)
+                    };
                     self.notifications
                         .persistence_tx
                         .send(PersistenceMsg::Update(SessionUpdate::Acp(Box::new(

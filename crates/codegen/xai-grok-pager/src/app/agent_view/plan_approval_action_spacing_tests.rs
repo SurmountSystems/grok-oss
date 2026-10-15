@@ -168,9 +168,23 @@ fn plan_approval_actions_are_a_little_bigger_and_spaced_out_better() {
         "plan search stays on the title bar, not the action row"
     );
     assert_eq!(
+        search.width, 3,
+        "search is the same 3 columns as the bracket controls"
+    );
+    assert_eq!(
         buf[(search.x, search.y)].symbol(),
+        "[",
+        "search opens with a square bracket"
+    );
+    assert_eq!(
+        buf[(search.x + 1, search.y)].symbol(),
         crate::glyphs::search_icon(),
         "magnifying glass glyph is unchanged"
+    );
+    assert_eq!(
+        buf[(search.x + 2, search.y)].symbol(),
+        "]",
+        "search closes with a square bracket"
     );
 }
 

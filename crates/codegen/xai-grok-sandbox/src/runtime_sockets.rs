@@ -97,57 +97,62 @@ fn runtime_socket_deny_paths_for_context_with_policy(
     }
 }
 
-/// Missing candidates are skipped; every other resolution failure is returned.
+/// Missing candidates are skipped. An endpoint this uid cannot search is
+/// skipped too: `connect` needs that search permission, and a root-only
+/// `/run/podman` must not refuse every restricted profile. Symlink loops and
+/// every other resolution failure are returned.
 pub(crate) fn materialize_runtime_socket_deny_paths_from(
     candidates: impl IntoIterator<Item = PathBuf>,
 ) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for candidate in candidates {
-        let with_context = |error: io::Error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "could not resolve runtime-socket deny path {}: {error}",
-                    candidate.display()
+        let parent = candidate.parent().ok_or_else(|| {
+            deny_resolution_error(
+                &candidate,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "endpoint has no parent directory",
                 ),
             )
-        };
-        let parent = candidate.parent().ok_or_else(|| {
-            with_context(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "endpoint has no parent directory",
-            ))
         })?;
         let file_name = candidate.file_name().ok_or_else(|| {
-            with_context(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "endpoint has no file name",
-            ))
+            deny_resolution_error(
+                &candidate,
+                io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no file name"),
+            )
         })?;
         let canonical_parent = match dunce::canonicalize(parent) {
             Ok(parent) => parent,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                match std::fs::symlink_metadata(&candidate) {
-                    Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
-                        continue;
-                    }
-                    Ok(_) => return Err(with_context(error)),
-                    Err(metadata_error) => return Err(with_context(metadata_error)),
+                match inspect_endpoint(&candidate)? {
+                    None => continue,
+                    Some(_) => return Err(deny_resolution_error(&candidate, error)),
                 }
             }
-            Err(error) => return Err(with_context(error)),
+            Err(error) if is_permission_denied(&error) => {
+                match inspect_endpoint(&candidate)? {
+                    None => continue,
+                    Some(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(endpoint_symlink_error(&candidate));
+                    }
+                    Some(_) => {
+                        // Parent is not searchable via canonicalize, but the
+                        // literal endpoint is visible. Mask that spelling.
+                        if !paths.contains(&candidate) {
+                            paths.push(candidate.clone());
+                        }
+                        continue;
+                    }
+                }
+            }
+            Err(error) => return Err(deny_resolution_error(&candidate, error)),
         };
         let path = canonical_parent.join(file_name);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(with_context(error)),
+        let Some(metadata) = inspect_endpoint(&path)? else {
+            continue;
         };
         if metadata.file_type().is_symlink() {
-            return Err(with_context(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "endpoint is a symlink",
-            )));
+            return Err(endpoint_symlink_error(&path));
         }
         if !paths.contains(&path) {
             paths.push(path);
@@ -212,6 +217,48 @@ fn runtime_socket_policy_contains(policy: &[PathBuf], handed: &Path) -> io::Resu
         }
     }
     Ok(false)
+}
+
+fn deny_resolution_error(candidate: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "could not resolve runtime-socket deny path {}: {error}",
+            candidate.display()
+        ),
+    )
+}
+
+fn endpoint_symlink_error(candidate: &Path) -> io::Error {
+    deny_resolution_error(
+        candidate,
+        io::Error::new(io::ErrorKind::InvalidInput, "endpoint is a symlink"),
+    )
+}
+
+/// `Ok(None)` when the endpoint is missing or this uid cannot search it.
+fn inspect_endpoint(candidate: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(candidate) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound || is_permission_denied(&error) => {
+            Ok(None)
+        }
+        Err(error) => Err(deny_resolution_error(candidate, error)),
+    }
+}
+
+fn is_permission_denied(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied || os_permission_denied(error)
+}
+
+#[cfg(unix)]
+fn os_permission_denied(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM))
+}
+
+#[cfg(not(unix))]
+fn os_permission_denied(_error: &io::Error) -> bool {
+    false
 }
 
 /// Normalize parent aliases without inspecting or following endpoint objects.

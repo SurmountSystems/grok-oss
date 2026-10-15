@@ -119,7 +119,7 @@ fn live_turn_wake_command_loading_and_dispatch_keep_activity() {
         let expected = match case {
             0 => {
                 agent.session.state = AgentState::TurnRunning;
-                "Waiting for response…"
+                "Waiting for the model…"
             }
             1 => {
                 agent.note_streaming_wake_turn("wake");

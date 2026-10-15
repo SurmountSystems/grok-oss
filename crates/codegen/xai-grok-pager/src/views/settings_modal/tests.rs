@@ -734,6 +734,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned auto_run_implement (Agent category; live cache).
             "auto_run_implement",
             "economic_mode",
+            "turbo_planning",
+            "process_rule_reminders_enabled",
+            "process_rule_reminders",
             "token_economy.cap_implement_effort_when_economic",
             "token_economy.max_implement_effort",
             "token_economy.min_implement_effort",
@@ -6188,7 +6191,9 @@ fn click_settings_breadcrumb_ignores_close_on_picker_exit() {
     );
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
-            assert_eq!(orig, "groknight");
+            // Unset theme resolves to doge. The sibling breadcrumb test
+            // already requires that canonical. groknight is a choice, not the default.
+            assert_eq!(orig, "doge");
         }
         other => panic!("expected preview revert Action, got {other:?}"),
     }

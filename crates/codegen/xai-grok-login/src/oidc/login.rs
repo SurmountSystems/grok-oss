@@ -631,9 +631,54 @@ mod tests {
         assert!(auth.expires_at.is_some());
         assert_eq!(auth.oidc_issuer.as_deref(), Some(issuer.as_str()));
 
-        let auth_json = std::fs::read_to_string(temp_dir.path().join("auth.json")).unwrap();
-        assert!(auth_json.contains("mock-access-token"));
-        assert!(auth_json.contains("user-42"));
+        let auth_path = temp_dir.path().join("auth.json");
+        let auth_json = std::fs::read_to_string(&auth_path).unwrap();
+        assert!(
+            auth_json.contains("user-42"),
+            "auth.json keeps the account after a successful store write"
+        );
+        assert!(
+            !auth_json.contains("mock-access-token"),
+            "after a successful store write, auth.json must omit the session key"
+        );
+        assert!(
+            !auth_json.contains("mock-refresh-token"),
+            "after a successful store write, auth.json must omit the refresh token"
+        );
+        let scope = GrokComConfig::default().auth_scope();
+        let store = crate::credentials_store::CredentialsStore::at_path(
+            auth_path.with_file_name("provider_credentials.json"),
+        );
+        let (key_user, key_secret) = store
+            .read(&format!("supergrok-session:{scope}"))
+            .expect("credentials store readable")
+            .expect("session key missing from credentials store");
+        assert_eq!(key_user, "key", "credentials username");
+        assert_eq!(
+            key_secret, "mock-access-token",
+            "the store has the session key"
+        );
+        let (refresh_user, refresh_secret) = store
+            .read(&format!("supergrok-session:{scope}#refresh_token"))
+            .expect("credentials store readable")
+            .expect("refresh token missing from credentials store");
+        assert_eq!(refresh_user, "refresh_token", "credentials username");
+        assert_eq!(
+            refresh_secret, "mock-refresh-token",
+            "the store has the refresh token"
+        );
+        let loaded = crate::storage::read_auth_json(&auth_path)
+            .expect("a later load restores the credential");
+        let session = loaded.get(&scope).expect("account entry remains");
+        assert_eq!(
+            session.key, "mock-access-token",
+            "a later load restores the session key"
+        );
+        assert_eq!(
+            session.refresh_token.as_deref(),
+            Some("mock-refresh-token"),
+            "a later load restores the refresh token"
+        );
 
         idp_server.abort();
     }

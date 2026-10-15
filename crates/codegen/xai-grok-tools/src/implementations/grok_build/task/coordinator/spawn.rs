@@ -59,6 +59,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         let id = request.id.clone();
+        // Identical ordinary descriptions stay live together: a peer and a
+        // nested child often share fixture text. Review-row text is the
+        // duplicate-job gate (`Review implementation` must not double).
+        if !request.owner.is_workflow()
+            && request.description != "goal achievement skeptic"
+            && is_implement_loop_review_description(&request.description)
+            && self.live_same_description(&request)
+        {
+            self.reject_queries_waiting_for_spawn(&id);
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "A live subagent already has description '{}'. Wait for it to finish, or use a distinct description.",
+                        request.description
+                    ),
+                    false,
+                ),
+            );
+            return;
+        }
         if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
             || self.completed.contains_key(&id)
@@ -70,6 +93,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 admitted_tx,
                 result_tx,
                 rejected_spawn_result(&id, &format!("Subagent id '{id}' already exists"), false),
+            );
+            return;
+        }
+        // `spawn()` waits on the child result. Reject a live source here so
+        // that wait is not the source's exit (or the shared finish signal).
+        if let Some(resume_id) = request
+            .resume_from
+            .as_deref()
+            .filter(|id| xai_tool_types::is_not_sentinel(id))
+            && self.resume_target_is_still_running(resume_id, &request.parent_session_id)
+        {
+            self.reject_queries_waiting_for_spawn(&id);
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "Cannot resume from subagent '{resume_id}': it is still running. \
+                         Wait for it to complete before resuming."
+                    ),
+                    false,
+                ),
             );
             return;
         }
@@ -209,6 +255,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 );
             }
         }
+    }
+
+    /// Another live task-owned child on this parent already has this description.
+    /// The reserved panel description is exempt at the call site.
+    fn live_same_description(&self, request: &SubagentRequest) -> bool {
+        let matches = |other: &SubagentRequest| {
+            !other.owner.is_workflow()
+                && other.id != request.id
+                && other.parent_session_id == request.parent_session_id
+                && other.description == request.description
+        };
+        self.pending.values().any(|child| matches(&child.request))
+            || self.active.values().any(|child| matches(&child.request))
+            || self.queued.iter().any(|queued| matches(&queued.request))
     }
 
     /// Live Task-owned Review-row descriptions on this parent.

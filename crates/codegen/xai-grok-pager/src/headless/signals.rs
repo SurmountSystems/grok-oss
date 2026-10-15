@@ -145,6 +145,12 @@ async fn spawn_watcher<S: SignalSource + 'static>(
 async fn forced_exit_code(signals: &mut impl SignalSource, handoff: &SignalHandoff) -> i32 {
     loop {
         let code = signals.next_code().await;
+        if crate::signal_streams::peer_rebuild_code_arms_reexec(code) {
+            // Success execs and does not return. A missing or stale request keeps waiting.
+            // Do not force-exit on SIGUSR1. A later non-rebuild signal still exits.
+            let _ = xai_grok_update::rebuild::exec_installed_binary_for_peer_rebuild();
+            continue;
+        }
         match route_signal(handoff, code) {
             SignalRoute::Exit => return code,
             SignalRoute::Pending => {}

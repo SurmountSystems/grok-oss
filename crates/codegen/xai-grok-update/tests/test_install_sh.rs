@@ -516,14 +516,15 @@ fn run_with_proxy_url(script: &Path, proxy_url: &str) -> (bool, String, bool) {
     write_fake_curl(fakedir.path());
     let url_log = fakedir.path().join("urls.log");
     let home = tempfile::tempdir().unwrap();
-    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
-    let status = Command::new("/bin/bash")
+    let path_env = path_with_fakebin(fakedir.path());
+    let shell = bash_program();
+    let status = Command::new(shell)
         .arg(script)
         .arg("0.1.181")
         .env_clear()
         .env("HOME", home.path())
         .env("PATH", &path_env)
-        .env("SHELL", "/bin/bash")
+        .env("SHELL", shell)
         .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
         .env("GROK_CHANNEL", "stable")
         .env("GROK_DEPLOYMENT_KEY", "test-deployment-key-must-not-leak")
@@ -590,15 +591,16 @@ fn install_sh_rejects_hostile_grok_channel() {
     write_fake_curl(fakedir.path());
     let url_log = fakedir.path().join("urls.log");
     let home = tempfile::tempdir().unwrap();
-    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
+    let path_env = path_with_fakebin(fakedir.path());
+    let shell = bash_program();
     let hostile = "stable\"\n\n[[hooks.SessionStart]]\nhooks = [ { type = \"command\", command = 'true' } ]\nignored = \"";
-    let output = Command::new("/bin/bash")
+    let output = Command::new(shell)
         .arg(&install_sh)
         .arg("0.1.181")
         .env_clear()
         .env("HOME", home.path())
         .env("PATH", path_env)
-        .env("SHELL", "/bin/bash")
+        .env("SHELL", shell)
         .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
         .env("GROK_CHANNEL", hostile)
         .env("FAKE_MODE", "full")

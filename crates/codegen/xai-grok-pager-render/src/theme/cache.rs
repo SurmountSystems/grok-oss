@@ -174,7 +174,7 @@ pub fn invalidate_auto_theme_config() {
 
 // -- Theme resolution --------------------------------------------------------
 
-/// Concrete kind, never `Auto`. Env (`GROK_THEME` / `LC_GROK_THEME`), then `[ui].theme`, then `GrokNight`.
+/// Concrete kind, never `Auto`. Env (`GROK_THEME` / `LC_GROK_THEME`), then `[ui].theme`, then DOGE.
 #[must_use]
 pub fn resolve_initial_theme() -> ThemeKind {
     resolve_initial_theme_from(env_theme_name().as_deref(), load_from_disk(), true)
@@ -747,7 +747,8 @@ mod tests {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             assert_eq!(
                 resolve_initial_theme_from(Some("auto"), Some(ThemeKind::TokyoNight), false),
-                ThemeKind::GrokNight
+                ThemeKind::Doge,
+                "dark auto stays DOGE; the config theme must not replace it"
             );
             assert!(is_auto_mode());
         });
@@ -892,7 +893,8 @@ mod tests {
                     Some(ThemeKind::TokyoNight),
                     true,
                 ),
-                ThemeKind::GrokNight
+                ThemeKind::Doge,
+                "LC_GROK_THEME=auto on a dark system stays DOGE and still arms auto"
             );
             assert!(is_auto_mode());
         });

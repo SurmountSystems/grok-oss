@@ -1425,6 +1425,14 @@ mod tests {
                         "always_expand_thinking default drifts from UiConfig::default()"
                     );
                 }
+                // hide_header: bool, default off. Missing [ui].hide_header stays off.
+                ("hide_header", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.hide_header,
+                        "hide_header default drifts from UiConfig::default()"
+                    );
+                    assert!(!*default, "hide_header must default OFF");
+                }
                 // group_tool_verbs: Option<bool>; None reads as true (client default)
                 ("group_tool_verbs", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1718,6 +1726,52 @@ mod tests {
                 ("cancel_subagents_on_turn_cancel", SettingKind::Enum { default, .. }) => {
                     assert_eq!(*default, "ask");
                     assert_eq!(ui.cancel_subagents_on_turn_cancel, None);
+                }
+                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        ui.plan_approval_park, None,
+                        "test assumes UiConfig::default().plan_approval_park is None",
+                    );
+                    assert_eq!(
+                        *default,
+                        ui.plan_approval_park_mode(),
+                        "plan_approval_park default drifts from UiConfig::default()"
+                    );
+                }
+                ("allow_worktree", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        xai_grok_shell::config::SubagentsConfig::default().allow_worktree,
+                        "allow_worktree default drifts from SubagentsConfig::default()"
+                    );
+                }
+                ("composer_multiline", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.composer_multiline_enabled(),
+                        "composer_multiline default drifts from UiConfig::default()"
+                    );
+                }
+                ("allow_session_multiline", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.allow_session_multiline_enabled(),
+                        "allow_session_multiline default drifts from UiConfig::default()"
+                    );
+                }
+                ("scrub_ascii_punct", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.scrub_ascii_punct_enabled(),
+                        "scrub_ascii_punct default drifts from UiConfig::default()"
+                    );
+                }
+                ("ulid_session_ids", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.ulid_session_ids_enabled(),
+                        "ulid_session_ids default drifts from UiConfig::default()"
+                    );
                 }
 
                 _ => panic!(

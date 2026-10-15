@@ -17,8 +17,12 @@ pub enum PlanModeState {
     Pending,
     /// Plan mode is active. The model has received plan mode instructions
     /// (either via system-reminder injection or via EnterPlanMode tool result).
-    /// Write tools are blocked except for plan.md and a living document the
-    /// plan names under `.agents/reports/`. Rust source stays refused.
+    /// Write tools are blocked except the session plan file and every non-Rust
+    /// file under a home `.agents/plans/` directory or a home `.agents/reports/`
+    /// directory outside the workspace. Those two homes stay writable even when
+    /// plan.md does not name the path. Replacing plan.md does not revoke that
+    /// exemption. A path inside the workspace stays refused. Rust source stays
+    /// refused.
     ///
     /// Transitions:
     ///   -> Inactive    (ExitPlanMode approved, or user toggles off when idle)
@@ -47,9 +51,29 @@ pub struct PlanModeTracker {
     /// While set, the model has NOT seen plan mode yet.
     /// A toggle-off withdraws it and rolls the activation back instead of deferring an exit the model never knew about.
     pending_activation: Option<PendingActivation>,
-    /// Lives inside the session directory:
-    /// `~/.grok/sessions/<cwd>/<session_id>/plan.md`
+    /// Session plan file. An existing `plan.md` stays, because the open
+    /// approval panel still reads it. A session directory with no `plan.md`
+    /// gets `plan-<ulid>.md` so a new plan does not replace an older one.
     plan_file_path: PathBuf,
+    /// Workspace root for the plan-mode write gate. A path inside this root
+    /// is refused except the session plan file. `None` does not treat a path
+    /// as inside the workspace.
+    workspace_root: Option<PathBuf>,
+}
+/// `plan.md` when that file is already in `session_dir`, or when the
+/// directory is not on disk yet. Otherwise `plan-<ulid>.md` from the existing
+/// `ulid::mint` helper, which does not replace an older plan and is not the
+/// fixed name `secondary-plan.md`.
+fn plan_file_path_for(session_dir: &Path) -> PathBuf {
+    let legacy = session_dir.join("plan.md");
+    if legacy.is_file() || !session_dir.is_dir() {
+        return legacy;
+    }
+    let mut path = session_dir.join(format!("plan-{}.md", xai_grok_tools::util::ulid::mint()));
+    if path.exists() {
+        path = session_dir.join(format!("plan-{}.md", xai_grok_tools::util::ulid::mint()));
+    }
+    path
 }
 /// A buffered mid-turn activation reminder plus the state needed to roll the activation back if it is withdrawn before delivery.
 struct PendingActivation {
@@ -59,7 +83,10 @@ struct PendingActivation {
     prior_was_previously_active: bool,
 }
 /// Persisted to `plan_mode.json` in the session directory and restored on session reload/resume so plan mode survives process restarts.
-/// The `plan_file_path` is NOT persisted; it is recomputed from session metadata.
+/// The `plan_file_path` is NOT persisted; it is recomputed from the session
+/// directory. An existing `plan.md` is kept so an in-progress session can
+/// load. Otherwise a new plan gets `plan-<ulid>.md` when that directory is
+/// already on disk.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanModeSnapshot {
     pub state: PlanModeState,
@@ -87,7 +114,8 @@ impl PlanModeTracker {
             awaiting_plan_approval: false,
             plan_decision_resolved: false,
             pending_activation: None,
-            plan_file_path: session_dir.join("plan.md"),
+            plan_file_path: plan_file_path_for(&session_dir),
+            workspace_root: None,
         }
     }
     /// `session_dir` is used to recompute `plan_file_path`.
@@ -112,8 +140,16 @@ impl PlanModeTracker {
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
             plan_decision_resolved: snapshot.plan_decision_resolved,
             pending_activation: None,
-            plan_file_path: session_dir.join("plan.md"),
+            plan_file_path: plan_file_path_for(&session_dir),
+            workspace_root: None,
         }
+    }
+    /// Workspace root the write gate uses. A home `.agents/plans/` or
+    /// `.agents/reports/` path outside this root may be written even when
+    /// plan.md does not name it. A path inside this root stays refused
+    /// except the session plan file.
+    pub(crate) fn set_workspace_root(&mut self, workspace_root: PathBuf) {
+        self.workspace_root = Some(workspace_root);
     }
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
     pub(crate) fn set_awaiting_plan_approval(&mut self, awaiting: bool) {
@@ -160,15 +196,29 @@ impl PlanModeTracker {
         &self.plan_file_path
     }
     /// Returns `true` when plan mode is active and this edit may proceed
-    /// without a permission prompt. plan.md stays the main plan file. A
-    /// living document the plan names under `.agents/reports/` is allowed
-    /// beside it. Other paths stay refused, and a Rust source edit stays
-    /// refused.
+    /// without a permission prompt. The session plan file stays writable.
+    /// A non-Rust write under the home reports directory
+    /// (`/home/hunter/.agents/reports/` or `~/.agents/reports/`) proceeds
+    /// even when plan.md does not name that path. The home plans directory
+    /// stays writable the same way. Replacing plan.md does not revoke either
+    /// directory. A living document the plan names under `.agents/reports/`
+    /// or `.agents/plans/` outside the workspace may still be written. A path
+    /// inside the workspace stays refused, except the session plan file. A
+    /// Rust source edit stays refused.
     pub(crate) fn should_auto_approve_edit(&self, edit_path: &Path) -> bool {
         if !self.is_active() {
             return false;
         }
+        if extension_is_rs(edit_path) {
+            return false;
+        }
         if is_plan_file_write(edit_path, &self.plan_file_path) {
+            return true;
+        }
+        if path_is_inside_workspace(edit_path, self.workspace_root.as_deref()) {
+            return false;
+        }
+        if is_home_agents_plans_or_reports(edit_path) {
             return true;
         }
         living_report_the_plan_names(edit_path, &self.plan_file_path)
@@ -327,6 +377,8 @@ pub(crate) fn plan_mode_reminder_full_template() -> &'static str {
     "\
 Plan mode is active. Do not make any edits or writes to the system.
 
+The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
+
 ## Plan File:
 ${%- if plan_has_content %}
 A plan file exists at ${{ plan_path }}. \
@@ -337,17 +389,24 @@ using the ${{ tools.by_kind.edit }} tool.
 ${%- endif %}
 
 You should build your plan by writing to or editing this file. \
-plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source.
+plan.md stays the main plan file. Every file under the home .agents/plans/ directory and every file under the home .agents/reports/ directory may be written while plan mode is active, even when this plan does not name that path. Replacing plan.md does not revoke that exemption. A path inside the workspace stays refused. Do not edit Rust source.
 
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
-to present it for approval."
+to present it for approval.
+
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
 }
 /// Static string for alternating turns (when `reminder_count` is odd) to save tokens.
 /// No MiniJinja placeholders: plan path and tool names are only in the full reminder.
 pub(crate) fn plan_mode_reminder_sparse_template() -> &'static str {
-    "Plan mode is still active. Do not make any edits or writes except the plan file, or a living document the plan names under .agents/reports/. Other paths stay refused."
+    "\
+Plan mode is still active.
+
+The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
+
+Do not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
 }
 /// Returns a MiniJinja template string injected when entering plan mode for the second or later time in the same session.
 /// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
@@ -355,22 +414,26 @@ pub(crate) fn plan_mode_reentry_reminder_template() -> &'static str {
     "\
 ## Returning to Plan Mode
 
+The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
+
 You are entering plan mode again after having previously exited it. \
 A plan file exists at ${{ plan_path }} from your previous planning session.
 
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
-to present it for approval."
+to present it for approval.
+
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
 }
-/// Rejection message for an edit plan mode refuses. plan.md stays the main
-/// plan file. A living document the plan names under `.agents/reports/` may
-/// also be written. Other paths, including Rust source, stay refused.
-///
-/// Render via `TemplateRenderer::render_with_extra()` with
-/// `{ "plan_path": "..." }`.
-pub(crate) fn plan_mode_edit_rejected_template() -> &'static str {
-    "Rejected: file edits are not allowed in plan mode. The main plan file is ${{ plan_path }}. A living document the plan names under .agents/reports/ may also be written. Other paths, including Rust source, stay refused."
+/// One complete sentence naming the full path plan mode blocked.
+/// The sentence does not shorten the path and does not say the tool
+/// misclassified it.
+pub(crate) fn plan_mode_blocked_write_sentence(edit_path: &Path) -> String {
+    format!(
+        "Rejected: plan mode blocked the write to {}.",
+        edit_path.display()
+    )
 }
 /// Returns a MiniJinja template string injected once after exiting plan mode (user-initiated exit via toggle).
 /// Contains no placeholders.
@@ -378,10 +441,169 @@ pub(crate) fn plan_mode_exit_reminder_template() -> &'static str {
     "\
 You have exited plan mode. You can now make edits, run tools, and take actions."
 }
+/// Session `plan.md` beside a tracker path. A thoughtful `plan-<ulid>.md`
+/// does not replace this file. When the tracker already points at `plan.md`,
+/// this is that same path.
+pub(crate) fn main_plan_file_path(plan_file: &Path) -> PathBuf {
+    if plan_file.file_name().and_then(|name| name.to_str()) == Some("plan.md") {
+        return plan_file.to_path_buf();
+    }
+    plan_file
+        .parent()
+        .map(|dir| dir.join("plan.md"))
+        .unwrap_or_else(|| plan_file.to_path_buf())
+}
 /// `target_path` is the absolute path the tool is trying to write to.
 /// `plan_file` is the absolute path from [`PlanModeTracker::plan_file_path`].
+/// The tracker path and `plan.md` in that same directory are both the plan
+/// file. A new session still uses `plan-<ulid>.md` when the directory has no
+/// `plan.md`. This does not put every new plan back on the single name
+/// `plan.md`.
 pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
-    target_path == plan_file
+    target_path == plan_file || target_path == main_plan_file_path(plan_file)
+}
+
+fn path_is_inside_workspace(edit_path: &Path, workspace_root: Option<&Path>) -> bool {
+    let Some(root) = workspace_root else {
+        return false;
+    };
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    edit_path.starts_with(root) && edit_path != root
+}
+
+fn has_agents_plans_or_reports(path: &Path) -> bool {
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component_is(component, ".agents")
+            && components
+                .next()
+                .is_some_and(|next| component_is(next, "reports") || component_is(next, "plans"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn component_is(component: std::path::Component<'_>, name: &str) -> bool {
+    matches!(component, std::path::Component::Normal(text) if text == name)
+}
+
+fn extension_is_rs(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
+/// The home plans directory and the home reports directory. On this machine
+/// the reports directory is `/home/hunter/.agents/reports/`. `~/.agents/reports/`
+/// is that same directory when `HOME` is `/home/hunter`, and a path that still
+/// starts with `~/.agents/reports/` counts too. Replacing plan.md does not
+/// revoke this. A reports path inside the workspace is refused before this runs.
+fn is_home_agents_plans_or_reports(edit_path: &Path) -> bool {
+    if is_under_directory(edit_path, Path::new("/home/hunter/.agents/reports"))
+        || is_under_directory(edit_path, Path::new("/home/hunter/.agents/plans"))
+    {
+        return true;
+    }
+    if let Some(home) = nonempty_home_dir() {
+        if is_under_directory(edit_path, &home.join(".agents").join("reports"))
+            || is_under_directory(edit_path, &home.join(".agents").join("plans"))
+        {
+            return true;
+        }
+    }
+    is_tilde_home_agents(edit_path)
+}
+
+fn nonempty_home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home))
+}
+
+fn is_under_directory(path: &Path, dir: &Path) -> bool {
+    path.starts_with(dir) && path != dir
+}
+
+fn is_tilde_home_agents(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    for prefix in ["~/.agents/reports/", "~/.agents/plans/"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if !rest.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A living document beside plan.md: the plan names this exact path, the
+/// path is under `.agents/reports/` or `.agents/plans/`, and it is not Rust
+/// source. The home directories are allowed before this runs, so those writes
+/// do not need the plan to name the path. The caller refuses a path inside
+/// the workspace before this runs.
+fn living_report_the_plan_names(edit_path: &Path, plan_file: &Path) -> bool {
+    if !has_agents_plans_or_reports(edit_path) || extension_is_rs(edit_path) {
+        return false;
+    }
+    let Some(path_token) = edit_path.to_str() else {
+        return false;
+    };
+    let Ok(plan_text) = std::fs::read_to_string(plan_file) else {
+        return false;
+    };
+    plan_text_names_bounded_path(&plan_text, path_token)
+}
+
+fn is_path_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '%')
+}
+
+fn plan_text_names_bounded_path(plan_text: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(rel) = plan_text[search_from..].find(path) {
+        let at = search_from + rel;
+        let before_ok = match plan_text[..at].chars().next_back() {
+            None => true,
+            Some(c) => !is_path_char(c),
+        };
+        let end = at + path.len();
+        if before_ok && path_token_does_not_continue(plan_text, end) {
+            return true;
+        }
+        let step = plan_text[at..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        search_from = at + step;
+    }
+    false
+}
+
+fn path_token_does_not_continue(text: &str, end: usize) -> bool {
+    let mut chars = text[end..].chars();
+    match chars.next() {
+        None => true,
+        Some('.') => match chars.next() {
+            None => true,
+            Some(c) if c.is_whitespace() => true,
+            Some(c) if is_path_char(c) => false,
+            Some(_) => true,
+        },
+        Some(c) if is_path_char(c) => false,
+        Some(_) => true,
+    }
 }
 
 /// A living document beside plan.md: the plan names this exact path, the
@@ -681,6 +903,91 @@ mod tests {
             Path::new("/home/user/.grok/sessions/proj/abc-123/plan.md")
         );
     }
+    /// Owed outcome: a new plan uses a thoughtful filename and does not
+    /// replace an older plan. Two plans in one session must keep two files.
+    /// Neither name is `plan.md`. An in-progress session that already has
+    /// `plan.md` still loads that file. Surmount named tests are Operator
+    /// contracts. Do not fit this assert to a fixed `plan.md` path or to
+    /// SpaceXAI paint.
+    #[test]
+    fn a_new_plan_uses_a_thoughtful_filename_and_does_not_replace_an_older_plan() {
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        assert!(
+            skill.contains("new plan uses a thoughtful filename"),
+            "the plan skill must say a new plan uses a thoughtful filename"
+        );
+        assert!(
+            skill.contains("does not replace an older plan"),
+            "the plan skill must say a new plan does not replace an older plan"
+        );
+        assert!(
+            skill.contains("existing Rust function"),
+            "the plan skill must say to call an existing Rust function"
+        );
+        assert!(
+            skill.contains("one-off Python or bash script"),
+            "the plan skill must forbid a one-off Python or bash script"
+        );
+        assert!(
+            skill.contains("Grok OSS vs SpaceXAI"),
+            "the plan skill must cite the FORK.md Grok OSS vs SpaceXAI rows"
+        );
+        assert!(
+            skill.contains("Do not fit a Surmount assert to upstream paint"),
+            "the plan skill must not tell an agent to fit a Surmount assert to upstream paint"
+        );
+
+        let session = tempfile::tempdir().expect("session dir");
+        let session_dir = session.path().to_path_buf();
+        let older = PlanModeTracker::new(session_dir.clone());
+        let older_path = older.plan_file_path().to_path_buf();
+        std::fs::write(&older_path, "# Older plan\nheader credits click\n").expect("write older");
+
+        let newer = PlanModeTracker::from_snapshot(session_dir, older.snapshot());
+        let newer_path = newer.plan_file_path().to_path_buf();
+        std::fs::write(&newer_path, "# Newer plan\nnamed plan files\n").expect("write newer");
+
+        let older_name = older_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let newer_name = newer_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        assert_ne!(
+            older_path, newer_path,
+            "two plans in one session must keep two files; both still go to {older_name}"
+        );
+        assert_ne!(
+            older_name, "plan.md",
+            "a new plan uses a thoughtful filename, not plan.md (got {older_name})"
+        );
+        assert_ne!(
+            newer_name, "plan.md",
+            "a new plan uses a thoughtful filename, not plan.md (got {newer_name})"
+        );
+        assert_ne!(
+            older_name, "secondary-plan.md",
+            "a fixed secondary name is not a thoughtful filename (got {older_name})"
+        );
+        let kept = std::fs::read_to_string(&older_path).unwrap_or_default();
+        assert!(
+            kept.contains("header credits click"),
+            "the older plan must stay. plan.md overwrote it: {kept}"
+        );
+        let files: Vec<_> = std::fs::read_dir(session.path())
+            .expect("read session")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(
+            files.len() >= 2,
+            "two plans in one session must keep two files, got {files:?}"
+        );
+    }
     #[test]
     fn compaction_resets_to_full_reminder() {
         let mut t = test_tracker();
@@ -814,7 +1121,7 @@ mod tests {
             true,
         );
         assert!(with_plan.contains(
-            "plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source."
+            "plan.md stays the main plan file. Every file under the home .agents/plans/ directory and every file under the home .agents/reports/ directory may be written while plan mode is active, even when this plan does not name that path. Replacing plan.md does not revoke that exemption. A path inside the workspace stays refused. Do not edit Rust source."
         ));
         let without_plan = render(
             &r,
@@ -866,7 +1173,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "Plan mode is still active. Do not make any edits or writes except the plan file, or a living document the plan names under .agents/reports/. Other paths stay refused."
+            "Plan mode is still active.\n\nThe first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\nDo not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
         );
         assert!(!text.contains("/tmp/plan.md"));
         assert!(!text.contains("exit_plan_mode"));
@@ -900,6 +1207,302 @@ mod tests {
         assert!(!text.contains("to clarify requirements"));
         assert!(!text.contains("${{"));
     }
+    /// Owed outcome: when the work has more than one contract and those
+    /// contracts do not share a file, the plan starts them together.
+    /// A check is the one builder job. The writers do not wait for it.
+    #[test]
+    fn plan_instructions_start_disjoint_contracts_together() {
+        const START_TOGETHER: &str = "When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.";
+        const SERIAL_ASSUMPTION: &str = "the product fix runs after the failing check";
+        let renderer = test_renderer();
+        let full = render(
+            &renderer,
+            plan_mode_reminder_full_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let reentry = render(
+            &renderer,
+            plan_mode_reentry_reminder_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        let entered = xai_grok_tools::types::output::ToolOutput::EnterPlanMode(
+            xai_grok_tools::types::output::EnterPlanModeOutput::Entered {
+                message: "entered-msg-token".into(),
+                plan_file_path: "/tmp/session/plan.md".into(),
+                tool_hints: xai_grok_tools::types::output::EnterPlanModeToolHints::default(),
+                plan_file_seed: xai_grok_tools::types::output::PlanFileSeedStatus::Empty,
+            },
+        )
+        .to_prompt_format();
+        for (which, loaded) in [
+            ("plan-mode reminder", full.as_str()),
+            ("plan-mode reentry reminder", reentry.as_str()),
+            ("bundled plan skill", skill.as_str()),
+            ("enter_plan_mode prompt", entered.as_str()),
+        ] {
+            assert!(
+                loaded.contains(START_TOGETHER),
+                "{which} must start disjoint contracts together. Owed outcome: when the work has more than one contract and those contracts do not share a file, the plan starts them together. Got: {loaded}"
+            );
+            assert!(
+                !loaded.contains(SERIAL_ASSUMPTION),
+                "{which} must not say the product fix runs after the failing check. Got: {loaded}"
+            );
+        }
+        assert!(
+            full.contains("Do not use ask_user_question multi-choice questionnaires"),
+            "plan-mode reminder must still ban the questionnaire modal"
+        );
+        assert!(
+            full.contains("to present it for approval"),
+            "plan-mode reminder must still present the plan for approval"
+        );
+        assert!(
+            skill.contains("Present is not Approve"),
+            "the plan skill must still say present is not Approve"
+        );
+        assert!(
+            skill.contains("Empty Enter does not approve"),
+            "the plan skill must still say empty Enter does not approve"
+        );
+        assert!(
+            skill.contains("Approve, Comment, Revise, and Exit"),
+            "the plan skill must still name Approve, Comment, Revise, and Exit"
+        );
+        assert!(
+            skill.contains("Do not use a questionnaire modal"),
+            "the plan skill must still ban the questionnaire modal"
+        );
+        assert!(
+            skill.contains("The Operator's words are the spec"),
+            "the plan skill must still say the Operator's words are the spec"
+        );
+    }
+    /// The first instruction after the title line names Read this first.
+    /// A question that appears only under a later heading is incomplete.
+    #[test]
+    fn plan_reminder_puts_open_questions_in_read_this_first() {
+        const SENTENCE: &str = "The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.";
+        let renderer = test_renderer();
+        let full = render(
+            &renderer,
+            plan_mode_reminder_full_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let sparse = render(
+            &renderer,
+            plan_mode_reminder_sparse_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let reentry = render(
+            &renderer,
+            plan_mode_reentry_reminder_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        let entered = xai_grok_tools::types::output::ToolOutput::EnterPlanMode(
+            xai_grok_tools::types::output::EnterPlanModeOutput::Entered {
+                message: "entered-msg-token".into(),
+                plan_file_path: "/tmp/session/plan.md".into(),
+                tool_hints: xai_grok_tools::types::output::EnterPlanModeToolHints::default(),
+                plan_file_seed: xai_grok_tools::types::output::PlanFileSeedStatus::Empty,
+            },
+        )
+        .to_prompt_format();
+        for (which, loaded) in [
+            ("plan-mode reminder", full.as_str()),
+            ("plan-mode sparse reminder", sparse.as_str()),
+            ("plan-mode reentry reminder", reentry.as_str()),
+            ("bundled plan skill", skill.as_str()),
+            ("enter_plan_mode prompt", entered.as_str()),
+        ] {
+            let first = first_instruction_after_title(loaded);
+            assert_eq!(
+                first, SENTENCE,
+                "{which} must put the Read this first sentence first after the title line. Got first instruction: {first}"
+            );
+            assert!(
+                loaded.contains(SENTENCE),
+                "{which} must contain the Read this first sentence"
+            );
+        }
+        for (which, loaded) in [
+            ("plan-mode reminder", full.as_str()),
+            ("plan-mode reentry reminder", reentry.as_str()),
+        ] {
+            let sentence_at = loaded
+                .find(SENTENCE)
+                .unwrap_or_else(|| panic!("{which} dropped the Read this first sentence"));
+            let older_at = loaded
+                .find("Put open questions as plain bullets")
+                .unwrap_or_else(|| panic!("{which} dropped Put open questions as plain bullets"));
+            assert!(
+                sentence_at < older_at,
+                "{which} must put the Read this first sentence before Put open questions as plain bullets"
+            );
+        }
+    }
+    /// A plan that names `/tmp/home/.agents/plans/example.md` is writable when
+    /// the workspace root is `/tmp/workspace`.
+    #[test]
+    fn named_home_agents_plans_path_is_writable_in_plan_mode() {
+        let named = Path::new("/tmp/home/.agents/plans/example.md");
+        let workspace = Path::new("/tmp/workspace");
+        let tracker = active_tracker_whose_plan_names(named, workspace);
+        assert!(
+            tracker.should_auto_approve_edit(named),
+            "a plan that names {} must be writable when the workspace root is {}",
+            named.display(),
+            workspace.display()
+        );
+    }
+    /// A reports path inside the workspace stays refused, even when the plan
+    /// names it.
+    #[test]
+    fn repo_agents_reports_path_stays_refused_in_plan_mode() {
+        let named = Path::new("/tmp/workspace/.agents/reports/note.md");
+        let workspace = Path::new("/tmp/workspace");
+        let tracker = active_tracker_whose_plan_names(named, workspace);
+        assert!(
+            !tracker.should_auto_approve_edit(named),
+            "{} stays refused when the workspace root is {}",
+            named.display(),
+            workspace.display()
+        );
+    }
+    /// A write under `/home/hunter/.agents/reports/` and a write under
+    /// `/home/hunter/.agents/plans/` stay allowed after plan.md is replaced
+    /// with text that does not name either path. A path inside the repo
+    /// stays refused.
+    #[test]
+    fn plan_mode_home_report_write_survives_replacing_the_plan() {
+        let report = Path::new("/home/hunter/.agents/reports/plan-mode-home-report-probe.md");
+        let home_plan = Path::new("/home/hunter/.agents/plans/plan-mode-home-plan-probe.md");
+        let workspace = Path::new("/home/hunter/Projects/surmount/grok-build");
+        let repo_path = workspace.join("RESIDUAL.md");
+        let dir = tempfile::tempdir().expect("session dir");
+        let session = dir.path().to_path_buf();
+        let plan_path = session.join("plan.md");
+        std::fs::write(
+            &plan_path,
+            format!(
+                "# Plan\n\nThe report is {}.\nThe plan note is {}.\n",
+                report.display(),
+                home_plan.display()
+            ),
+        )
+        .expect("write plan");
+        let mut tracker = PlanModeTracker::new(session);
+        tracker.set_workspace_root(workspace.to_path_buf());
+        assert!(tracker.enter_pending());
+        assert!(tracker.activate());
+        assert_eq!(
+            tracker.plan_file_path(),
+            plan_path.as_path(),
+            "the tracker must read the plan file that this test replaces"
+        );
+        let replacement =
+            "# Plan\n\nShip the composer outline. This file does not point at a home report.\n";
+        assert!(!replacement.contains("/home/hunter/.agents/reports/"));
+        assert!(!replacement.contains("plan-mode-home-report-probe.md"));
+        assert!(!replacement.contains("/home/hunter/.agents/plans/"));
+        assert!(!replacement.contains("plan-mode-home-plan-probe.md"));
+        std::fs::write(&plan_path, replacement).expect("replace plan");
+        let plan_text = std::fs::read_to_string(&plan_path).expect("read replaced plan");
+        assert!(!plan_text.contains("/home/hunter/.agents/reports/"));
+        assert!(!plan_text.contains("plan-mode-home-report-probe.md"));
+        assert!(!plan_text.contains("/home/hunter/.agents/plans/"));
+        assert!(!plan_text.contains("plan-mode-home-plan-probe.md"));
+        assert!(
+            tracker.should_auto_approve_edit(report),
+            "home report write was blocked after the plan text no longer contains the path: {}",
+            report.display()
+        );
+        assert!(
+            tracker.should_auto_approve_edit(home_plan),
+            "home plans write was blocked after the plan text no longer contains the path: {}",
+            home_plan.display()
+        );
+        assert!(
+            tracker.should_auto_approve_edit(Path::new(
+                "~/.agents/reports/plan-mode-home-report-probe.md"
+            )),
+            "a ~/.agents/reports/ write stays allowed when the plan does not name it"
+        );
+        assert!(
+            !tracker.should_auto_approve_edit(&repo_path),
+            "{} stays refused while plan mode is on",
+            repo_path.display()
+        );
+        let refused = plan_mode_blocked_write_sentence(&repo_path);
+        assert!(
+            refused.contains(&repo_path.display().to_string()),
+            "refusal must name the full path: {refused}"
+        );
+        assert!(
+            refused.ends_with('.'),
+            "refusal must be one complete sentence: {refused}"
+        );
+        assert!(!refused.contains("misclassified"), "{refused}");
+        assert!(
+            !refused.contains("under ~/. "),
+            "refusal must not stop at a broken home prefix: {refused}"
+        );
+        assert_eq!(
+            refused.matches(". ").count(),
+            0,
+            "refusal must be one sentence, not several: {refused}"
+        );
+    }
+    fn body_after_frontmatter(text: &str) -> &str {
+        let start = text.trim_start();
+        let Some(rest) = start
+            .strip_prefix("---\n")
+            .or_else(|| start.strip_prefix("---\r\n"))
+        else {
+            return text;
+        };
+        if let Some(end) = rest.find("\n---\n") {
+            return rest[end + "\n---\n".len()..].trim_start();
+        }
+        if let Some(end) = rest.find("\n---\r\n") {
+            return rest[end + "\n---\r\n".len()..].trim_start();
+        }
+        text
+    }
+    fn first_instruction_after_title(text: &str) -> &str {
+        let body = body_after_frontmatter(text);
+        let mut lines = body.lines().filter(|line| !line.trim().is_empty());
+        let _title = lines.next().unwrap_or("");
+        lines.next().map(str::trim).unwrap_or("")
+    }
+    fn active_tracker_whose_plan_names(named: &Path, workspace: &Path) -> PlanModeTracker {
+        let dir = tempfile::tempdir().expect("session dir");
+        let session = dir.path().to_path_buf();
+        std::fs::write(
+            session.join("plan.md"),
+            format!("# Plan\n\nThe living file is {}.\n", named.display()),
+        )
+        .expect("write plan");
+        let mut tracker = PlanModeTracker::new(session);
+        tracker.set_workspace_root(workspace.to_path_buf());
+        assert!(tracker.enter_pending());
+        assert!(tracker.activate());
+        let _persist = dir.keep();
+        tracker
+    }
     #[test]
     fn reentry_reminder_with_custom_names() {
         let r = custom_renderer();
@@ -928,19 +1531,14 @@ mod tests {
     }
     #[test]
     fn edit_rejected_template_renders() {
-        let r = test_renderer();
-        let text = render(
-            &r,
-            plan_mode_edit_rejected_template(),
-            "/tmp/session/plan.md",
-            false,
-        );
+        let path = Path::new("/tmp/workspace/src/lib.rs");
+        let text = plan_mode_blocked_write_sentence(path);
         assert_eq!(
             text,
-            "Rejected: file edits are not allowed in plan mode. The main plan file is /tmp/session/plan.md. A living document the plan names under .agents/reports/ may also be written. Other paths, including Rust source, stay refused."
+            "Rejected: plan mode blocked the write to /tmp/workspace/src/lib.rs."
         );
-        assert!(text.contains("/tmp/session/plan.md"));
-        assert!(!text.contains("${{"));
+        assert!(!text.contains("under ~/."));
+        assert!(!text.contains("misclassified"));
     }
     #[test]
     fn templates_are_static_with_no_hardcoded_tool_names() {
@@ -957,7 +1555,6 @@ mod tests {
             plan_mode_reminder_sparse_template(),
             plan_mode_reentry_reminder_template(),
             plan_mode_exit_reminder_template(),
-            plan_mode_edit_rejected_template(),
         ];
         for template in &templates {
             for name in &hardcoded_names {
@@ -979,6 +1576,25 @@ mod tests {
         let plan = Path::new("/home/user/.grok/sessions/proj/abc/plan.md");
         let target = Path::new("/home/user/project/src/main.rs");
         assert!(!is_plan_file_write(target, plan));
+    }
+    /// A thoughtful `plan-<ulid>.md` stays the tracker path. `plan.md` in that
+    /// same directory is still the main plan file the edit gate must allow,
+    /// and the rejection must name that path.
+    #[test]
+    fn is_plan_file_write_accepts_plan_md_beside_a_thoughtful_name() {
+        let thoughtful = Path::new("/tmp/test-session/plan-01M4EQ09QMP7BG3MK6TNEKNT9P.md");
+        let main = Path::new("/tmp/test-session/plan.md");
+        assert!(is_plan_file_write(thoughtful, thoughtful));
+        assert!(
+            is_plan_file_write(main, thoughtful),
+            "plan.md beside the tracker path is the main plan file"
+        );
+        assert!(
+            !is_plan_file_write(Path::new("/tmp/src/main.rs"), thoughtful),
+            "a path outside the session plan file stays refused"
+        );
+        assert_eq!(main_plan_file_path(thoughtful), main);
+        assert_eq!(main_plan_file_path(main), main);
     }
     #[test]
     fn is_markdown_file_path_recognizes_extensions() {

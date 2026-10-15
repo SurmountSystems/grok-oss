@@ -282,6 +282,61 @@ mod tests {
         );
     }
 
+    // Grok OSS: status tables were printing not_fetched for nested tokens
+    // because no skill named local_usage_events_for_session. The reconcile
+    // cell is that row's output_tokens. A null is not 0 and is not the
+    // standing estimate. Billing Credits card wire not_fetched is a
+    // different meter and stays.
+    #[test]
+    fn what_and_subagent_skills_read_output_tokens_not_a_null_zero() {
+        for name in ["what", "subagent"] {
+            let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../xai-grok-bundle/skills/{name}/SKILL.md"));
+            let skill = std::fs::read_to_string(&skill_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", skill_path.display()));
+            let skill_body = skill
+                .split_once("\n---\n")
+                .map(|(_, body)| body)
+                .unwrap_or(skill.as_str());
+            assert!(
+                skill_body.contains("local_usage_events_for_session"),
+                "{name} skill must name local_usage_events_for_session; deleting the reader and only dropping not_fetched must fail; got {skill}"
+            );
+            assert!(
+                skill_body.contains("A null `output_tokens` is not printed as `0`"),
+                "{name} skill must say a null output_tokens is not printed as 0; got {skill}"
+            );
+            assert!(
+                skill_body.contains("not `total_tokens`"),
+                "{name} skill reconcile cell must not be total_tokens; got {skill}"
+            );
+            assert!(
+                skill_body.contains("not the standing estimate"),
+                "{name} skill must not copy the standing estimate; got {skill}"
+            );
+            assert!(
+                skill_body.contains("`reasoning_tokens` and is not added again"),
+                "{name} skill must not add chain of thought again; got {skill}"
+            );
+            assert!(
+                skill_body.contains("output total was not stored"),
+                "{name} skill must say the output total was not stored when null; got {skill}"
+            );
+            assert!(
+                skill_body.contains("Do not write `not_fetched` when `output_tokens` is present"),
+                "{name} skill must not teach not_fetched when output_tokens is present; got {skill}"
+            );
+            assert!(
+                skill_body.contains("Leave the Billing Credits card wire `not_fetched` alone"),
+                "{name} skill must leave the Billing Credits card wire alone; got {skill}"
+            );
+            assert!(
+                skill_body.contains("Do not use a `sqlite3` one-liner"),
+                "{name} skill must call the Rust reader, not sqlite3; got {skill}"
+            );
+        }
+    }
+
     #[test]
     fn what_optional_focus_is_in_injected_prompt() {
         let models = ModelState::default();

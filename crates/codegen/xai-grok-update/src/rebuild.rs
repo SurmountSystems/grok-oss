@@ -1589,6 +1589,36 @@ pub fn read_rebuild_relaunch_request_in(grok_home: &Path) -> Option<RebuildRelau
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Re-exec this process onto the installed binary recorded by `/rebuild`.
+/// Returns false when there is no fresh request. On Unix success this function does not return.
+pub fn exec_installed_binary_for_peer_rebuild() -> bool {
+    let Some(request) = read_rebuild_relaunch_request() else {
+        return false;
+    };
+    if !request.installed_exe.is_file() {
+        return false;
+    }
+    if !peer_rebuild_request_is_actionable(&request, now_unix_secs()) {
+        return false;
+    }
+    let mut cmd = Command::new(&request.installed_exe);
+    cmd.args(std::env::args_os().skip(1));
+    cmd.env("GROK_REBUILD_RELAUNCH", "1");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let _err = cmd.exec();
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        if cmd.spawn().is_ok() {
+            std::process::exit(0);
+        }
+        false
+    }
+}
+
 /// Soft-signal every other live product TUI in `active_sessions` to re-exec.
 ///
 /// Writes the request first, then delivers `SIGUSR1` (best-effort). The

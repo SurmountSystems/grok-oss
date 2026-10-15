@@ -982,6 +982,75 @@ Prefer merge: true upsert only (never casually wipe with merge: false). Fibonacc
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         Expr::True
     }
+
+    /// The non-Pi finalized contract is the short list plus id/content/status.
+    /// Runtime still accepts priority, meta, and size. Those fields stay off
+    /// the advertised schema so the checked-in snapshot stays exact.
+    fn versioned_definition(
+        &self,
+        contract_version: Option<&str>,
+        client_name: &str,
+        description_override: Option<&str>,
+        renderer: &crate::types::template_renderer::TemplateRenderer,
+        param_map: &std::collections::HashMap<String, String>,
+        input_schema: &serde_json::Value,
+        effective_params: &serde_json::Value,
+    ) -> crate::types::definition::ToolDefinition {
+        let _ = (contract_version, input_schema, effective_params);
+        let description = if let Some(override_text) = description_override {
+            renderer.render(override_text).unwrap_or_else(|err| {
+                crate::types::template_renderer::strip_markers_on_render_failure(
+                    override_text,
+                    &err,
+                )
+            })
+        } else {
+            "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.".to_string()
+        };
+        let mut parameters = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "required": ["todos"],
+            "type": "object",
+            "properties": {
+                "merge": {
+                    "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
+                    "type": "boolean",
+                    "default": true
+                },
+                "todos": {
+                    "description": "Array of todo items to write to the workspace",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "description": "Unique identifier for the todo item",
+                                "type": "string"
+                            },
+                            "content": {
+                                "description": "The description/content of the todo item",
+                                "type": ["string", "null"]
+                            },
+                            "status": {
+                                "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
+                                "type": ["string", "null"],
+                                "enum": ["pending", "in_progress", "completed", "cancelled", null]
+                            }
+                        },
+                        "required": ["id"]
+                    }
+                }
+            }
+        });
+        if !param_map.is_empty() {
+            parameters = crate::util::remap::remap_schema_properties(&parameters, param_map);
+        }
+        crate::types::definition::ToolDefinition::function(
+            client_name,
+            Some(description),
+            parameters,
+        )
+    }
 }
 
 impl xai_tool_runtime::Tool for TodoWriteTool {

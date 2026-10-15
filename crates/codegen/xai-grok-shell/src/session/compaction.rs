@@ -182,6 +182,15 @@ impl SessionActor {
         self.startup_hints.is_subagent && self.tool_context.subagent_depth >= 2
     }
 
+    /// Ordinary L2 coordinator: a subagent at depth 1 that is not a once-run
+    /// nested role. This is not [`Self::never_auto_compact`]. An ordinary L2
+    /// still AUTO compacts itself at 95 percent of the nested 200k window.
+    pub(crate) fn is_ordinary_l2_coordinator(&self) -> bool {
+        self.startup_hints.is_subagent
+            && !self.startup_hints.once_run
+            && self.tool_context.subagent_depth == 1
+    }
+
     /// Goal Plan Writer and other disposable once-run nested roles. Forked
     /// from L1 they are still L2 depth; they must not compact-and-continue.
     pub(crate) fn is_once_run_nested(&self) -> bool {
@@ -195,19 +204,56 @@ impl SessionActor {
         self.is_l3_session() || self.is_once_run_nested()
     }
 
+    /// Sampling window this session may use.
+    ///
+    /// Nested L2/L3 never exceed 200k, even when the stored catalog window
+    /// is 500k. L1 keeps the stored catalog window.
+    pub(crate) async fn effective_sampling_window(&self) -> Option<std::num::NonZeroU64> {
+        let cfg = self.chat_state_handle.get_sampling_config().await?;
+        let effective = crate::util::config::session_sampling_window(
+            cfg.context_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        std::num::NonZeroU64::new(effective).or(Some(cfg.context_window))
+    }
+
+    /// Stored catalog window is larger than the nested 200k cap. Shrink it.
+    /// L1 is unchanged.
+    pub(crate) async fn clamp_stored_sampling_window_for_nested(&self) {
+        if !self.startup_hints.is_subagent {
+            return;
+        }
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return;
+        };
+        let capped = crate::util::config::session_sampling_window(cfg.context_window.get(), true);
+        let Some(capped) = std::num::NonZeroU64::new(capped) else {
+            return;
+        };
+        if capped == cfg.context_window {
+            return;
+        }
+        self.chat_state_handle
+            .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+                context_window: capped,
+                ..cfg
+            });
+    }
+
     /// True when an L3 or once-run nested role has a painted model total
     /// (`get_total_tokens`) at or over its sampling window. The byte
     /// estimate is not this gate. A painted total under the window must
     /// fall through to the sampler. Callers must end the run, not
     /// `run_compact_only`. The specialist still must not compact itself.
+    /// The window is the nested 200k cap when the stored catalog is larger.
     pub(crate) async fn l3_nested_window_is_full(&self) -> bool {
         if !self.never_auto_compact() {
             return false;
         }
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw) = self.effective_sampling_window().await else {
             return false;
         };
-        let cw = cfg.context_window.get();
+        let cw = cw.get();
         if cw == 0 {
             return false;
         }
@@ -215,11 +261,12 @@ impl SessionActor {
     }
 
     /// True when used tokens are at or over this session's sampling window.
+    /// Nested L2/L3 use the 200k cap. L1 uses the stored catalog window.
     pub(crate) async fn sampling_window_is_full(&self) -> bool {
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw) = self.effective_sampling_window().await else {
             return false;
         };
-        let cw = cfg.context_window.get();
+        let cw = cw.get();
         if cw == 0 {
             return false;
         }
@@ -236,10 +283,10 @@ impl SessionActor {
         if self.compaction.is_suppressed() {
             return false;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let Some(cw) = sampling_cfg.as_ref().map(|c| c.context_window.get()) else {
+        let Some(cw_nz) = self.effective_sampling_window().await else {
             return false;
         };
+        let cw = cw_nz.get();
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         // Prefire lead is percent-based; when the user pinned an absolute
         // token threshold, derive an effective percent of the live window.
@@ -273,7 +320,7 @@ impl SessionActor {
             }
         }
         let _guard = InFlightGuard(&self.compaction.prefire);
-        let run = self.run_prefire_pass1_inner().await;
+        let run = Box::pin(self.run_prefire_pass1_inner()).await;
         let span = tracing::Span::current();
         span.record("compaction_prefire_outcome", run.outcome.as_ref());
         if let Some(v) = run.prefix_len {
@@ -592,6 +639,41 @@ fn project_preserved_reseed_tokens(
     let ratio = tokens_before as f64 / full_conv_estimate.max(1) as f64;
     ((preserved_estimate as f64 * ratio).round() as u64).min(tokens_before)
 }
+
+/// What an ordinary L2 does with a specialist near the nested window.
+pub(crate) enum L2SpecialistContextChoice<F> {
+    /// Compact that specialist. The specialist turn loop does not choose this.
+    Compact,
+    /// Do not compact. Start a fresh L3 context instead.
+    Fresh(FreshL3Start<F>),
+}
+
+/// The fresh arm. `resume_from` is a completed specialist id when the new
+/// context continues that id, and `None` when the context is new.
+/// `spawn_session_on_thread` is the call that starts the new session.
+/// This arm does not compact and does not open a database.
+pub(crate) struct FreshL3Start<F> {
+    pub resume_from: Option<String>,
+    pub spawn_session_on_thread: F,
+}
+
+pub(crate) type FreshL3Session = (super::SessionInitResult, super::SessionThread);
+
+async fn start_fresh_l3_context<F, Fut>(
+    fresh: FreshL3Start<F>,
+) -> Result<FreshL3Session, acp::Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<FreshL3Session, acp::Error>>,
+{
+    let resume_from = fresh.resume_from;
+    tracing::info!(
+        resume_from = resume_from.as_deref().unwrap_or(""),
+        "L2 started a fresh L3 context"
+    );
+    (fresh.spawn_session_on_thread)().await
+}
+
 impl SessionActor {
     /// Where the transcript would be, without asking the filesystem: callers on a hot path do the `exists()` themselves, off the actor's thread.
     pub(crate) fn transcript_path(&self) -> std::path::PathBuf {
@@ -687,13 +769,14 @@ impl SessionActor {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
             .await;
-        if let Err(e) = self
-            .run_compact_inner(
-                None,
-                xai_grok_telemetry::events::CompactionTrigger::Manual,
-                false,
-            )
-            .await
+        // Heap-build this future. The compact state machine is larger than the
+        // default 2 MB test stack, so constructing it inline aborts the turn.
+        if let Err(e) = Box::pin(self.run_compact_inner(
+            None,
+            xai_grok_telemetry::events::CompactionTrigger::Manual,
+            false,
+        ))
+        .await
         {
             let span = tracing::Span::current();
             span.record("success", false);
@@ -2215,7 +2298,9 @@ impl SessionActor {
     }
     /// Returns true when an ordinary session should compact after this sampling error.
     /// An L3 or a once-run nested role returns false and must not CompactAndResubmit.
-    /// Otherwise this is [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
+    /// Missing model metadata is not a reason to skip: the overflow estimate uses
+    /// the session sampling window. This is
+    /// [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
     /// Called from `handle_sampling_failure` with the `SamplingErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
@@ -2228,6 +2313,9 @@ impl SessionActor {
         if self.compaction.is_suppressed() {
             return false;
         }
+        // No model metadata: still compact when tracked tokens are over the
+        // session sampling window. `estimate_exceeds_error_context_window`
+        // uses that window and does not treat missing metadata as false.
         self.estimate_exceeds_error_context_window(err).await
     }
     /// The request's token estimate is at or over the tighter of the session
@@ -2241,10 +2329,9 @@ impl SessionActor {
     ) -> bool {
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let session_window = self
-            .chat_state_handle
-            .get_sampling_config()
+            .effective_sampling_window()
             .await
-            .map(|c| c.context_window.get())
+            .map(|cw| cw.get())
             .filter(|cw| *cw > 0)
             .unwrap_or(0);
         let error_window = err
@@ -2271,10 +2358,10 @@ impl SessionActor {
         if self.tool_context.task_output_token_budget.is_some() {
             return Ok(());
         }
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw_nz) = self.effective_sampling_window().await else {
             return Ok(());
         };
-        let cw = cfg.context_window.get();
+        let cw = cw_nz.get();
         let used = self.chat_state_handle.get_estimated_total_tokens().await;
         if cw == 0 || used < cw {
             return Ok(());
@@ -2326,10 +2413,9 @@ impl SessionActor {
             return None;
         }
         let cw = self
-            .chat_state_handle
-            .get_sampling_config()
+            .effective_sampling_window()
             .await
-            .map(|cfg| cfg.context_window.get())
+            .map(|cw| cw.get())
             .filter(|cw| *cw > 0)?;
         let tokens_used = self.chat_state_handle.get_total_tokens().await;
         let ratio = tokens_used.saturating_mul(100) / cw;
@@ -2343,6 +2429,38 @@ impl SessionActor {
             percentage,
             reason_override: None,
         })
+    }
+
+    /// An ordinary L2 chooses one arm for a specialist it spawned.
+    /// Compact calls `compact_specialist_initiated_by_coordinator` and then
+    /// compacts that specialist. Fresh does not compact. It starts a new L3
+    /// context. The specialist turn loop must not call this.
+    pub(crate) async fn l2_compact_or_fresh_l3<F, Fut>(
+        &self,
+        specialist: &Arc<Self>,
+        choice: L2SpecialistContextChoice<F>,
+    ) -> Result<Option<FreshL3Session>, acp::Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<FreshL3Session, acp::Error>>,
+    {
+        if !self.is_ordinary_l2_coordinator() {
+            return Ok(None);
+        }
+        match choice {
+            L2SpecialistContextChoice::Compact => {
+                if let Some(trigger) = specialist
+                    .compact_specialist_initiated_by_coordinator()
+                    .await
+                {
+                    Box::pin(specialist.run_compact_only(trigger, false)).await?;
+                }
+                Ok(None)
+            }
+            L2SpecialistContextChoice::Fresh(fresh) => {
+                Ok(Some(start_fresh_l3_context(fresh).await?))
+            }
+        }
     }
 
     /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`
@@ -2361,7 +2479,12 @@ impl SessionActor {
             return None;
         }
         let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
+        let stored_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
+        let effective_tokens = crate::util::config::session_sampling_window(
+            stored_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        let context_window = std::num::NonZeroU64::new(effective_tokens).unwrap_or(stored_window);
         let cw = context_window.get();
         let model = sampling_cfg
             .as_ref()
@@ -2419,8 +2542,11 @@ impl SessionActor {
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let cfg = self.chat_state_handle.get_sampling_config().await?;
-        let cw = cfg.context_window.get();
-        if estimated_total <= cw {
+        let cw = crate::util::config::session_sampling_window(
+            cfg.context_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        if cw == 0 || estimated_total <= cw {
             return None;
         }
         let overflow = estimated_total.saturating_sub(cw);
@@ -2467,11 +2593,15 @@ impl SessionActor {
         self.compaction
             .last_auto_compact_saved_too_little
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        if prev.context_window <= cfg.context_window.get() {
+        let live = self
+            .effective_sampling_window()
+            .await
+            .unwrap_or(cfg.context_window);
+        if prev.context_window <= live.get() {
             return Ok(());
         }
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let Some(trigger_info) = self.should_auto_compact(total_tokens, cfg.context_window) else {
+        let Some(trigger_info) = self.should_auto_compact(total_tokens, live) else {
             return Ok(());
         };
         tracing::info!(
@@ -2479,10 +2609,10 @@ impl SessionActor {
             prev.model_slug,
             prev.context_window,
             cfg.model,
-            cfg.context_window.get(),
+            live.get(),
             trigger_info.percentage,
         );
-        if let Err(e) = self.run_compact_only(trigger_info, false).await {
+        if let Err(e) = Box::pin(self.run_compact_only(trigger_info, false)).await {
             tracing::error!(error = %e, "Model-switch compaction failed");
             if Self::is_auth_compact_error(&e) {
                 return Err(self.surface_compact_auth_failure(e).await);
@@ -2566,13 +2696,13 @@ impl SessionActor {
         )
         .await;
         let compact_start = std::time::Instant::now();
-        let result = self
-            .run_compact_inner(
-                None,
-                xai_grok_telemetry::events::CompactionTrigger::Auto,
-                lossy_input,
-            )
-            .await;
+        // Same heap build as manual compact: do not construct this future inline.
+        let result = Box::pin(self.run_compact_inner(
+            None,
+            xai_grok_telemetry::events::CompactionTrigger::Auto,
+            lossy_input,
+        ))
+        .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
             Ok(()) => {

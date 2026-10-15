@@ -1234,7 +1234,7 @@ pub(super) async fn run_session(
                         SessionCommand::CompactSession { respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let compact_session = s.run_compact().await;
+                                let compact_session = Box::pin(s.run_compact()).await;
                                 let _ = respond_to.send(compact_session);
                             });
                         }

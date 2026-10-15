@@ -2375,28 +2375,91 @@ fn alt_arrow_navigation_splits_on_hyphen() {
 
 #[test]
 fn cursor_at_wrap_boundary_shows_on_next_line() {
-    // When typing fills an entire line, the cursor sits at the exact wrap
-    // boundary.  It should be reported on the *next* visual line at col 0,
-    // not at col == width (which is the invisible right border).
+    // A cursor that is still on a full edited row stays on that row, on the
+    // last content cell. A cursor byte that is already the start of the next
+    // soft-wrapped segment stays at column 0 of that next visual line.
 
-    // Case 1: text exactly fills one line — cursor at text.len()
+    // Case 1: text exactly fills one line. Cursor at text.len() still belongs
+    // to that row. Do not draw a blank row under it.
     let mut t = ta_with("abcde");
     let area = Rect::new(0, 0, 5, 3); // width 5
     t.set_cursor(5); // cursor right after 'e'
 
     let (x, y) = t.cursor_pos(area).unwrap();
-    assert_eq!(x, 0, "cursor x should be 0 (start of virtual next line)");
-    assert_eq!(y, 1, "cursor y should be 1 (next line)");
+    assert_eq!(y, 0, "cursor stays on the edited row");
+    assert_eq!(
+        x, 4,
+        "cursor x is the last content cell, not column 0 of the next row"
+    );
 
-    // Case 2: text wraps — cursor at the boundary between two wrapped lines
+    // Case 2: text wraps. Cursor byte 5 is the start of "fgh", so it is
+    // column 0 of the second visual line.
     let mut t = ta_with("abcdefgh");
     let area = Rect::new(0, 0, 5, 3); // width 5, wraps after 'e'
-    // cursor at position 5 = start of "fgh" = should be col 0, row 1
     t.set_cursor(5);
 
     let (x, y) = t.cursor_pos(area).unwrap();
     assert_eq!(x, 0, "cursor at wrap point should be col 0 of next line");
     assert_eq!(y, 1, "cursor at wrap point should be on second visual line");
+}
+
+#[test]
+fn full_visual_row_does_not_place_the_caret_at_column_0_of_an_empty_following_row() {
+    // A full visual row does not place the caret at column 0 of an empty
+    // following row. The block stays on the edited row. The next sentence
+    // sits under that blank row.
+    let edited = "abcde";
+    let text = "abcde\n\nNext sentence.";
+    let mut t = ta_with(text);
+    t.show_scrollbar = false;
+    let newline = text.find('\n').expect("edited line ends at a newline");
+    assert_eq!(newline, edited.len());
+    // The newline after the full row: this row still owns the cursor, and
+    // the column is the content width (`col >= tw`).
+    t.set_cursor(newline);
+
+    let width = edited.len() as u16;
+    let area = Rect::new(2, 3, width, 6);
+    let cursor = t.cursor();
+    let lines: Vec<_> = t.wrapped_lines(width).iter().cloned().collect();
+    let edited_row =
+        TextArea::wrapped_line_index_by_start(&lines, cursor).expect("cursor maps to a visual row");
+    assert_eq!(edited_row, 0, "the edited row still owns the cursor byte");
+    let edited_line = lines.first().expect("edited visual row");
+    assert!(
+        t.display_width_of_range(edited_line.start, cursor) >= width as usize,
+        "the cursor column is at the content width"
+    );
+    let blank = lines
+        .get(edited_row + 1)
+        .expect("a blank row follows the edited line");
+    assert_eq!(
+        blank.start, blank.end,
+        "the following row is empty, above the next sentence: {lines:?}"
+    );
+    let sentence = lines
+        .get(edited_row + 2)
+        .expect("the next sentence sits under the blank row");
+    let sentence_text = t.text().get(sentence.start..sentence.end).unwrap_or("");
+    assert!(
+        sentence_text.starts_with("Next"),
+        "the next sentence sits under the blank row, got {sentence_text:?} lines {lines:?}"
+    );
+
+    let (x, y) = t
+        .cursor_pos_with_state(area, TextAreaState::default())
+        .unwrap();
+    assert_eq!(y, area.y, "caret stays on the edited visual row");
+    assert_eq!(
+        x,
+        area.x + width - 1,
+        "caret is on the last content cell of the edited row"
+    );
+    assert_ne!(
+        (x, y),
+        (area.x, area.y + 1),
+        "not column 0 of the empty following row"
+    );
 }
 
 #[test]
@@ -6655,7 +6718,7 @@ fn cmd_c_on_zero_width_selection_clears_it() {
     assert_eq!(t.take_clipboard(), None);
 }
 
-/// Wrapped-row index of the cursor; `cursor_pos` would report a phantom row for a full last row.
+/// Wrapped-row index of the cursor byte (the row `wrapped_line_index_by_start` selects).
 fn cursor_row(t: &TextArea, width: u16) -> usize {
     TextArea::wrapped_line_index_by_start(&t.wrapped_lines(width), t.cursor()).unwrap()
 }

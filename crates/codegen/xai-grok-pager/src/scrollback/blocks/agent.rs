@@ -146,10 +146,13 @@ impl AgentMessageBlock {
 impl BlockContent for AgentMessageBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         // Common path: no diagrams (or raw mode) renders plain markdown, with no affordance machinery and no extra output rebuild
-        if ctx.raw || self.mermaid.is_empty() {
-            return self.content.output(ctx.width as usize);
-        }
-        self.rendered_output(ctx).0
+        let mut out = if ctx.raw || self.mermaid.is_empty() {
+            self.content.output(ctx.width as usize)
+        } else {
+            self.rendered_output(ctx).0
+        };
+        super::append_bubble_copy_button(&mut out.lines, ctx);
+        out
     }
 
     fn diagram_affordances(&self, ctx: &BlockContext) -> Vec<mermaid_content::DiagramAffordance> {
@@ -178,10 +181,11 @@ impl BlockContent for AgentMessageBlock {
     }
 
     /// Magenta Agent rail only while the turn is active (`ctx.is_running`).
-    /// Streaming / thinking / tool-running: left `┃` in `theme.accent_running`
-    /// (Reset → Cyan so the rail stays visible under NO_COLOR). Finished
-    /// scrollback has no coloured rail. Human green is the other side of this
-    /// pair (`UserPromptBlock`).
+    /// The message body stays `text_primary`. Streaming / thinking /
+    /// tool-running: left `┃` in `theme.accent_running` (Reset → Cyan so
+    /// the rail stays visible under NO_COLOR). Finished scrollback has no
+    /// coloured rail. Human green is the other side of this pair
+    /// (`UserPromptBlock`).
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         if !ctx.is_running {
             return None;
@@ -443,6 +447,161 @@ mod tests {
         crate::appearance::cache::set_render_mermaid(RenderMermaid::Auto);
         let raw = AgentMessageBlock::new(MERMAID_MD).output(&ctx(40, true));
         assert_eq!(non_selectable(&raw), 0, "raw mode shows the fence verbatim");
+    }
+
+    /// The Agent's response body stays white. While the turn is active,
+    /// the left accent is magenta (`accent_running`). A finished turn
+    /// does not keep a permanent rail.
+    #[test]
+    fn agent_response_text_stays_white_and_the_left_accent_is_magenta() {
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = crate::theme::Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        let white = theme.text_primary;
+        assert_eq!(theme.accent_running, magenta, "DOGE Agent magenta");
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+        assert_ne!(white, magenta);
+        assert_ne!(theme.md_text, magenta);
+        assert_ne!(theme.accent_running, theme.accent_user);
+        assert_ne!(theme.accent_running, theme.accent_system);
+
+        let block = AgentMessageBlock::new("the agent answer is here");
+        assert!(
+            block.accent(&ctx(80, false)).is_none(),
+            "a finished turn does not keep a permanent rail"
+        );
+        let accent = block
+            .accent(&ctx_running(80, false, true))
+            .expect("an active turn keeps a left accent");
+        assert!(!accent.animated);
+        assert_eq!(accent.color, magenta);
+        assert_eq!(accent.color, theme.accent_running);
+        assert_ne!(accent.color, white);
+
+        let out = block.output(&ctx(80, false));
+        let mut saw_body = false;
+        for line in &out.lines {
+            let plain: String = line
+                .content
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            if !plain.contains("agent answer") {
+                continue;
+            }
+            for span in &line.content.spans {
+                if !span.content.chars().any(|c| c.is_ascii_alphabetic()) {
+                    continue;
+                }
+                saw_body = true;
+                assert_eq!(
+                    span.style.fg,
+                    Some(white),
+                    "agent response body stays white: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.accent_running));
+                assert_ne!(span.style.fg, Some(magenta));
+            }
+        }
+        assert!(saw_body, "agent response body was not painted");
+    }
+
+    /// The live L1 transcript draws the agent reply through EntryRenderer.
+    /// `accent()` returning magenta is not enough if that buffer paints
+    /// another color. While the turn is active the left `┃` is
+    /// `accent_running` (DOGE magenta). The body stays white. A finished
+    /// turn clears the rail.
+    #[test]
+    fn live_l1_agent_transcript_left_accent_is_magenta() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = crate::theme::Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        let green = Color::Rgb(0, 255, 0);
+        let cyan = Color::Rgb(0, 255, 255);
+        let white = theme.text_primary;
+        assert_eq!(theme.accent_running, magenta);
+        assert_eq!(theme.accent_user, green);
+        assert_eq!(theme.accent_system, cyan);
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+
+        let text = "I should not assume those token counts are accurate.";
+        let running = ScrollbackEntry::running(RenderBlock::agent_message(text));
+        assert!(running.is_running, "an active L1 agent turn is running");
+        let renderer = EntryRenderer::new(&running, &theme);
+        let width = 48u16;
+        let height = renderer.desired_height(width).max(4);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let cell = buf.cell((0, y))?;
+                (cell.symbol() == bar).then_some(cell.clone())
+            })
+            .expect("an active L1 agent reply must paint a left ┃ rail");
+        assert_eq!(rail.fg, magenta, "the live L1 agent rail is accent_running");
+        assert_eq!(rail.fg, theme.accent_running);
+        assert_ne!(rail.fg, green);
+        assert_ne!(rail.fg, theme.accent_user);
+        assert_ne!(rail.fg, cyan);
+        assert_ne!(rail.fg, theme.accent_system);
+        assert_ne!(rail.fg, white);
+
+        let letter = (0..area.height)
+            .flat_map(|y| (1..area.width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let cell = buf.cell((x, y))?;
+                (cell.symbol() == "I").then_some(cell.clone())
+            })
+            .expect("the agent reply body is painted");
+        assert_eq!(letter.fg, white, "the agent reply body stays white");
+        assert_eq!(letter.fg, theme.text_primary);
+        assert_ne!(letter.fg, magenta);
+        assert_ne!(letter.fg, green);
+
+        let finished = ScrollbackEntry::new(RenderBlock::agent_message(text));
+        assert!(
+            !finished.is_running,
+            "a finished L1 agent turn is not running"
+        );
+        let finished_renderer = EntryRenderer::new(&finished, &theme);
+        let finished_height = finished_renderer.desired_height(width).max(4);
+        let finished_area = Rect::new(0, 0, width, finished_height);
+        let mut finished_buf = Buffer::empty(finished_area);
+        finished_renderer.render(finished_area, &mut finished_buf);
+        let finished_rail = (0..finished_area.height).any(|y| {
+            finished_buf
+                .cell((0, y))
+                .is_some_and(|cell| cell.symbol() == bar)
+        });
+        assert!(
+            !finished_rail,
+            "a finished L1 agent turn does not keep a left ┃ rail"
+        );
     }
 
     #[test]

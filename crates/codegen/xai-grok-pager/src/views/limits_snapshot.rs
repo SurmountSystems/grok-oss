@@ -400,6 +400,9 @@ pub struct DiscoveredSupergrokSession {
     /// `oidc` or `external` when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Stored account email when the login recorded one. Not a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 /// Combined **what we can see**: stored SuperGrok logins and console keys.
@@ -417,6 +420,10 @@ pub struct DiscoveredIdentities {
     /// limits can only be checked for that login until a second grok-oss login.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub honesty: Option<String>,
+    /// Email of the SuperGrok session the next request uses, when stored.
+    /// Absent when that login did not record an email. Not a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_request_oauth_email: Option<String>,
 }
 
 impl DiscoveredIdentities {
@@ -438,6 +445,7 @@ impl DiscoveredIdentities {
             only_one_supergrok_session: only_one,
             supergrok_sessions,
             console_key_fingerprints,
+            next_request_oauth_email: None,
         }
     }
 
@@ -450,6 +458,7 @@ impl DiscoveredIdentities {
                 role: p.role_label.to_string(),
                 fingerprint: Some(p.fingerprint.clone()),
                 mode: Some(p.mode_label.to_string()),
+                email: p.email.clone(),
             })
             .collect();
         let mut out = Self::from_sessions(sessions, dual.stored_fingerprints.clone());
@@ -476,6 +485,7 @@ impl DiscoveredIdentities {
                 role: discovered_role_from_principal(p),
                 fingerprint: None,
                 mode: None,
+                email: None,
             })
             .collect();
         Self::from_sessions(sessions, Vec::new())
@@ -491,12 +501,14 @@ impl DiscoveredIdentities {
             role: discovered_role_from_label(&primary.label, live_role),
             fingerprint: None,
             mode: None,
+            email: None,
         });
         for extra in extras {
             sessions.push(DiscoveredSupergrokSession {
                 role: discovered_role_from_label(&extra.label, None),
                 fingerprint: None,
                 mode: None,
+                email: None,
             });
         }
         Self::from_sessions(sessions, Vec::new())
@@ -567,7 +579,7 @@ impl LimitsSnapshot {
     ) -> Self {
         let (included, dollar_credits) = match balance {
             Some(bal) => (
-                Some(included_from_balance(bal)),
+                included_from_balance(bal),
                 dollar_credits_from_balance(bal, autotopup),
             ),
             None => (None, None),
@@ -585,6 +597,7 @@ impl LimitsSnapshot {
                     role: "personal".into(),
                     fingerprint: None,
                     mode: None,
+                    email: None,
                 }],
                 Vec::new(),
             )
@@ -775,19 +788,33 @@ impl LimitsSnapshot {
                         // observed on this principal's credits poll (not invented).
                         let dollar_credits = dollar_credits_from_balance(bal, p.autotopup.as_ref());
                         let dollar_credits_observed = bal.prepaid_balance_cents.is_some();
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::ProcessCache
+                        } else {
+                            IncludedSource::Unknown
+                        };
                         (
-                            Some(included_from_balance(bal)),
+                            included,
                             dollar_credits,
                             dollar_credits_observed,
-                            IncludedSource::ProcessCache,
+                            included_source,
                         )
                     }
-                    Some(bal) => (
-                        Some(included_from_balance(bal)),
-                        dollar_credits_from_balance(bal, p.autotopup.as_ref()),
-                        true,
-                        IncludedSource::LivePoll,
-                    ),
+                    Some(bal) => {
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::LivePoll
+                        } else {
+                            IncludedSource::Unknown
+                        };
+                        (
+                            included,
+                            dollar_credits_from_balance(bal, p.autotopup.as_ref()),
+                            true,
+                            included_source,
+                        )
+                    }
                     // included_billing_only with no % yet still means SuperGrok
                     // dollar credits unobserved.
                     None if p.included_billing_only => (None, None, false, IncludedSource::Unknown),
@@ -960,18 +987,23 @@ pub fn active_driver_line_for_snapshot_with_meter_source(
     format!("Active: {label}")
 }
 
-fn included_from_balance(bal: &CreditBalance) -> IncludedAllowanceMeter {
+/// Copy included usage only when the poll set `included_usage_known` and the
+/// percent is finite. An unread placeholder stays absent. A real zero stays.
+fn included_from_balance(bal: &CreditBalance) -> Option<IncludedAllowanceMeter> {
+    if !bal.included_usage_known || !bal.usage_pct.is_finite() {
+        return None;
+    }
     let period_label = match bal.period_type.as_deref() {
         Some(t) if t.contains("WEEKLY") => "Weekly",
         Some(t) if t.contains("MONTHLY") => "Monthly",
         _ => "Included",
     };
-    IncludedAllowanceMeter {
+    Some(IncludedAllowanceMeter {
         period_label,
         used_pct: bal.usage_pct,
         next_reset_display: bal.period_end_display.clone(),
         next_reset_at: bal.period_end_at,
-    }
+    })
 }
 
 /// Live countdown to next reset: `Xd Yh Zm Ws` (or `0d 0h 0m 0s` when past).
@@ -1098,6 +1130,14 @@ fn format_discovered_identities(lines: &mut Vec<String>, discovered: &Discovered
         {
             bits.push(mode.to_string());
         }
+        if let Some(email) = session
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+        {
+            bits.push(email.to_string());
+        }
         if let Some(fp) = session
             .fingerprint
             .as_deref()
@@ -1107,6 +1147,14 @@ fn format_discovered_identities(lines: &mut Vec<String>, discovered: &Discovered
             bits.push(format!("fingerprint {fp}"));
         }
         lines.push(format!("- {}", bits.join(" · ")));
+    }
+    if let Some(email) = discovered
+        .next_request_oauth_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+    {
+        lines.push(xai_grok_shell::auth::limits_pins::next_request_oauth_account_line(email));
     }
     for fp in &discovered.console_key_fingerprints {
         lines.push(format!("- console API key fingerprint {fp}"));
@@ -1757,6 +1805,52 @@ mod tests {
         assert!(
             !one_pool.to_ascii_lowercase().contains("combined"),
             "combined pin with one honest pool must not name combined: {one_pool}"
+        );
+    }
+
+    /// Named contract: `/limits` names the stored email of the session the
+    /// next request uses, and still lists the other login. The email is a
+    /// label. This does not invent an email from an id.
+    #[test]
+    fn limits_detail_names_the_oauth_email_the_next_request_uses() {
+        let bal = weekly(24.0, "Jul 30, 12:00", Some(1250));
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut discovered = DiscoveredIdentities::from_sessions(
+            vec![
+                DiscoveredSupergrokSession {
+                    role: "personal".into(),
+                    fingerprint: None,
+                    mode: Some("oidc".into()),
+                    email: Some("other@example.com".into()),
+                },
+                DiscoveredSupergrokSession {
+                    role: "business".into(),
+                    fingerprint: None,
+                    mode: Some("oidc".into()),
+                    email: Some("hunter@surmount.systems".into()),
+                },
+            ],
+            Vec::new(),
+        );
+        discovered.next_request_oauth_email = Some("hunter@surmount.systems".into());
+        let snap = snap.with_discovered_identities(discovered);
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Next request OAuth account: hunter@surmount.systems"),
+            "the active account label must name the email the next request uses:\n{out}"
+        );
+        assert!(
+            !out.contains("Next request OAuth account: other@example.com"),
+            "the other login must not be labeled as the next request:\n{out}"
+        );
+        assert!(
+            out.contains("other@example.com"),
+            "the other stored login stays visible:\n{out}"
+        );
+        assert!(
+            out.contains("SuperGrok (business)") && out.contains("hunter@surmount.systems"),
+            "the business row keeps its stored email:\n{out}"
         );
     }
 

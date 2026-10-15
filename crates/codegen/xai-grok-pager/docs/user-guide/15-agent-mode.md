@@ -57,8 +57,8 @@ Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs
 Agent options apply to every transport (`stdio`, `serve`, `headless`, `leader`). They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
 
 ```bash
-grok agent --always-approve --model grok-4.6 stdio
-grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grok-oss agent --always-approve --model grok-4.6 stdio
+grok-oss agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 | Flag | Description |
@@ -79,7 +79,7 @@ grok-oss agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 
 Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent prints a generated token at startup, or set `GROK_AGENT_SECRET`. The process keeps state across client reconnects. Permissions match other entry points; see [Permissions and safety](22-permissions-and-safety.md).
 
-This is a server you run yourself — Grok's hosted cloud sandboxes do not run `grok agent serve`.
+This is a server you run yourself — Grok's hosted cloud sandboxes do not run `grok-oss agent serve`.
 
 ---
 

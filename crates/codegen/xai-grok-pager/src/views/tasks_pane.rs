@@ -10,11 +10,12 @@ use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row, format_measured_tokens_suffix, shown_nested_count, sum_shown_counts_once,
+    display_live_job_row, format_subagents_row_figure, shown_nested_count,
+    spawned_with_no_sample_yet, subagent_overlay_status_cell, sum_shown_counts_once,
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
-    subagent_list_row_usage,
+    is_l2_list_row, live_l3_count, subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -28,7 +29,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidget;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
@@ -265,6 +266,71 @@ fn host_tokens_for_painted_row(info: &SubagentInfo, all: &[&SubagentInfo]) -> Op
     sum_shown_counts_once(own, &l3_counts)
 }
 
+/// Drop a trailing ` (106.8k)` when that compact count is painted on its own.
+/// A running figure `106.8k+` also strips the tail written without the plus.
+/// Unrelated parentheses, such as `(review notes)`, stay.
+fn strip_duplicate_compact_tail(description: &str, compact: Option<&str>) -> String {
+    let Some(compact) = compact.filter(|text| !text.is_empty()) else {
+        return description.to_string();
+    };
+    let exact = format!(" ({compact})");
+    if let Some(stripped) = description.strip_suffix(&exact) {
+        return stripped.to_string();
+    }
+    let Some(without_plus) = compact.strip_suffix('+') else {
+        return description.to_string();
+    };
+    let without_plus_suffix = format!(" ({without_plus})");
+    description
+        .strip_suffix(&without_plus_suffix)
+        .unwrap_or(description)
+        .to_string()
+}
+
+/// Running rows that share a non-empty description and the same type label
+/// collapse to the earliest start. A reviewer and a nameless subagent stay
+/// distinct even when the description text matches.
+fn duplicate_running_description_ids<'a>(
+    listed: &[&'a SubagentInfo],
+) -> std::collections::HashSet<&'a str> {
+    let mut best: HashMap<String, (Instant, &str)> = HashMap::new();
+    for info in listed {
+        if !info.is_running() {
+            continue;
+        }
+        let desc = info.description.trim();
+        if desc.is_empty() {
+            continue;
+        }
+        let (label, _) = format_subagent_label(info);
+        let key = format!("{label}\n{desc}");
+        let id = info.child_session_id.as_ref();
+        match best.get(&key) {
+            Some((started, _)) if *started <= info.attempt.started_at => {}
+            _ => {
+                best.insert(key, (info.attempt.started_at, id));
+            }
+        }
+    }
+    let mut skip = std::collections::HashSet::new();
+    for info in listed {
+        if !info.is_running() {
+            continue;
+        }
+        let desc = info.description.trim();
+        if desc.is_empty() {
+            continue;
+        }
+        let (label, _) = format_subagent_label(info);
+        let key = format!("{label}\n{desc}");
+        let id = info.child_session_id.as_ref();
+        if best.get(&key).is_some_and(|(_, winner)| *winner != id) {
+            skip.insert(id);
+        }
+    }
+    skip
+}
+
 impl TaskEntry {
     fn from_bg_task(
         task: &BgTaskState,
@@ -382,23 +448,42 @@ impl TaskEntry {
             Style::default().fg(theme.gray_bright)
         };
         const ACTIVITY_DESC_MAX_WIDTH: usize = 40;
-        let activity = info
+        let raw_activity = info
             .is_running()
             .then_some(info.attempt.activity_label.as_deref())
             .flatten()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let shown_desc = match activity {
-            Some(_) => {
-                crate::render::line_utils::truncate_str(&description, ACTIVITY_DESC_MAX_WIDTH)
+        // A stale Preparing label is not the live tool. Use the last tool
+        // once. With no tool, omit the suffix.
+        let activity: Option<&str> = raw_activity.and_then(|label| {
+            if label.to_ascii_lowercase().contains("preparing") {
+                info.attempt
+                    .tools_used
+                    .last()
+                    .map(|tool| tool.as_ref())
+                    .filter(|tool| !tool.is_empty())
+            } else {
+                Some(label)
             }
-            None => description.clone(),
-        };
-        let type_sep = if description.is_empty() { "" } else { " " };
-        let compact = host_tokens_for_painted_row(info, all)
-            .or_else(|| subagent_list_row_usage(info, all))
-            .map(format_measured_tokens_suffix)
+        });
+        let host_figure =
+            host_tokens_for_painted_row(info, all).or_else(|| subagent_list_row_usage(info, all));
+        let compact = format_subagents_row_figure(host_figure, info.is_running())
             .filter(|text| !text.is_empty());
+        let display_description = strip_duplicate_compact_tail(&description, compact.as_deref());
+        let shown_desc = match activity {
+            Some(_) => crate::render::line_utils::truncate_str(
+                &display_description,
+                ACTIVITY_DESC_MAX_WIDTH,
+            ),
+            None => display_description.clone(),
+        };
+        let type_sep = if display_description.is_empty() {
+            ""
+        } else {
+            " "
+        };
         let mut spans = vec![
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
@@ -406,31 +491,31 @@ impl TaskEntry {
         if let Some(ref compact) = compact {
             spans.push(Span::styled(format!(" ({compact})"), desc_style));
         }
-        // Live job row. `TasksPane::render` paints this span via `ListItem::content`.
-        // Host figure only. No figure omits the token clause. Do not print a placeholder.
-        // The standing estimate stays labeled as an estimate. This span must not
-        // say tokens: Subagents list chrome omits that word. Do not add the
-        // figure to the L1 total or grok-oss sqlite.
-        if info.is_running() {
+        // A host figure replaces the standing estimate. No host figure keeps
+        // the labeled estimate on a row that was never spawned. A spawned row
+        // with no sample yet omits the figure. This span must not say tokens.
+        // Do not add the figure to the L1 total.
+        let spawned_without_sample = spawned_with_no_sample_yet(info.child_session_id.as_ref());
+        if info.is_running() && compact.is_none() && !spawned_without_sample {
             let elapsed_text = format_duration(info.display_elapsed());
             let shown = display_live_job_row(LiveJobRowInput {
-                job: description.as_str(),
+                job: display_description.as_str(),
                 estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
                 estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
                 elapsed: &elapsed_text,
-                host_tokens: host_tokens_for_painted_row(info, all)
-                    .or_else(|| subagent_list_row_usage(info, all)),
+                host_tokens: host_figure,
             });
             debug_assert_eq!(shown.l1_tokens_added, 0);
             debug_assert!(!shown.wrote_grok_oss_sqlite);
-            let token_clause = if shown.actual_tokens.is_empty() {
-                String::new()
+            // Empty host text omits the token clause. The labeled estimate stays.
+            let actual_clause = if shown.actual_tokens.is_empty() {
+                ""
             } else {
-                format!(" · {}", shown.actual_tokens)
+                " · "
             };
             let live_text = format!(
-                " {} · {} · {}{}",
-                shown.estimate_wall, shown.estimate_tokens, shown.elapsed, token_clause
+                " {} · {}{actual_clause}{} · {}",
+                shown.estimate_wall, shown.estimate_tokens, shown.actual_tokens, shown.elapsed
             );
             spans.push(Span::styled(live_text, desc_style));
         }
@@ -449,11 +534,19 @@ impl TaskEntry {
         let l3_suffix = format_live_l3_count(live_l3)
             .map(|c| format!(" · {c}"))
             .unwrap_or_default();
-        let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => format!("{type_label}{l3_suffix}"),
-            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
-            (false, true) => format!("{type_label} {description}{l3_suffix}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
+        let compact_suffix = compact
+            .as_ref()
+            .map(|count| format!(" ({count})"))
+            .unwrap_or_default();
+        let label = match (display_description.is_empty(), model_suffix.is_empty()) {
+            (true, true) => format!("{type_label}{compact_suffix}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{compact_suffix}{l3_suffix}"),
+            (false, true) => {
+                format!("{type_label} {display_description}{compact_suffix}{l3_suffix}")
+            }
+            (false, false) => format!(
+                "{type_label} {display_description} {model_suffix}{compact_suffix}{l3_suffix}"
+            ),
         };
         let styled = Line::from(spans);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -715,6 +808,14 @@ pub struct TasksPane {
     tick: u64,
     pub kill_button_rects: Vec<(TaskEntryId, Rect)>,
     pub view_button_rects: Vec<(TaskEntryId, Rect)>,
+    /// Full row hit targets for a single left click that opens the task.
+    /// Kill and view buttons are smaller rects checked first.
+    pub row_hit_rects: Vec<(TaskEntryId, Rect)>,
+    /// Completed child sessions hidden from this list. A running attempt shows again.
+    cleared_completed_ids: HashSet<String>,
+    /// Hit target for `[clear]` on the Subagents header.
+    pub clear_button_rect: Option<Rect>,
+    pub clear_hovered: bool,
     pub hovered_kill: Option<TaskEntryId>,
     pub hovered_view: Option<TaskEntryId>,
     prev_running_count: usize,
@@ -731,11 +832,18 @@ impl Default for TasksPane {
 /// Columns the agent overlay paints on the right of one row.
 /// Same sum as `render_agent_overlay`: kill, view, elapsed, model,
 /// forked badge, and one gap.
+fn agent_overlay_right_text(info: &SubagentInfo, elapsed: &str) -> String {
+    match subagent_overlay_status_cell(info) {
+        Some(cell) => format!("{cell} {elapsed} "),
+        None => format!("{elapsed} "),
+    }
+}
+
 fn agent_overlay_columns(info: &SubagentInfo) -> u16 {
     let right_text = if info.attempt.pending_kill {
         "killing\u{2026} ".to_string()
     } else {
-        format!("{} ", format_duration(info.display_elapsed()))
+        agent_overlay_right_text(info, &format_duration(info.display_elapsed()))
     };
     let badge = format_context_badge(info);
     let model_text = info
@@ -863,6 +971,10 @@ impl TasksPane {
             tick: 0,
             kill_button_rects: Vec::new(),
             view_button_rects: Vec::new(),
+            row_hit_rects: Vec::new(),
+            cleared_completed_ids: HashSet::new(),
+            clear_button_rect: None,
+            clear_hovered: false,
             hovered_kill: None,
             hovered_view: None,
             prev_running_count: 0,
@@ -896,13 +1008,58 @@ impl TasksPane {
             }
         }
         let listed: Vec<&SubagentInfo> = subagents.values().collect();
-        for info in &listed {
+        let child_ids: std::collections::HashSet<&str> = listed
+            .iter()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
+        // The main-thread list is L2 rows. L3 specialists stay in the
+        // registry so the L2 row can show how many it is using.
+        // A nested overlay child's registry has those specialists and no
+        // L2 row. Name them there. Do not list them beside an L2 row.
+        let l2_rows: Vec<&SubagentInfo> = listed
+            .iter()
+            .copied()
+            .filter(|info| is_l2_list_row(info, &child_ids))
+            .collect();
+        let list_rows: Vec<&SubagentInfo> = if l2_rows.is_empty() {
+            listed
+                .iter()
+                .copied()
+                .filter(|info| {
+                    info.is_running()
+                        && info.attempt.workflow_run_id.is_none()
+                        && info.attempt.parent_session_id.is_some()
+                })
+                .collect()
+        } else {
+            l2_rows
+        };
+        let skip_duplicate_running = duplicate_running_description_ids(&list_rows);
+        for info in &list_rows {
             if info.attempt.workflow_run_id.is_some() {
                 continue;
             }
+            if skip_duplicate_running.contains(info.child_session_id.as_ref()) {
+                continue;
+            }
+            if !info.is_running()
+                && self
+                    .cleared_completed_ids
+                    .contains(info.child_session_id.as_ref())
+            {
+                continue;
+            }
             if self.show_done || info.is_running() {
-                self.items
-                    .push(TaskEntry::from_subagent_with_l3_count(info, 0, &listed));
+                let specialists = if info.is_running() {
+                    live_l3_count(listed.iter().copied(), info.child_session_id.as_ref())
+                } else {
+                    0
+                };
+                self.items.push(TaskEntry::from_subagent_with_l3_count(
+                    info,
+                    specialists,
+                    &listed,
+                ));
             }
         }
         let now = Utc::now();
@@ -1085,6 +1242,15 @@ impl TasksPane {
                 .count(),
         }
     }
+    pub fn hide_completed_subagent(&mut self, child_session_id: &str) {
+        self.cleared_completed_ids
+            .insert(child_session_id.to_string());
+    }
+
+    pub fn completed_subagent_is_hidden(&self, child_session_id: &str) -> bool {
+        self.cleared_completed_ids.contains(child_session_id)
+    }
+
     pub fn show_done(&self) -> bool {
         self.show_done
     }
@@ -1206,6 +1372,8 @@ impl TasksPane {
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
     ) {
+        self.clear_button_rect = None;
+        self.row_hit_rects.clear();
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
             if inner.height > 0 && inner.width > 0 {
@@ -1232,6 +1400,29 @@ impl TasksPane {
             return;
         }
         let total = self.entries.len();
+        // Subagent rows taller than this panel get their own track. The Tasks
+        // group keeps the centered arrows. The track sits in the last column
+        // so the chip strip cannot cover it.
+        let subagent_list_overflows = inner.width > 2
+            && total > inner.height as usize
+            && self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, TaskEntry::Agent { .. }));
+        let scrollbar_track = subagent_list_overflows.then(|| Rect {
+            x: inner.x + inner.width - 1,
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        });
+        let inner = if scrollbar_track.is_some() {
+            Rect {
+                width: inner.width - 1,
+                ..inner
+            }
+        } else {
+            inner
+        };
         let scrollable = total > inner.height as usize && inner.height >= 3;
         let scroll = self.list_state.scroll_offset();
         let reserve_top = scrollable && scroll > 0;
@@ -1323,6 +1514,48 @@ impl TasksPane {
             ..list_area
         };
         self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled);
+        if let Some(track) = scrollbar_track {
+            self.paint_subagent_list_scrollbar(
+                buf,
+                track,
+                total,
+                list_area.height,
+                self.list_state.scroll_offset(),
+            );
+            self.list_state.set_scrollbar_area(Some(track));
+        }
+    }
+
+    /// Quiet track for the Subagents list.
+    fn paint_subagent_list_scrollbar(
+        &self,
+        buf: &mut Buffer,
+        track: Rect,
+        total: usize,
+        viewport: u16,
+        offset: usize,
+    ) {
+        let theme = Theme::current();
+        let track_style = Style::default().bg(theme.scrollbar_bg);
+        let thumb_style = Style::default()
+            .fg(theme.scrollbar_fg)
+            .bg(theme.scrollbar_bg);
+        crate::render::scrollbar::render_scrollbar_styled(
+            buf,
+            Some(track),
+            u16::try_from(total).unwrap_or(u16::MAX),
+            viewport.max(1),
+            u16::try_from(offset).unwrap_or(u16::MAX),
+            track_style,
+            thumb_style,
+        );
+    }
+    fn push_row_hit(&mut self, id: TaskEntryId, area: Rect, y: u16) {
+        if area.width == 0 {
+            return;
+        }
+        self.row_hit_rects
+            .push((id, Rect::new(area.x, y, area.width, 1)));
     }
     fn render_overlay(
         &mut self,
@@ -1336,6 +1569,7 @@ impl TasksPane {
         let scroll_offset = self.list_state.scroll_offset();
         self.kill_button_rects.clear();
         self.view_button_rects.clear();
+        self.row_hit_rects.clear();
         let visible: Vec<(u16, OverlayEntryData)> = self
             .entries
             .iter()
@@ -1368,15 +1602,18 @@ impl TasksPane {
                     let Some(task) = bg_tasks.get(task_id) else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::BgTask(task_id.clone()), area, y);
                     self.render_bg_task_overlay(area, buf, y, task_id, task, &theme);
                 }
                 OverlayEntryData::Agent(ref subagent_id, ref child_session_id) => {
                     let Some(info) = subagents.get(child_session_id) else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::Agent(subagent_id.clone()), area, y);
                     self.render_agent_overlay(area, buf, y, subagent_id, info, &theme);
                 }
                 OverlayEntryData::Scheduled(ref task_id, ref linked_subagent) => {
+                    self.push_row_hit(TaskEntryId::Scheduled(task_id.clone()), area, y);
                     self.render_scheduled_overlay(
                         area,
                         buf,
@@ -1391,10 +1628,71 @@ impl TasksPane {
                     else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::Workflow(name.clone()), area, y);
                     self.render_workflow_overlay(area, buf, y, &run, &theme);
                 }
             }
         }
+        self.paint_subagent_clear(area, buf, subagents, &theme);
+    }
+
+    fn listed_completed_subagent(&self, subagents: &HashMap<String, SubagentInfo>) -> bool {
+        self.items.iter().any(|entry| match entry {
+            TaskEntry::Agent {
+                running: false,
+                child_session_id,
+                ..
+            } => subagents
+                .get(child_session_id)
+                .is_some_and(SubagentInfo::terminal_status_is_completed),
+            _ => false,
+        })
+    }
+
+    fn paint_subagent_clear(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        subagents: &HashMap<String, SubagentInfo>,
+        theme: &Theme,
+    ) {
+        if area.width == 0 || area.height == 0 || !self.listed_completed_subagent(subagents) {
+            return;
+        }
+        let scroll_offset = self.list_state.scroll_offset();
+        let Some(vis_row) = self
+            .entries
+            .iter()
+            .skip(scroll_offset)
+            .enumerate()
+            .take_while(|(vis_row, _)| area.y + (*vis_row as u16) < area.y + area.height)
+            .find_map(|(vis_row, entry)| {
+                matches!(
+                    entry,
+                    TaskEntry::Header {
+                        group: GroupKind::Subagents,
+                        ..
+                    }
+                )
+                .then_some(vis_row)
+            })
+        else {
+            return;
+        };
+        let label = crate::views::dock::CLEAR_LABEL;
+        let width = label.width() as u16;
+        if area.width < width {
+            return;
+        }
+        let y = area.y + vis_row as u16;
+        let x = area.x + area.width - width;
+        let fg = if self.clear_hovered {
+            theme.text_primary
+        } else {
+            theme.gray
+        };
+        buf.set_span(x, y, &Span::styled(label, Style::default().fg(fg)), width);
+        self.clear_button_rect = Some(Rect::new(x, y, width, 1));
     }
     fn render_workflow_overlay(
         &mut self,
@@ -1610,11 +1908,11 @@ impl TasksPane {
         } else if info.is_running() {
             let frames = activity_spinner_frames();
             let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            let elapsed = info.display_elapsed();
+            let elapsed = format_duration(info.display_elapsed());
             (
                 frames.get(frame_idx).copied().unwrap_or(""),
                 Style::default().fg(theme.accent_running),
-                format!("{} ", format_duration(elapsed)),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         } else if info.attempt.status.as_deref() == Some("completed") {
@@ -1622,7 +1920,7 @@ impl TasksPane {
             (
                 crate::glyphs::check_mark(),
                 Style::default().fg(theme.accent_success),
-                format!("{elapsed} "),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         } else {
@@ -1630,7 +1928,7 @@ impl TasksPane {
             (
                 crate::glyphs::ballot_x(),
                 Style::default().fg(theme.accent_error),
-                format!("{elapsed} "),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         };
@@ -2883,6 +3181,406 @@ mod tests {
             !l3_joined.contains("140k"),
             "specialist row must not paint the L2 atomic total, got {l3_joined:?}"
         );
+        assert!(
+            joined.contains("140k+"),
+            "a running L2 row paints 140k with a trailing plus, got {joined:?}"
+        );
+        assert!(
+            l3_joined.contains("50k+"),
+            "a running specialist row paints 50k with a trailing plus, got {l3_joined:?}"
+        );
+        assert!(
+            !joined.contains("measured"),
+            "the running L2 row must not say measured, got {joined:?}"
+        );
+        assert!(
+            !l3_joined.contains("measured"),
+            "the running specialist row must not say measured, got {l3_joined:?}"
+        );
+
+        l2.finished = true;
+        let finished_l2 = {
+            let rows = [&l2, &l3];
+            styled_agent_line(&TaskEntry::from_subagent_with_l3_count(&l2, 1, &rows))
+        };
+        assert!(
+            finished_l2.contains("140k"),
+            "a finished L2 row still paints 140k, got {finished_l2:?}"
+        );
+        assert!(
+            !finished_l2.contains("140k+") && !finished_l2.contains('+'),
+            "a finished L2 row has no trailing plus, got {finished_l2:?}"
+        );
+        l3.finished = true;
+        let finished_l3 = {
+            let rows = [&l2, &l3];
+            styled_agent_line(&TaskEntry::from_subagent_with_l3_count(&l3, 0, &rows))
+        };
+        assert!(
+            finished_l3.contains("50k") && !finished_l3.contains("50k+"),
+            "a finished specialist row paints 50k with no trailing plus, got {finished_l3:?}"
+        );
+    }
+
+    /// Description tail `(106.8k)` and atomic figure `106.8k` paint once.
+    /// The standing estimate is not on the line. Unrelated parentheses stay.
+    #[test]
+    fn l2_row_paints_atomic_figure_once_and_strips_duplicate_token_tail() {
+        let mut info = make_info();
+        info.description = Arc::from("Wrap the parser (106.8k)");
+        info.attempt.tokens_used = Some(106_800);
+        let joined = styled_agent_line(&TaskEntry::from_subagent(&info));
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+
+        info.description = Arc::from("Wrap the parser (review notes) (106.8k)");
+        let joined = styled_agent_line(&TaskEntry::from_subagent(&info));
+        assert!(
+            joined.contains("(review notes)"),
+            "unrelated parentheses stay, got {joined:?}"
+        );
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure still paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+    }
+
+    /// L2 Subagents row is that L2's live context plus each L3 it spawned,
+    /// once. Paint re-reads the atomic counters. A frozen snapshot must not
+    /// stick. The L1 footer stays the L1 figure. No count omits the figure.
+    #[test]
+    fn l2_row_sums_own_context_plus_each_l3_once_and_repaints_when_either_changes() {
+        const L2: &str = "l2-row-sum-repaint-2026-09-24";
+        const L3A: &str = "l3a-row-sum-repaint-2026-09-24";
+        const L3B: &str = "l3b-row-sum-repaint-2026-09-24";
+        const L3_OTHER: &str = "l3-other-parent-row-sum-repaint-2026-09-24";
+        const QUIET: &str = "l2-row-sum-repaint-empty-2026-09-24";
+
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        struct ClearLiveTokenEconomy;
+        impl Drop for ClearLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::clear_token_economy_live();
+            }
+        }
+        let _clear_live_token_economy = ClearLiveTokenEconomy;
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L2, "Wrap the parser");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3A, "read one file");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3B, "read another file");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3_OTHER, "someone else");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L2, 100_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3A, 20_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3B, 30_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3_OTHER, 500_000);
+
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("sa-l2-sum");
+        l2.child_session_id = Arc::from(L2);
+        l2.description = Arc::from("Wrap the parser");
+        l2.attempt.depth = Some(1);
+        l2.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        l2.attempt.tokens_used = Some(1_000);
+        l2.attempt.tokens_past = 0;
+        let mut l3a = make_info();
+        l3a.subagent_id = Arc::from("sa-l3a-sum");
+        l3a.child_session_id = Arc::from(L3A);
+        l3a.attempt.parent_session_id = Some(Arc::from(L2));
+        l3a.attempt.depth = Some(2);
+        l3a.description = Arc::from("read one file");
+        l3a.attempt.tokens_used = Some(2_000);
+        let mut l3b = make_info();
+        l3b.subagent_id = Arc::from("sa-l3b-sum");
+        l3b.child_session_id = Arc::from(L3B);
+        l3b.attempt.parent_session_id = Some(Arc::from(L2));
+        l3b.attempt.depth = Some(2);
+        l3b.description = Arc::from("read another file");
+        l3b.attempt.tokens_used = Some(3_000);
+        let mut other = make_info();
+        other.subagent_id = Arc::from("sa-l3-other-sum");
+        other.child_session_id = Arc::from(L3_OTHER);
+        other.attempt.parent_session_id = Some(Arc::from("some-other-l2"));
+        other.attempt.depth = Some(2);
+        other.description = Arc::from("someone else");
+        other.attempt.tokens_used = Some(9_000);
+        let all = [&l2, &l3a, &l3b, &other];
+
+        let paint = |rows: &[&SubagentInfo]| -> String {
+            let entry = TaskEntry::from_subagent_with_l3_count(&l2, 2, rows);
+            styled_agent_line(&entry)
+        };
+        let assert_no_placeholder = |row: &str| {
+            let lower = row.to_ascii_lowercase();
+            assert!(
+                !lower.contains("not_fetched")
+                    && !lower.contains("not fetched")
+                    && !lower.contains("not read"),
+                "Subagents row must not say not_fetched, not fetched, or not read: {row:?}"
+            );
+        };
+
+        let first = paint(&all);
+        assert_no_placeholder(&first);
+        assert!(
+            first.contains("150k"),
+            "L2 100k plus each L3 once (20k and 30k) is 150k, not a frozen 6k snapshot and not 650k with the other L3, got {first:?}"
+        );
+        assert_eq!(
+            first.matches("150k").count(),
+            1,
+            "the sum paints once, got {first:?}"
+        );
+        assert!(
+            !first.contains("(6k)")
+                && !first.contains("(20k)")
+                && !first.contains("(30k)")
+                && !first.contains("(100k)")
+                && !first.contains("500k")
+                && !first.contains("650k")
+                && !first.contains("200k"),
+            "do not paint the frozen snapshot, each L3 again, or an L3 from outside this L2, got {first:?}"
+        );
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L2, 110_000);
+        let after_l2 = paint(&all);
+        assert_no_placeholder(&after_l2);
+        assert!(
+            after_l2.contains("160k") && !after_l2.contains("150k"),
+            "a new paint after the L2 atomic changes must show 160k, not the previous 150k, got {after_l2:?}"
+        );
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3A, 25_000);
+        let after_l3 = paint(&all);
+        assert_no_placeholder(&after_l3);
+        assert!(
+            after_l3.contains("165k") && !after_l3.contains("160k") && !after_l3.contains("150k"),
+            "a new paint after one L3 atomic changes must show 165k, not the previous figure, got {after_l3:?}"
+        );
+        assert!(
+            !after_l3.contains("(25k)")
+                && !after_l3.contains("(30k)")
+                && !after_l3.contains("500k"),
+            "that L3 stays inside the L2 sum and is not added again on the row, got {after_l3:?}"
+        );
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        goal.tokens_used = 1_000;
+        goal.token_baseline = 0;
+        goal.finished_subagent_tokens = 50_000;
+        let context = Some(270_000_u64);
+        let nested_sum = 165_000_u64;
+        let l3s_again = nested_sum.saturating_add(25_000).saturating_add(30_000);
+        let l1 = goal.live_tokens_used(context, l3s_again);
+        let l1_plain = goal.live_tokens_used(context, 0);
+        assert_eq!(
+            l1, l1_plain,
+            "the L1 footer path must not add the L2 row sum or those L3s again"
+        );
+        assert_eq!(l1, 270_000);
+        let footer = crate::views::context_bar::footer_l1_down_arrow_compact(l1);
+        assert_eq!(footer, "↓270k");
+        assert!(
+            !footer.contains("165") && !footer.contains("150") && !footer.contains("220"),
+            "footer_l1_down_arrow_compact stays the L1 figure only, got {footer:?}"
+        );
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(QUIET, "Quiet row");
+        let mut quiet = make_info();
+        quiet.subagent_id = Arc::from("sa-quiet-sum");
+        quiet.child_session_id = Arc::from(QUIET);
+        quiet.description = Arc::from("Quiet row");
+        quiet.attempt.depth = Some(1);
+        quiet.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        quiet.attempt.tokens_used = None;
+        quiet.attempt.tokens_past = 0;
+        let quiet_row = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(
+            &quiet,
+            0,
+            std::slice::from_ref(&&quiet),
+        ));
+        assert_no_placeholder(&quiet_row);
+        assert!(
+            !quiet_row.contains('(')
+                && !quiet_row.contains("167")
+                && !quiet_row.contains('k')
+                && !quiet_row.contains('M'),
+            "when the host has no count, the row omits the token figure and does not invent digits, got {quiet_row:?}"
+        );
+    }
+
+    /// L2 row shows that L2's own context plus each L3 it spawned, once.
+    /// A later count changes the figure. The L1 footer stays the L1 figure.
+    /// No count omits the figure. The text `not_fetched` is not a count.
+    #[test]
+    fn l2_row_shows_own_context_plus_each_l3_once_and_omits_when_missing() {
+        const L2: &str = "l2-own-plus-each-l3-omit-2026-09-24";
+        const L3A: &str = "l3a-own-plus-each-l3-omit-2026-09-24";
+        const L3B: &str = "l3b-own-plus-each-l3-omit-2026-09-24";
+        const L3_OTHER: &str = "l3-outside-own-plus-each-l3-omit-2026-09-24";
+        const QUIET: &str = "l2-quiet-own-plus-each-l3-omit-2026-09-24";
+
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        struct ClearLiveTokenEconomy;
+        impl Drop for ClearLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::clear_token_economy_live();
+            }
+        }
+        let _clear_live_token_economy = ClearLiveTokenEconomy;
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L2, "Wrap the parser");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3A, "read one file");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3B, "read another file");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(L3_OTHER, "someone else");
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L2, 40_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3A, 10_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3B, 7_000);
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L3_OTHER, 900_000);
+
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("sa-l2-own-plus-l3");
+        l2.child_session_id = Arc::from(L2);
+        l2.description = Arc::from("Wrap the parser");
+        l2.attempt.depth = Some(1);
+        l2.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        // Stale snapshot. The row must read the live counts above, not these.
+        l2.attempt.tokens_used = Some(1_000);
+        l2.attempt.tokens_past = 0;
+        let mut l3a = make_info();
+        l3a.subagent_id = Arc::from("sa-l3a-own-plus-l3");
+        l3a.child_session_id = Arc::from(L3A);
+        l3a.attempt.parent_session_id = Some(Arc::from(L2));
+        l3a.attempt.depth = Some(2);
+        l3a.description = Arc::from("read one file");
+        l3a.attempt.tokens_used = Some(2_000);
+        let mut l3b = make_info();
+        l3b.subagent_id = Arc::from("sa-l3b-own-plus-l3");
+        l3b.child_session_id = Arc::from(L3B);
+        l3b.attempt.parent_session_id = Some(Arc::from(L2));
+        l3b.attempt.depth = Some(2);
+        l3b.description = Arc::from("read another file");
+        l3b.attempt.tokens_used = Some(3_000);
+        let mut other = make_info();
+        other.subagent_id = Arc::from("sa-l3-outside-own-plus-l3");
+        other.child_session_id = Arc::from(L3_OTHER);
+        other.attempt.parent_session_id = Some(Arc::from("some-other-l2"));
+        other.attempt.depth = Some(2);
+        other.description = Arc::from("someone else");
+        other.attempt.tokens_used = Some(9_000);
+        let all = [&l2, &l3a, &l3b, &other];
+
+        let paint = |rows: &[&SubagentInfo]| -> String {
+            let entry = TaskEntry::from_subagent_with_l3_count(&l2, 2, rows);
+            styled_agent_line(&entry)
+        };
+        let assert_no_placeholder = |row: &str| {
+            let lower = row.to_ascii_lowercase();
+            assert!(
+                !lower.contains("not_fetched")
+                    && !lower.contains("not fetched")
+                    && !lower.contains("not read"),
+                "the L2 row must not say not_fetched when a count exists or when it does not: {row:?}"
+            );
+        };
+
+        let first = paint(&all);
+        assert_no_placeholder(&first);
+        assert!(
+            first.contains("57k"),
+            "L2 context 40k plus each L3 once (10k and 7k) is 57k, not the stale 6k snapshot and not 957k with the outside L3, got {first:?}"
+        );
+        assert_eq!(
+            first.matches("57k").count(),
+            1,
+            "the sum paints once, got {first:?}"
+        );
+        assert!(
+            !first.contains("(6k)")
+                && !first.contains("(1k)")
+                && !first.contains("(2k)")
+                && !first.contains("(3k)")
+                && !first.contains("(10k)")
+                && !first.contains("(7k)")
+                && !first.contains("(40k)")
+                && !first.contains("900k")
+                && !first.contains("957k"),
+            "do not paint the stale snapshot, each L3 again, or an L3 from outside this L2, got {first:?}"
+        );
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(L2, 50_000);
+        let after = paint(&all);
+        assert_no_placeholder(&after);
+        assert!(
+            after.contains("67k") && !after.contains("57k"),
+            "when the L2 count changes, the same row paints 67k, not the previous 57k, got {after:?}"
+        );
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        goal.tokens_used = 1_000;
+        goal.token_baseline = 0;
+        goal.finished_subagent_tokens = 50_000;
+        let nested_sum = 67_000_u64;
+        let l3s_again = nested_sum.saturating_add(10_000).saturating_add(7_000);
+        let l1 = goal.live_tokens_used(Some(270_000), l3s_again);
+        let l1_plain = goal.live_tokens_used(Some(270_000), 0);
+        assert_eq!(
+            l1, l1_plain,
+            "the L2 sum is not added onto the L1 footer figure"
+        );
+        assert_eq!(l1, 270_000);
+        let footer = crate::views::context_bar::footer_l1_down_arrow_compact(l1);
+        assert_eq!(footer, "↓270k");
+        assert!(
+            !footer.contains("67") && !footer.contains("57") && !footer.contains("84"),
+            "the footer down-arrow compact figure stays the L1 figure only, got {footer:?}"
+        );
+
+        crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(QUIET, "Quiet row");
+        let mut quiet = make_info();
+        quiet.subagent_id = Arc::from("sa-quiet-own-plus-l3");
+        quiet.child_session_id = Arc::from(QUIET);
+        quiet.description = Arc::from("Quiet row");
+        quiet.attempt.depth = Some(1);
+        quiet.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        quiet.attempt.tokens_used = None;
+        quiet.attempt.tokens_past = 0;
+        let quiet_row = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(
+            &quiet,
+            0,
+            std::slice::from_ref(&&quiet),
+        ));
+        assert_no_placeholder(&quiet_row);
+        assert!(
+            !quiet_row.contains('(')
+                && !quiet_row.contains("167")
+                && !quiet_row.contains('k')
+                && !quiet_row.contains('M')
+                && !quiet_row.contains("not_fetched"),
+            "when the host has no count, the row omits the figure and does not invent one, got {quiet_row:?}"
+        );
+    }
+
+    fn styled_agent_line(entry: &TaskEntry) -> String {
+        match entry {
+            TaskEntry::Agent { styled, .. } => {
+                styled.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            _ => panic!("expected Agent variant"),
+        }
     }
 
     /// Description tail `(106.8k)` and atomic figure `106.8k` paint once.
@@ -3685,6 +4383,97 @@ mod tests {
         assert!(
             left.contains("167.0k (estimate)"),
             "167.0k stays an estimate, left of the chips: {row}"
+        );
+    }
+
+    /// The tasks pane and the dock list L2 rows plus a specialist count, matching `live_subagent_list`.
+    /// Listing an L3 name is a failure. `sync` still pushes every running row with a specialist count of 0, and the dock lists every running row.
+    #[test]
+    fn tasks_pane_and_dock_list_l2_rows_and_a_specialist_count() {
+        const OWED: &str = "The tasks pane and the dock list L2 rows plus a specialist count, matching live_subagent_list.";
+        const L2_NAME: &str = "Coordinate the gate";
+        const L3_NAME: &str = "Prove the specialist name";
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("sa-l2");
+        l2.child_session_id = Arc::from("l2-coord");
+        l2.description = Arc::from(L2_NAME);
+        l2.attempt.depth = Some(1);
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("sa-l3");
+        l3.child_session_id = Arc::from("l3-spec");
+        l3.description = Arc::from(L3_NAME);
+        l3.attempt.depth = Some(2);
+        l3.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+        let mut sessions = HashMap::new();
+        sessions.insert("l2-coord".to_owned(), l2);
+        sessions.insert("l3-spec".to_owned(), l3);
+        let live_ids: Vec<String> = crate::app::subagent::live_subagent_list(sessions.values())
+            .into_iter()
+            .map(|info| info.child_session_id.to_string())
+            .collect();
+        assert_eq!(
+            live_ids,
+            vec!["l2-coord".to_owned()],
+            "{OWED} The registry list for this fixture is the L2 row alone."
+        );
+
+        let mut pane = TasksPane::new();
+        pane.sync(&BTreeMap::new(), &sessions, &HashMap::new(), &[]);
+        let pane_rows: Vec<(String, String)> = pane
+            .items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent {
+                    child_session_id,
+                    label,
+                    ..
+                } => Some((child_session_id.clone(), label.clone())),
+                _ => None,
+            })
+            .collect();
+        let pane_ids: Vec<String> = pane_rows
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        assert!(
+            pane_rows.iter().all(|(_, label)| !label.contains(L3_NAME)),
+            "{OWED} The tasks pane still lists the L3 name. Rows: {pane_rows:?}"
+        );
+        assert_eq!(pane_ids, live_ids, "{OWED} Tasks pane rows: {pane_rows:?}");
+        assert!(
+            pane_rows
+                .iter()
+                .any(|(_, label)| label.contains(L2_NAME) && label.contains("1 specialist")),
+            "{OWED} The L2 row needs a specialist count. Rows: {pane_rows:?}"
+        );
+
+        let mut l1 = crate::app::agent_view::test_fixtures::make_agent();
+        l1.subagent_sessions = sessions;
+        let dock_rows = l1.dock_subagent_rows();
+        let dock_text: Vec<String> = dock_rows
+            .iter()
+            .map(|(session_id, _, row)| {
+                format!(
+                    "{session_id} {} {} {} {}",
+                    row.kind,
+                    row.description,
+                    row.activity.as_deref().unwrap_or(""),
+                    row.meta
+                )
+            })
+            .collect();
+        let dock_ids: Vec<String> = dock_rows
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect();
+        assert!(
+            dock_text.iter().all(|line| !line.contains(L3_NAME)),
+            "{OWED} The dock still lists the L3 name. Rows: {dock_text:?}"
+        );
+        assert_eq!(dock_ids, live_ids, "{OWED} Dock rows: {dock_text:?}");
+        assert!(
+            dock_text.iter().any(|line| line.contains("1 specialist")),
+            "{OWED} The dock L2 row needs a specialist count. Rows: {dock_text:?}"
         );
     }
 }

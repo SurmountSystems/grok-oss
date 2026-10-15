@@ -4991,6 +4991,17 @@ fn resolve_credentials_ranked(
         session_identity_key,
     }
 }
+/// An OpenRouter request that already resolved an API key keeps that key.
+/// An OIDC pin must not replace it with an xAI session token. OpenRouter
+/// does not accept that session.
+pub(crate) fn openrouter_request_keeps_resolved_api_key(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> bool {
+    crate::auth::openrouter::is_openrouter_base_url(base_url)
+        && api_key.is_some_and(|key| !key.trim().is_empty())
+}
+
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API key for the IdP session.
 /// When no session is available the request fails and forces a login.
 /// BYOK (non-xAI `base_url`) is untouched; no-op when the switch is off.
@@ -5353,7 +5364,10 @@ pub(crate) fn response_include_extensions(
     api_backend: &ApiBackend,
     base_url: &str,
 ) -> Vec<String> {
-    let is_trusted_route = crate::util::is_trusted_cli_chat_proxy_url(base_url)
+    // Loopback is a trusted proxy for local mocks, and a local Responses
+    // server rejects `no_inline_citations`. Keep the include on the production
+    // proxy and on https first-party x.ai hosts only.
+    let is_trusted_route = crate::util::is_prod_cli_chat_proxy_url(base_url)
         || crate::util::is_trusted_xai_https_url(base_url);
     if supports_backend_search && api_backend == &ApiBackend::Responses && is_trusted_route {
         vec![NO_INLINE_CITATIONS_RESPONSE_INCLUDE.to_owned()]

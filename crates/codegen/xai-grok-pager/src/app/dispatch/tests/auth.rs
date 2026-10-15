@@ -598,6 +598,45 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
     );
 }
 
+/// Cancelling `/login` must strip a re-auth banner that a later nested-run summary pushed off the trailing run.
+#[test]
+fn cancel_login_strips_reauth_prompt_that_is_not_trailing() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::SubagentBlock;
+    use std::time::Duration;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent
+            .scrollback
+            .push_block(RenderBlock::Subagent(SubagentBlock::failed(
+                "nested run",
+                "child-1",
+                Duration::from_secs(1),
+                None,
+            )));
+    }
+
+    dispatch(Action::Login, &mut app);
+    dispatch(Action::CancelLogin, &mut app);
+
+    let sb = &test_agent(&app, id).scrollback;
+    let has_reauth = (0..sb.len()).any(|i| {
+        matches!(
+            sb.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    });
+    assert!(
+        !has_reauth,
+        "cancelling re-auth must strip a non-trailing re-auth prompt"
+    );
+}
+
 /// Empty `auth_methods` (the preferred_method pin is unavailable) must not invent `grok.com` or start an OIDC flow the agent did not advertise.
 #[test]
 fn login_with_empty_auth_methods_fails_closed() {

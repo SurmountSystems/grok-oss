@@ -164,8 +164,47 @@ struct StoreDirs {
     legacy_dir: Option<std::path::PathBuf>,
 }
 
+/// Home directory for `permission.toml`.
+/// Production uses the process grok home. A test whose grok home cannot hold a
+/// file (the quality build sets `HOME` to `/homeless-shelter`) uses one
+/// writable directory for the process, so a persisted grant or deny is the
+/// file the next load reads.
+pub(crate) fn permission_store_home() -> std::path::PathBuf {
+    let home = xai_grok_config::grok_home();
+    #[cfg(test)]
+    if !test_permission_home_accepts_a_file(&home) {
+        return fallback_test_permission_home();
+    }
+    home
+}
+
+#[cfg(test)]
+fn test_permission_home_accepts_a_file(home: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(home).is_err() {
+        return false;
+    }
+    let probe = home.join(".permission-store-writable");
+    let ok = std::fs::write(&probe, b"ok").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+#[cfg(test)]
+fn fallback_test_permission_home() -> std::path::PathBuf {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("grok-permission-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("permission tests need a writable store home: {err}");
+        });
+        dir
+    })
+    .clone()
+}
+
 async fn resolve_store_dirs(cwd: &AbsPathBuf, ensure: bool) -> StoreDirs {
-    resolve_store_dirs_in(xai_grok_config::grok_home(), cwd, ensure).await
+    resolve_store_dirs_in(permission_store_home(), cwd, ensure).await
 }
 
 /// [`resolve_store_dirs`] under an explicit grok home, for a holder that resolved the home once
@@ -384,7 +423,7 @@ impl CachedStateStore {
         access: StateFileAccess,
     ) -> (Self, PermissionState) {
         let grok_home = match &access {
-            StateFileAccess::Plain => xai_grok_config::grok_home(),
+            StateFileAccess::Plain => permission_store_home(),
             StateFileAccess::DaemonOwned { grok_home } => grok_home.clone(),
         };
         let dirs = resolve_store_dirs_in(grok_home, cwd, false).await;
@@ -528,6 +567,26 @@ async fn persist_state_merging_to_dir(
         merged.merge_grants_from(on_disk);
     }
     persist_state_to_dir(dir, &merged, client_identifier).await
+}
+
+/// Copy only the plain store's deny sets into `state`.
+/// A sandboxed session reads the daemon-owned file, which refuses a planted
+/// plain `permission.toml`. The denies the CLI persisted still refuse a call.
+/// Allows stay on the daemon file: a planted allow must not grant.
+pub(crate) async fn overlay_plain_persisted_denies(state: &mut PermissionState, cwd: &AbsPathBuf) {
+    let dirs = resolve_store_dirs(cwd, false).await;
+    let Some(plain) = try_load_state(&state_file_path(&dirs.dir, None)).await else {
+        return;
+    };
+    state
+        .disallowed_bash_commands
+        .extend(plain.disallowed_bash_commands);
+    state
+        .disallowed_mcp_tools
+        .extend(plain.disallowed_mcp_tools);
+    state
+        .disallowed_web_fetch_domains
+        .extend(plain.disallowed_web_fetch_domains);
 }
 
 pub(crate) async fn persist_state(

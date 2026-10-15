@@ -6,6 +6,9 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **bincode and smartstring have no parent release that drops them (2026-10-12).** bincode 1.3.3 (https://rustsec.org/advisories/RUSTSEC-2025-0141) stays under syntect 5.3.0 because dump-load stays, and the menhera 10-day index has no newer syntect release that drops bincode. smartstring 1.0.1 (https://rustsec.org/advisories/RUSTSEC-2026-0249) stays under rhai 1.26.1, and that index has no newer rhai release that drops smartstring. Highlighting and workflow scripting stay.
+
+
 - **Dashboard Credits remaining is still not a parsed field (2026-10-03).** The console.x.ai dashboard Credits remaining dollar and the 30-day Credits usage dollar are not fields grok-oss parsed from the management bodies. The limits printout says that. Do not invent those dollars by summing the Billing Credits card, postpaid preview defaultCredits, and the postpaid total. Personal SuperGrok poll auth is an Operator `grok login`, not a code patch. This printout does not say any included SuperGrok period is used up.
 
 - **Leftover plan Approve and the long plan wait (2026-09-29).** On this clean tree, `plan_approval_restored_after_resume` passed twice: 8.335 seconds on the red check and 8.712 seconds on the green check. The Operator's try-2 failure of that test was not reproduced. The failure that was reproduced is `left_click_on_approve_while_the_composer_is_only_a_slash_leaves_plan_mode`: Approve already left plan mode and answered `approved`, while the composer stayed `/` and the slash palette stayed open. `finish_approve_plan` now clears that leftover palette before it reads notes. The same assert was not changed. The green `just check-remote` exited 0 in 25.2 minutes: 31696 passed, 450 skipped, including that unit test at 0.205 seconds. `just install` recompiled `xai-grok-pager` from this tree and finished the release build in 1.1 minutes. The installed line is still `grok-oss 1.0.3 (21d5b437e393)` because that is HEAD. This stock Grok Build window will not show the clear. A grok-oss window shows it after `/rebuild` or a reopen onto `/home/hunter/.cargo/bin/grok-oss`. The 20 minute wait in session `01a0e983-6c66-7041-b7ae-7736382c8536` was stock `grok 1.0.41` on phase `tool_execution` (`Waiting on task output…`), not a grok-oss model-wait miss. The other path is `~/.grok/downloads/grok-1.0.41-linux-x86_64`. Highest-value next work, if the resume timeout returns, is a fresh log of that PTY failure. Do not start another full remote check while both tests are green. Reports: `/home/hunter/.agents/reports/check-remote-green-plan-approve-2026-09-28.md`, `/home/hunter/.agents/reports/impl-plan-wait-log-2026-09-28.md`.
@@ -68,19 +71,17 @@ or code — not only here. Closed campaign history:
   processes were SIGKILL'd (`ld returned 137`, 128+9) while linking
   `xai-grok-shell` test binaries including `test_leader_death_repro`.
   That is not a rustc type error. Not a test to skip. The builder host
-  has about 256GiB RAM; nix-daemon MemoryMax is 32GiB. cargo-mem-guard
+  has about 256GiB RAM. The measured nix-daemon MemoryMax is 192G. This session did not lower it. cargo-mem-guard
   reads host `/proc/meminfo`, so wrapping quality nextest would not
   have restarted. **Landed in tree:** nextest `--build-jobs` (and
-  `cargo test --doc --jobs`, named-test `cargo test --jobs`) capped at
-  4 (`CARGO_LINK_JOBS`); clippy stays at 32; `just nix_retry` retries
+  `cargo test --doc --jobs`, named-test `cargo test --jobs`) link jobs are
+  32 (`CARGO_LINK_JOBS`); compile jobs are 64; `just nix_retry` retries
   `ld returned 137` instead of fail-fast could-not-compile. Quality
   clippy-as-check is workspace `--all-targets` (members include
   grok-nix-helper and cargo-mem-guard), so a helper `E0106` fails at
   clippy instead of a late `cargo test`. Named-test stays one
   cargo kind (no late helper `cargo test` there). **Leftover is
-  operator-owned:** retry `just check-remote` on this new drv. If
-  four parallel mold links still SIGKILL, raise nix-daemon MemoryMax
-  on the VPS (32GiB on a 256GiB host is the cgroup, not host RAM).
+  operator-owned:** retry `just check-remote` on this new drv. Link jobs are 32 and compile jobs are 64. The measured nix-daemon MemoryMax is 192G. This session did not lower it.
   Do not drop `--locked`. Named tests: `linker_sigkill_is_transient_even_when_could_not_compile`,
   `test-nix-retry-linker-sigkill-retries`, quality/named-test
   `--build-jobs` `$CARGO_LINK_JOBS` contracts,

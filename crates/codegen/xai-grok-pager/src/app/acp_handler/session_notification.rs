@@ -29,6 +29,44 @@ pub(super) fn failed_hook_line(
     })
 }
 
+/// Stamp the nested child view with a real used/window pair. A 0/0 host
+/// reading is not copied onto the overlay. The L1 sampling window is not
+/// copied onto the nested session.
+fn stamp_nested_child_context(agent: &mut AgentView, child_session_id: &str) {
+    let stamp = agent
+        .subagent_sessions
+        .get(child_session_id)
+        .and_then(|info| {
+            match (
+                info.attempt.tokens_used.filter(|&count| count > 0),
+                info.attempt
+                    .context_window_tokens
+                    .filter(|&count| count > 0),
+            ) {
+                (Some(used), Some(window)) => Some((used, window)),
+                _ => None,
+            }
+        });
+    let Some(child_view) = agent.subagent_views.get_mut(child_session_id) else {
+        return;
+    };
+    if let Some((used, window)) = stamp {
+        child_view.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+            used, window,
+        ));
+        child_view.session_sampling_window = Some(window);
+        child_view.session.models.override_context_window(window);
+        return;
+    }
+    if child_view
+        .context_state
+        .as_ref()
+        .is_some_and(|ctx| ctx.used == 0)
+    {
+        child_view.context_state = None;
+    }
+}
+
 fn stop_hook_runs(
     runs: &[xai_grok_shell::extensions::notification::HookRunEntryDto],
 ) -> Vec<crate::scrollback::blocks::tool::HookRunEntry> {
@@ -377,11 +415,9 @@ pub(super) fn handle_session_notification_with_origin(
         | XaiSessionUpdate::MemoryCaptureActivity { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }) => {
-            let changed = apply_compaction_or_retry_update(agent, update, is_api_key_auth);
-            if let XaiSessionUpdate::AutoCompactCompleted { .. } = update {
-                agent.todo.update_todos(Vec::new());
-            }
-            changed
+            // Auto-compact refreshes the context bar. It must not wipe the
+            // painted todo board. A later Plan / todo_write still replaces it.
+            apply_compaction_or_retry_update(agent, update, is_api_key_auth)
         }
         XaiSessionUpdate::RetryState(retry) => {
             apply_sampling_identity_from_retry(&retry, &mut agent.sampling_identity);
@@ -559,6 +595,7 @@ pub(super) fn handle_session_notification_with_origin(
             parent_prompt_id,
             parent_session_id,
             workflow_run_id,
+            agent_address,
             ..
         } => {
             tracing::info!(
@@ -695,6 +732,13 @@ pub(super) fn handle_session_notification_with_origin(
             agent
                 .subagent_sessions
                 .insert(child_session_id.clone(), info);
+            if !meta.is_replay && !agent.session.loading_replay {
+                // Parent-channel spawn. A replay must not mint a second grok-oss ulid.
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                    &child_session_id,
+                    &description,
+                );
+            }
             if !had_prior_info
                 && let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
@@ -785,9 +829,19 @@ pub(super) fn handle_session_notification_with_origin(
                     .registry()
                     .restricted_commands();
                 child_view.set_restricted_commands(&restricted);
-                let link = crate::app::agent_view::ChildLink::unaddressable(acp::SessionId::new(
-                    parent_session_id.clone(),
-                ));
+                let spawner_is_nested = agent
+                    .subagent_sessions
+                    .contains_key(parent_session_id.as_str());
+                let parent_sid = acp::SessionId::new(parent_session_id.clone());
+                // Wire parent session is always the link. Addressability needs
+                // `agentAddress` on that spawn; workflow and nested spawners
+                // stay unaddressable even when an address is present.
+                let link =
+                    if workflow_run_id.is_some() || spawner_is_nested || agent_address.is_none() {
+                        crate::app::agent_view::ChildLink::unaddressable(parent_sid)
+                    } else {
+                        crate::app::agent_view::ChildLink::l2_coordinator(parent_sid)
+                    };
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
             }
             let is_l3 = agent
@@ -839,21 +893,27 @@ pub(super) fn handle_session_notification_with_origin(
                 info.attempt.duration_ms = Some(duration_ms);
                 info.attempt.turn_count = Some(turn_count);
                 info.attempt.tool_call_count = Some(tool_call_count);
-                info.attempt.tokens_used = Some(tokens_used);
-                info.attempt.context_window_tokens = Some(context_window_tokens);
+                if tokens_used > 0 {
+                    info.attempt.tokens_used = Some(tokens_used);
+                } else if info.attempt.tokens_used.is_none_or(|n| n == 0) {
+                    info.attempt.tokens_used = None;
+                }
+                if context_window_tokens > 0 {
+                    info.attempt.context_window_tokens = Some(context_window_tokens);
+                }
                 info.attempt.context_usage_pct = Some(context_usage_pct);
                 info.attempt.tools_used = tools_used.into_iter().map(Arc::from).collect();
                 info.attempt.error_count = Some(error_count);
                 info.attempt.last_progress_at = std::time::Instant::now();
+                crate::app::subagent::apply_usage_jsonl_context_fallback(info, &agent.session.cwd);
             }
-            if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
-                && context_window_tokens > 0
-            {
-                child_view
-                    .session
-                    .models
-                    .override_context_window(context_window_tokens);
+            if !meta.is_replay && !agent.session.loading_replay {
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                    &child_session_id,
+                    tokens_used,
+                );
             }
+            stamp_nested_child_context(agent, &child_session_id);
             let activity_label = agent
                 .subagent_views
                 .get(&child_session_id)
@@ -975,6 +1035,8 @@ pub(super) fn handle_session_notification_with_origin(
                 entry.invalidate_cache();
             }
             if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+                info.finished = true;
+                info.status = Some(Arc::from(status.as_str()));
                 info.attempt.status = Some(Arc::from(status));
                 info.attempt.error = error.map(Arc::from);
                 info.attempt.duration_ms = Some(duration_ms);
@@ -983,18 +1045,37 @@ pub(super) fn handle_session_notification_with_origin(
                 if tokens_used > 0 {
                     info.attempt.tokens_used = Some(tokens_used);
                 }
+                crate::app::subagent::apply_usage_jsonl_context_fallback(info, &agent.session.cwd);
                 info.seal_current_attempt_tokens();
+                if !meta.is_replay && !agent.session.loading_replay {
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                        &child_session_id,
+                        tokens_used,
+                    );
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
+                }
                 info.attempt.pending_kill = false;
                 info.attempt.kill_requested_at = None;
                 info.attempt.last_progress_at = std::time::Instant::now();
                 info.transcript.retry_disk_after_finish();
             }
+            stamp_nested_child_context(agent, &child_session_id);
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
+            }
+            // Read the child scrollback before eviction. A finished mill L2
+            // never gets PromptResponse. A trailing Next implement prompt is
+            // the next parent turn. A failed finish does not auto-run, and
+            // this enqueue does not Approve Isolated Preview.
+            if mill_completed && !resuming {
+                let _ = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
             }
             if !resuming {
                 let outcome =
@@ -1081,6 +1162,8 @@ pub(super) fn handle_session_notification_with_origin(
                 ));
                 redraw = true;
             }
+            // Stash stop runs for the turn marker. Success and skip leave no
+            // scrollback line, so they must not force a redraw by themselves.
             if event_name.eq_ignore_ascii_case("stop")
                 && !is_foreign_hook_batch(agent, prompt_id.as_deref())
             {
@@ -1090,7 +1173,6 @@ pub(super) fn handle_session_notification_with_origin(
                 pending
                     .groups
                     .push((event_name.clone(), stop_hook_runs(&runs)));
-                redraw = true;
             }
             redraw
         }
@@ -1619,6 +1701,16 @@ pub(super) fn handle_child_session_notification(
 ) -> bool {
     match update {
         XaiSessionUpdate::AutoCompactStarted { .. }
+            if agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| info.finished) =>
+        {
+            // A late compact on a finished nested session must not mark the
+            // child AutoCompacting or busy.
+            false
+        }
+        XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
@@ -1627,6 +1719,12 @@ pub(super) fn handle_child_session_notification(
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }
         | XaiSessionUpdate::HookAnnotation { .. } => {
+            // Nested compact chrome must not keep the parent fullscreen overlay.
+            if matches!(update, XaiSessionUpdate::AutoCompactStarted { .. })
+                && agent.active_subagent.as_deref() == Some(child_sid)
+            {
+                agent.close_subagent_fullscreen();
+            }
             let mut changed = false;
             if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
                 changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
@@ -1854,6 +1952,18 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             };
             let now = std::time::Instant::now();
             let prior_info = agent.subagent_sessions.remove(&child_session_id);
+            // This notification is addressed to an L2 session. The row it
+            // registers on the L1 session is an L3. Depth 2 is what keeps
+            // operator text off that specialist. A parent depth, when the
+            // L2 row has one, still wins so a deeper spawn stays deeper.
+            let depth = Some(
+                agent
+                    .subagent_sessions
+                    .get(parent_session_id.as_str())
+                    .and_then(|parent| parent.attempt.depth)
+                    .map(|parent_depth| parent_depth.saturating_add(1))
+                    .unwrap_or(2),
+            );
             let lifecycle = match SubagentLifecycleState::default().reduce(
                 SubagentLifecycleTransition::Spawned,
                 attempt_id.as_deref(),
@@ -1881,7 +1991,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 context_normalized,
                 parent_prompt_id: parent_prompt_id.map(Arc::from),
                 parent_session_id: Some(Arc::from(parent_session_id)),
-                depth: None,
+                depth,
                 started_at: now,
                 last_progress_at: now,
                 status: None,
@@ -1981,6 +2091,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             ) {
                 accepted.commit(&mut info.attempt.lifecycle);
             }
+            let mill_success = !matches!(
+                status.to_ascii_lowercase().as_str(),
+                "failed" | "error" | "cancelled" | "canceled"
+            );
             info.attempt.status = Some(Arc::from(status));
             info.attempt.error = error.map(Arc::from);
             info.attempt.tool_calls = Some(tool_calls);
@@ -2011,6 +2125,15 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
+            // A finished mill L2 never gets a prompt response. A trailing
+            // Next implement prompt on that child is the next parent turn.
+            // A failed finish does not auto-run. This does not Approve.
+            if mill_success {
+                let _ = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
+            }
             true
         }
         _ => false,
@@ -2326,6 +2449,14 @@ pub(super) fn apply_sampling_identity_from_retry(
     }
 }
 
+/// One `/login` sentence per expiry. A later failed nested run in the same expired session must not stack the same yellow paragraph.
+fn push_reauth_required_once(scrollback: &mut crate::scrollback::state::ScrollbackState) {
+    if crate::app::dispatch::scrollback_has_reauth_prompt(scrollback) {
+        return;
+    }
+    scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+}
+
 pub(super) fn apply_retry_state(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
@@ -2417,7 +2548,7 @@ pub(super) fn apply_retry_state_with_nested(
                 session.free_usage_blocked = true;
             } else if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                push_reauth_required_once(scrollback);
             } else if *rate_limited {
                 let error = crate::app::effects::sanitize_user_error(
                     &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
@@ -2447,7 +2578,7 @@ pub(super) fn apply_retry_state_with_nested(
                 session.credit_limit_blocked = true;
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                push_reauth_required_once(scrollback);
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
                 if !crate::app::dispatch::scrollback_has_recent_disk_full(scrollback) {
                     scrollback.push_block(RenderBlock::session_event(SessionEvent::DiskFull));
@@ -2566,5 +2697,57 @@ mod memory_capture_privacy_tests {
         let message = memory_capture_system_message(untrusted, 2, 4, 3);
         assert_eq!(message, "Memory capture updated for turns 2-4 (attempt 3)");
         assert!(!message.contains(untrusted));
+    }
+}
+
+#[cfg(test)]
+mod live_l3_depth_tests {
+    use super::super::handle;
+    use super::super::tests::{
+        make_app_with_agent, make_ext_session_notification, test_subagent_spawned,
+    };
+    use crate::app::agent::AgentId;
+
+    /// A live SubagentSpawned for an L3 writes depth 2.
+    /// The notification is addressed to the L2 session, which is the live path that registers the L3 on the L1 registry.
+    /// That path leaves `SubagentAttemptInfo.depth` as `None`.
+    #[test]
+    fn live_spawn_marks_l3_depth_so_the_overlay_stays_unaddressable() {
+        const OWED: &str = "A live SubagentSpawned for an L3 writes depth 2.";
+        let mut app = make_app_with_agent("l1-sess");
+        assert!(handle(
+            make_ext_session_notification("l1-sess", test_subagent_spawned("l1-sess", "l2-coord"),),
+            &mut app,
+        ));
+        {
+            let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+            assert!(
+                l1.subagent_view("l2-coord").is_some(),
+                "{OWED} The L2 session view must exist before the L3 spawn is delivered to that session."
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("l2-coord", test_subagent_spawned("l2-coord", "l3-spec")),
+            &mut app,
+        );
+        let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+        let attempt = &l1
+            .subagent_sessions
+            .get("l3-spec")
+            .expect("the live L3 spawn must register a row on the L1 session")
+            .attempt;
+        assert_eq!(
+            attempt.depth,
+            Some(2),
+            "{OWED} This path leaves depth as {:?}.",
+            attempt.depth
+        );
+        assert!(
+            !crate::app::subagent::overlay_child_is_l2_coordinator(
+                &l1.subagent_sessions,
+                "l3-spec",
+            ),
+            "{OWED} Depth 2 keeps the L3 overlay unaddressable."
+        );
     }
 }

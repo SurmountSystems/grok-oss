@@ -275,7 +275,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 json_schema: rs::ResponseFormatJsonSchema {
                     description: None,
                     name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
-                    schema: Some(schema),
+                    schema,
                     strict: Some(true),
                 },
             });

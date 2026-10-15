@@ -499,6 +499,29 @@ pub fn enlarge_button() -> &'static str {
     }
 }
 
+/// `"[⧉]"` normally, `"[c]"` on legacy ConHost. Always 3 columns wide.
+///
+/// Bordered copy control. The bare [`copy_icon`] glyph is the inside of this
+/// button, not the control itself.
+pub fn copy_button() -> &'static str {
+    if is_legacy_windows_console() {
+        "[c]"
+    } else {
+        "[\u{29C9}]"
+    }
+}
+
+/// `"[⌕]"` normally, `"[s]"` on legacy ConHost. Always 3 columns wide.
+///
+/// Bordered search control, same size as [`copy_button`] and [`enlarge_button`].
+pub fn search_button() -> &'static str {
+    if is_legacy_windows_console() {
+        "[s]"
+    } else {
+        "[\u{2315}]"
+    }
+}
+
 /// One funnel for toast chrome that legacy ConHost cannot render. Non-legacy platforms return the borrow unchanged.
 pub fn legacy_glyph_fallback(s: &str) -> Cow<'_, str> {
     if !is_legacy_windows_console() {
@@ -639,6 +662,23 @@ mod tests {
             copy_icon().width(),
             1,
             "copy_icon() must stay 1 column wide"
+        );
+        assert_eq!(
+            copy_button().width(),
+            3,
+            "bordered copy control is the same 3 columns as [↗] and [✗]"
+        );
+        assert_eq!(search_button().width(), 3);
+        assert_eq!(enlarge_button().width(), 3);
+        assert_eq!(ballot_x_button().width(), 3);
+        assert!(
+            copy_button().starts_with('[') && copy_button().ends_with(']'),
+            "tool-card and plan-header copy is a bordered control, not flat text"
+        );
+        assert_ne!(
+            copy_button(),
+            copy_icon(),
+            "the bordered copy control is not the bare glyph"
         );
     }
 

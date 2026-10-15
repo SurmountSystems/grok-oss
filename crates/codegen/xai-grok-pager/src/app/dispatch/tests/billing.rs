@@ -15,6 +15,21 @@ fn open_upsell_max_card(app: &mut AppView, mode: CreditLimitUpsellMode) {
     open_credit_limit_upsell(agent, mode, true);
 }
 
+/// The `CreditLimitBlock` pushed at scrollback index `idx`.
+fn credit_limit_block_at(
+    app: &AppView,
+    idx: usize,
+) -> &crate::scrollback::blocks::CreditLimitBlock {
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    match agent.scrollback.entry(idx) {
+        Some(entry) => match &entry.block {
+            crate::scrollback::block::RenderBlock::CreditLimit(blk) => blk,
+            _ => panic!("expected CreditLimit block at index {idx}"),
+        },
+        None => panic!("expected scrollback entry at index {idx}"),
+    }
+}
+
 /// Return the `QuestionViewState` from agent 0. Panics if absent.
 fn agent_qv(app: &AppView) -> &crate::views::question_view::QuestionViewState {
     app.agents
@@ -313,29 +328,22 @@ fn credit_limit_translate_retry_option_dispatches_retry() {
 }
 
 #[test]
-fn credit_limit_translate_max_tier_retry_is_second_option() {
-    use crate::app::agent_view::translate_local_submit_for_test;
-    use crate::app::app_view::InputOutcome;
-    use crate::views::question_view::QuestionSelection;
-
+fn credit_limit_max_tier_unified_pushes_inline_card() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
-    let mut qv = app
-        .agents
-        .get_mut(&AgentId(0))
-        .unwrap()
-        .question_view
-        .take()
-        .expect("expected credit-limit upsell modal");
-    set_first_selection(&mut qv, QuestionSelection::Single(Some(1)));
-    let kind = qv
-        .local_kind
-        .take()
-        .expect("open_credit_limit_upsell sets local_kind");
-    match translate_local_submit_for_test(&qv, kind, false) {
-        InputOutcome::Action(Action::RetryCreditLimitPrompt) => {}
-        other => panic!("expected RetryCreditLimitPrompt, got {other:?}"),
-    }
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier must not open the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("weekly limit"));
+    assert_eq!(
+        blk.action,
+        crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits
+    );
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
@@ -503,25 +511,22 @@ fn upsell_non_max_unified_shows_buy_credits() {
 }
 
 #[test]
-fn upsell_max_unified_qa_omits_upgrade() {
+fn upsell_max_unified_card_mentions_purchasing() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
-    assert_eq!(
-        agent_scrollback_len(&app),
-        before,
-        "max-tier upsell must not push a scrollback card"
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier upsell must not open the question modal"
     );
-    let q = first_question(agent_qv(&app));
-    assert!(q.question.contains("weekly limit"));
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(option_at(q, 0).label, "Buy more credits");
-    assert_eq!(option_at(q, 0).id.as_deref(), Some(UPSELL_URL_PAYG));
-    assert_eq!(option_at(q, 1).label, "Try Again");
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("weekly limit"));
     assert_eq!(
-        option_at(q, 1).id.as_deref(),
-        Some(crate::app::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID)
+        blk.action,
+        crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits
     );
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
@@ -646,79 +651,107 @@ fn upsell_non_max_idempotent_when_question_view_already_open() {
 }
 
 #[test]
-fn upsell_max_tier_opens_qa_without_upgrade_payg_off() {
+fn upsell_max_tier_pushes_scrollback_card_payg_off() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_some());
-    assert_eq!(agent_scrollback_len(&app), before);
-    let q = first_question(agent_qv(&app));
-    assert!(q.question.contains("credit limit"));
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(option_at(q, 0).label, "Pay as you go");
-    assert_eq!(option_at(q, 0).id.as_deref(), Some(UPSELL_URL_PAYG));
-    assert_eq!(option_at(q, 1).label, "Try Again");
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier should NOT open the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("credit limit"));
+    assert_eq!(
+        blk.action,
+        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
+    );
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
-fn upsell_max_tier_opens_qa_without_upgrade_payg_on() {
+fn upsell_max_tier_pushes_scrollback_card_payg_on() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
-    let q = first_question(agent_qv(&app));
-    assert!(q.question.contains("spending cap"));
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(option_at(q, 0).label, "Increase limit");
-    assert_eq!(option_at(q, 1).label, "Try Again");
+    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_none());
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("spending cap"));
+    assert_eq!(
+        blk.action,
+        crate::scrollback::blocks::CreditLimitCardAction::IncreasePaygLimit
+    );
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
-fn upsell_max_tier_opens_question_view() {
+fn upsell_max_tier_does_not_open_question_view() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert!(
-        app.agents.get(&AgentId(0)).unwrap().question_view.is_some(),
-        "max-tier should use the question modal"
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier should use the inline card, not the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(
+        blk.heading.contains("credit limit"),
+        "max-tier must push a credit-limit card, got heading: {}",
+        blk.heading
     );
 }
 
 #[test]
 fn upsell_max_tier_buy_url_is_payg() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    assert_eq!(
-        option_at(first_question(agent_qv(&app)), 0).id.as_deref(),
-        Some(UPSELL_URL_PAYG)
-    );
+    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_none());
+    assert_eq!(credit_limit_block_at(&app, before).url, UPSELL_URL_PAYG);
 }
 
 #[test]
-fn upsell_max_tier_idempotent_when_question_view_already_open() {
+fn upsell_max_tier_not_idempotent_pushes_multiple_cards() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    let first_id = agent_qv(&app).tool_call_id.clone();
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
+    );
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier must not open the question modal"
     );
     assert_eq!(
-        agent_qv(&app).tool_call_id,
-        first_id,
-        "second call must not replace the open modal"
+        agent_scrollback_len(&app),
+        before + 2,
+        "max-tier path pushes a card on every call"
+    );
+    assert_eq!(
+        credit_limit_block_at(&app, before).action,
+        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
+    );
+    assert_eq!(
+        credit_limit_block_at(&app, before + 1).action,
+        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
     );
 }
 

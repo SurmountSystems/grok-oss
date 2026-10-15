@@ -15,7 +15,7 @@ For **fork-only** concerns (packaging, branding scripts, Surmount-only features
 such as OpenRouter wiring as maintained here), contact Surmount maintainers
 privately:
 
-- Email: **security@surmount.systems** (or the current Surmount security contact)
+- Email: **security@surmount.systems**
 
 Please include steps to reproduce, affected version / commit, and impact.
 Do not file public issues for unfixed vulnerabilities.

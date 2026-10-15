@@ -398,6 +398,24 @@ pub enum ControlCommand {
     RelaunchForUpdate {
         to_version: String,
     },
+    /// Apply an already-chosen included SuperGrok period limits pin for one account.
+    /// The leader writes that pin in its own grok home. This command does not re-exec.
+    /// Stock `preferred_method = "api_key"` stays in config and the console API key stays unused.
+    ApplyIncludedLimits {
+        account: IncludedLimitsAccount,
+    },
+}
+
+/// Account named by [`ControlCommand::ApplyIncludedLimits`].
+///
+/// Personal and business are separate included SuperGrok period limits.
+/// SuperGrok is paid. This is not SuperGrok dollar credits and not console
+/// team prepaid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncludedLimitsAccount {
+    Personal,
+    Business,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -486,6 +504,8 @@ pub enum ControlPayload {
     /// Response to [`ControlCommand::RelaunchForUpdate`] when the leader will not relaunch.
     /// E.g. it is already running `to_version` or newer, or a relaunch is already in progress.
     RelaunchDeclined { reason: String },
+    /// Ack for [`ControlCommand::ApplyIncludedLimits`]. The pin is included limits for `account`.
+    IncludedLimitsApplied { account: IncludedLimitsAccount },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1057,6 +1077,26 @@ mod tests {
         let status: ControlCommand =
             serde_json::from_str(r#"{"type":"cursor_worker_status"}"#).unwrap();
         assert_eq!(ControlCommand::CursorWorkerStatus, status);
+    }
+
+    #[test]
+    fn apply_included_limits_roundtrip_names_the_account() {
+        let personal = ControlCommand::ApplyIncludedLimits {
+            account: IncludedLimitsAccount::Personal,
+        };
+        let json = serde_json::to_string(&personal).unwrap();
+        assert!(json.contains("\"type\":\"apply_included_limits\""));
+        assert!(json.contains("\"account\":\"personal\""));
+        let decoded: ControlCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(personal, decoded);
+        let ack = ControlPayload::IncludedLimitsApplied {
+            account: IncludedLimitsAccount::Business,
+        };
+        let ack_json = serde_json::to_string(&ack).unwrap();
+        assert!(ack_json.contains("\"type\":\"included_limits_applied\""));
+        assert!(ack_json.contains("\"account\":\"business\""));
+        let ack_decoded: ControlPayload = serde_json::from_str(&ack_json).unwrap();
+        assert_eq!(ack, ack_decoded);
     }
 
     #[test]

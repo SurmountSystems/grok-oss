@@ -17,6 +17,32 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::time::Instant;
+
+/// A left click on the header credits chip is one-way.
+///
+/// It writes `MeterSource::Included` when that pin would make the next
+/// request draw included SuperGrok period limits. It does not toggle back
+/// to SuperGrok dollar credits or the console API key. It does not set
+/// `use_console`. An Included pin draws that meter even beside a Team JWT.
+/// `use_console` still does not draw it, so this click leaves the pin when
+/// `use_console` is already set.
+fn pin_header_credits_click_to_included_period_limits() {
+    use xai_grok_shell::auth::limits_pins::{
+        MeterSource, apply_meter_source, load_limits_pins,
+        next_request_draws_included_period_limits_for,
+    };
+    let pins = load_limits_pins();
+    if pins.meter_source == Some(MeterSource::Included) {
+        return;
+    }
+    let mut probe = pins;
+    probe.meter_source = Some(MeterSource::Included);
+    if !next_request_draws_included_period_limits_for(&probe) {
+        return;
+    }
+    let _ = apply_meter_source(MeterSource::Included);
+}
+
 /// External-editor access to the ordinary composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalPromptEditorAccess {
@@ -357,6 +383,26 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
+        // The status-row control sits outside the plan pane. The line viewer
+        // and the plan-approval mouse path return Changed for that outside
+        // click. A left click writes Included when this session can draw
+        // included SuperGrok period limits, then opens the card. Plan mode
+        // closed and the plan-approval screen share this path.
+        // An open Limits card owns clicks on its own controls. `Use limits`
+        // must reach that card. Exit, comment, revise, and the close control
+        // stay on their own paths.
+        let limits_card_open = matches!(
+            self.active_modal,
+            Some(crate::views::modal::ActiveModal::Limits { .. })
+        );
+        if let Event::Mouse(mouse) = ev
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.hit_credits.contains(mouse.column, mouse.row)
+            && !limits_card_open
+        {
+            pin_header_credits_click_to_included_period_limits();
+            return InputOutcome::Action(Action::ShowLimits);
+        }
         if let Some(outcome) = self.intercept_takeover_input(ev, registry, prompt_paging) {
             return outcome;
         }
@@ -620,6 +666,22 @@ impl AgentView {
             {
                 return InputOutcome::Action(Action::VoiceToggle);
             }
+            // Plan approval and comment share the main composer for
+            // Shift-Enter, the four arrows, Ctrl-Backspace, Ctrl-A, and
+            // Ctrl-E. Preview focus otherwise keeps those keys on the plan
+            // list. Ask has no line viewer and already reaches
+            // `handle_prompt_key`. The search bar keeps its own arrows.
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && self.plan_approval_view.is_some()
+                && self
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.list_state.input_mode().is_none())
+                && Self::plan_prompt_key_reaches_main_composer(key)
+            {
+                return self.handle_prompt_key(key, registry, false);
+            }
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()
@@ -634,6 +696,12 @@ impl AgentView {
                         let composing = super::viewer::plan_preview_key_is_composer_text(key);
                         if let Some(outcome) =
                             self.try_plan_overlay_agent_action(key, registry, composing)
+                        {
+                            return outcome;
+                        }
+                        // Unique `/model` Tab switches now. RowWalk must not
+                        // steal that Tab while Isolated Preview is open.
+                        if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry)
                         {
                             return outcome;
                         }
@@ -672,6 +740,9 @@ impl AgentView {
                         if self.plan_approval_view.is_some()
                             && self.route_plan_prompt_mouse_drag(mouse, in_prompt)
                         {
+                            if self.left_click_on_composer_copy_button(mouse) {
+                                return InputOutcome::Changed;
+                            }
                             self.prompt.handle_mouse(mouse);
                             return InputOutcome::Changed;
                         }
@@ -716,6 +787,9 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
+                        if self.left_click_on_composer_copy_button(mouse) {
+                            return InputOutcome::Changed;
+                        }
                         self.prompt.handle_mouse(mouse);
                         InputOutcome::Changed
                     } else if self.route_plan_scrollback_mouse(mouse) {
@@ -946,6 +1020,9 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
+                        if self.left_click_on_composer_copy_button(mouse) {
+                            return InputOutcome::Changed;
+                        }
                         self.prompt.handle_mouse(mouse);
                         return InputOutcome::Changed;
                     }
@@ -1088,9 +1165,10 @@ impl AgentView {
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    self.probe_attachment_around_bracketed_insert(text, |view| {
-                        view.insert_bracketed_prompt_text(text)
-                    })
+                    // Empty screenshot paste and the GNOME All Markup Copy
+                    // title wait for the raster probe on every OS. Inserting
+                    // first drops the probe on Linux.
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 } else {
                     let consumed = match self.active_pane {
                         AgentPane::Todo => self.todo.handle_paste(text),

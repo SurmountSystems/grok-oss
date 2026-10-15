@@ -48,7 +48,10 @@ pub async fn follow_up_steer_enabled() -> bool {
     let mtime = follow_up_config_mtime_ns();
     let cached_mtime = FOLLOW_UP_STEER_MTIME_NS.load(Ordering::Relaxed);
     let cached = FOLLOW_UP_STEER_CACHE.load(Ordering::Relaxed);
-    if cached != FOLLOW_UP_CACHE_UNKNOWN && mtime != 0 && mtime == cached_mtime {
+    // Honor an explicit cache, including mtime 0 (no config.toml). A later
+    // settings write changes the mtime and reloads. A cold cache stays unknown
+    // and still reads disk.
+    if cached != FOLLOW_UP_CACHE_UNKNOWN && mtime == cached_mtime {
         return cached == FOLLOW_UP_CACHE_STEER;
     }
     let root = match crate::config::load_effective_config() {

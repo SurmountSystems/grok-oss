@@ -853,10 +853,19 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
     auto_label()
 }
 
-/// Grok home for worktree paths: the same resolver as `worktrees.db`, with a `temp_dir()/.grok` last resort.
-/// This is not grok-config's cwd-relative `.grok`: worktree paths need an absolute, always-writable anchor that does not move with the process cwd.
+/// Grok home for worktree paths: the same resolver as `worktrees.db`, with a
+/// `temp_dir()/.grok` last resort when that home cannot be created.
+/// This is not grok-config's cwd-relative `.grok`: worktree paths need an
+/// absolute, always-writable anchor that does not move with the process cwd.
 fn grok_home() -> std::path::PathBuf {
-    xai_fast_worktree::resolve_grok_home().unwrap_or_else(|_| std::env::temp_dir().join(".grok"))
+    if let Ok(home) = xai_fast_worktree::resolve_grok_home()
+        && std::fs::create_dir_all(&home).is_ok()
+    {
+        return home;
+    }
+    let fallback = std::env::temp_dir().join(".grok");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
 }
 
 /// Returns `~/.grok/worktrees/<repo_slug>` for the given git root.

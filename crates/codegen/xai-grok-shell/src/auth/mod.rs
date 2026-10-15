@@ -19,7 +19,8 @@ mod jwt;
 pub mod limits_pins;
 pub mod limits_snapshot_hub;
 pub(crate) mod manager;
-mod model;
+// The login crate owns this model. Do not add a second copy under shell.
+use xai_grok_login::model;
 pub mod oidc;
 pub mod openrouter;
 pub(crate) mod recovery;

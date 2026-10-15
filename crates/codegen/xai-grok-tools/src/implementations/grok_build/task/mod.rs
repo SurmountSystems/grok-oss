@@ -40,8 +40,12 @@ use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInp
 
 pub const TASK_TOOL_NAME: &str = "task";
 
-/// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+/// Unset nesting ceiling when [`MaxSubagentDepth`] is not injected.
+///
+/// L1 spawns an L2, an L2 spawns an L3, and an L3 does not spawn an L4.
+/// This is not a floor. An explicit operator `max_depth = 1` is injected as
+/// [`MaxSubagentDepth`] and must stay 1.
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources
@@ -688,25 +692,35 @@ impl xai_tool_runtime::Tool for TaskTool {
             )));
         }
 
-        let agent_id = input.task_id.map_or_else(
-            || {
-                let generated = uuid::Uuid::now_v7().to_string();
-                xai_message_delivery_core::AgentId::from_uuid_v7(generated).ok_or_else(|| {
+        let id = if let Some(task_id) = input.task_id {
+            let task_id = task_id.trim().to_string();
+            if task_id.is_empty() {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "Injected task_id must not be empty.",
+                ));
+            }
+            // Worktree directories are keyed by a host UUIDv7. A plain id is
+            // the wait id (`l3`, a path claim) and must round-trip on the notice.
+            if input.isolation == Some(SubagentIsolationMode::Worktree)
+                && xai_message_delivery_core::AgentId::from_uuid_v7(task_id.clone()).is_none()
+            {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "Injected task_id must be a UUIDv7.",
+                ));
+            }
+            task_id
+        } else {
+            let generated = uuid::Uuid::now_v7().to_string();
+            xai_message_delivery_core::AgentId::from_uuid_v7(generated.clone()).ok_or_else(
+                || {
                     xai_tool_runtime::ToolError::custom(
                         "identity_generation_failed",
                         "Generated subagent identity was not a UUIDv7.",
                     )
-                })
-            },
-            |task_id| {
-                xai_message_delivery_core::AgentId::from_uuid_v7(task_id).ok_or_else(|| {
-                    xai_tool_runtime::ToolError::invalid_arguments(
-                        "Injected task_id must be a UUIDv7.",
-                    )
-                })
-            },
-        )?;
-        let id = agent_id.to_string();
+                },
+            )?;
+            generated
+        };
 
         // Treat blank/empty/"null" resume_from as absent (models sometimes emit these).
         let resume_from = input.resume_from.and_then(|s| {

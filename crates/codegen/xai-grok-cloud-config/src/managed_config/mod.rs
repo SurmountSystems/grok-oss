@@ -89,8 +89,15 @@ fn run_managed_policy_gate(lock_wait: std::time::Duration) -> Result<(), Managed
     if !store::managed_principal_present() {
         return Ok(());
     }
-    let snapshot = locked_gate_snapshot(&xai_dirs::grok_home(), lock_wait)?;
-    policy::managed_policy_gate_decision(snapshot)
+    // A lock the caller still holds is a skip, not a refusal. The wait stays
+    // bounded so a brief holder is absorbed. After that wait, Busy means the
+    // holder owns the transition: do not purge, and do not refuse a pure
+    // identity mismatch. The next gate after the lock drops still purges.
+    match locked_gate_snapshot(&xai_dirs::grok_home(), lock_wait) {
+        Ok(snapshot) => policy::managed_policy_gate_decision(snapshot),
+        Err(ManagedPolicyRefusal::Busy) => Ok(()),
+        Err(other) => Err(other),
+    }
 }
 
 fn locked_gate_snapshot(

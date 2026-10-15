@@ -271,12 +271,15 @@ pub fn context_bar_line_with_windows(
     let total = context_chip_gate_window(sampling_window, catalog_window)?;
     let pct = xai_token_estimation::usage_percentage(used, total);
 
-    // Default form drives the line width: `used / total`, right-padded to the minimum hover width so both states render at the same width
-    let mut token_str = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
-    let natural_width = token_str.chars().count() as u16;
+    // Hover width stays on the short gate form so the percent is of the
+    // sampling window. The resting chip names each window when they differ.
+    let mut width_basis = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
+    let named = context_chip_token_text(used, sampling_window, catalog_window)
+        .unwrap_or_else(|| width_basis.clone());
+    let natural_width = width_basis.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
     if natural_width < min_width {
-        token_str.push_str(&" ".repeat((min_width - natural_width) as usize));
+        width_basis.push_str(&" ".repeat((min_width - natural_width) as usize));
     }
     let total_width = natural_width.max(min_width);
 
@@ -299,7 +302,14 @@ pub fn context_bar_line_with_windows(
         ));
         Some(Line::from(spans))
     } else {
-        Some(Line::from(Span::styled(token_str, mark)))
+        // Resting chip uses the named windows string, then the same minimum
+        // width as the hover percent so `0 / 9` does not sit one column short.
+        let mut shown = named;
+        let shown_width = shown.chars().count();
+        if shown_width < total_width as usize {
+            shown.push_str(&" ".repeat(total_width as usize - shown_width));
+        }
+        Some(Line::from(Span::styled(shown, mark)))
     }
 }
 

@@ -165,7 +165,7 @@ pub struct PromptStyle {
     /// Override the accent line color.
     /// When `Some`, uses this color instead of the default `accent_user` / `gray_dim`. Used for plan mode (golden).
     pub accent_color_override: Option<ratatui::style::Color>,
-    /// Override the border color (╭─╮│╰─╯).
+    /// Override the border color (┌─┐│└─┘).
     /// When `Some`, uses this color instead of `prompt_border_active` / `prompt_border`. Used for plan mode.
     pub border_color_override: Option<ratatui::style::Color>,
     /// Override the prefix character and its color.
@@ -187,13 +187,17 @@ pub struct PromptStyle {
     /// Show the accent line (`┃`) on the left edge of the chrome.
     /// When false the line is hidden and its column reclaimed for content.
     pub show_accent_line: bool,
-    /// Draw the prompt's border box (top `╭─╮` divider, side `│` borders, and bottom info divider).
+    /// Draw the prompt's border box (top `┌─┐` divider, side `│` borders, and bottom info divider).
     /// Only consulted when `chrome` is true.
     /// Defaults to `true` (the full-TUI boxed prompt); minimal mode sets it `false` for a cleaner, border-less input that still keeps the chrome padding.
     pub show_borders: bool,
     /// Session title inlined in the top border, aligned and styled like the bottom info line.
     /// None (default) keeps the plain border. Set only by the agent view.
     pub title: Option<String>,
+    /// Columns kept clear on the right of the top rule so a control painted
+    /// after the title (the inset copy glyph) does not cover it. Zero keeps
+    /// the title on the info-line column.
+    pub title_reserve_right: u16,
     /// Paint image-chip overlay into `overlay_area` (default true).
     pub image_preview: bool,
 }
@@ -244,6 +248,7 @@ impl Default for PromptStyle {
             show_accent_line: false,
             show_borders: true,
             title: None,
+            title_reserve_right: 0,
             image_preview: true,
         }
     }
@@ -280,6 +285,7 @@ impl PromptStyle {
             show_accent_line: false,
             show_borders: false,
             title: None,
+            title_reserve_right: 0,
             image_preview: true,
         }
     }
@@ -1922,6 +1928,22 @@ impl PromptWidget {
             return PromptEvent::Edited;
         }
 
+        // Buffer jumps. Bare Home and End stay line-local inside the textarea.
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Home | KeyCode::PageUp => {
+                    self.textarea.set_cursor(0);
+                    return PromptEvent::Edited;
+                }
+                KeyCode::End | KeyCode::PageDown => {
+                    let end = self.textarea.text().len();
+                    self.textarea.set_cursor(end);
+                    return PromptEvent::Edited;
+                }
+                _ => {}
+            }
+        }
+
         // Everything else: delegate to textarea.
         // Selection is rendered state: selection-only changes must report Edited or no frame is drawn.
         let old_text = self.textarea.text().to_owned();
@@ -2957,9 +2979,9 @@ impl PromptWidget {
         self.paste_text(self.paste_element_near_cursor()?)
     }
 
-    /// Expand hint for the paste preview overlay, honest per position.
-    /// ON the chip Enter expands it; right after the chip Enter submits, so the hint there advertises pasting the content again.
-    /// Double-click expands from either position (a click moves the cursor onto the chip first).
+    /// Expand hint for the paste preview overlay. Enter submits from either
+    /// position. Expand is paste-again or double-click. A click moves the
+    /// cursor onto the chip first.
     fn paste_preview_hint(&self, theme: &Theme) -> Line<'static> {
         let dim = theme.muted();
         // The chord deliberately deviates from the tips' text_secondary to a real accent
@@ -2997,16 +3019,26 @@ impl PromptWidget {
         true
     }
 
-    /// Try to interact with an element at the cursor. Enter on a paste/file-ref element inlines
-    /// (expands) it. Enter on an image chip signals the caller to open the preview (it does NOT inline
-    /// the placeholder text). Returns `Some(interaction)` if handled, `None` otherwise.
+    /// Try to interact with an element at the cursor. Enter on a paste chip
+    /// clears that chip into the buffer and returns `None` so the caller
+    /// submits the body. It does not stop at expand. Enter on a file-ref
+    /// inlines it. Enter on an image chip signals the caller to open the
+    /// preview (it does NOT inline the placeholder text). Returns
+    /// `Some(interaction)` if handled, `None` otherwise.
     pub fn try_element_interaction(&mut self, key: &KeyEvent) -> Option<ElementInteraction> {
         let elem = self.textarea.element_at_cursor()?;
         if !key!(Enter).matches(key) {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE => None,
+            // None tells the caller to submit. Clearing the chip leaves the
+            // paste body as plain text, so the send carries those lines.
+            // Returning here would only expand and leave the body unsent.
+            k if k == KIND_PASTE => {
+                let id = elem.id;
+                self.expand_element(id);
+                None
+            }
             k if k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
@@ -3120,13 +3152,14 @@ impl PromptWidget {
             };
         };
 
-        // Top divider: ╭──────────╮
+        // Top divider: ┌──────────┐
         if vpad_top > 0 && style.chrome && style.show_borders {
-            // Session title uses chrome-caption (0.6 blend). On DOGE that
-            // solid-step stays `text_secondary` (white), same as the focused
-            // rule. Keep the frame on `prompt_border` (white on DOGE). Paint
-            // the session name as context chrome (`theme.gray` / yellow) so
-            // the title still contrasts. Do not yellow the whole box.
+            // Session title uses chrome-caption. Focused DOGE opacity 0.6
+            // stays `text_secondary` (white), the same as the rule. Unfocused
+            // opacity 0.4 steps to `bg` and would paint black on black.
+            // Either case paints the name `theme.gray` (yellow) when that
+            // color differs from both the rule and the canvas. Do not yellow
+            // the box, and do not blink the title.
             let caption_style = Self::chrome_caption_style(bg, &theme, style.focused);
             let caption_fg = caption_style.fg;
             let title_will_paint = style
@@ -3136,10 +3169,12 @@ impl PromptWidget {
                 .filter(|t| !t.is_empty())
                 .is_some()
                 && area.width.saturating_sub(6) >= 6;
-            let title_style = if title_will_paint && caption_fg == Some(border_color) {
-                if theme.gray != border_color {
+            let caption_matches_rule_or_canvas =
+                caption_fg == Some(border_color) || caption_fg == Some(bg);
+            let title_style = if title_will_paint && caption_matches_rule_or_canvas {
+                if theme.gray != border_color && theme.gray != bg {
                     Style::default().fg(theme.gray).bg(bg)
-                } else if theme.gray_dim != border_color {
+                } else if theme.gray_dim != border_color && theme.gray_dim != bg {
                     Style::default().fg(theme.gray_dim).bg(bg)
                 } else {
                     caption_style
@@ -3154,9 +3189,9 @@ impl PromptWidget {
             for x in area.x..area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, div_y)) {
                     let ch = if x == left_x {
-                        '\u{256d}' // ╭
+                        '\u{250c}' // ┌
                     } else if x == right_x {
-                        '\u{256e}' // ╮
+                        '\u{2510}' // ┐
                     } else {
                         '\u{2500}' // ─
                     };
@@ -3172,20 +3207,32 @@ impl PromptWidget {
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty());
-            let caption_right = content_area.x + content_area.width;
-            let max_w = caption_right.saturating_sub(area.x + 3);
-            if let Some(caption) = caption
-                && max_w >= 6
-            {
+            let caption_right =
+                (content_area.x + content_area.width).saturating_sub(style.title_reserve_right);
+            // Room from the second dash through the column before the corner.
+            let max_fit = caption_right.saturating_sub(area.x + 3);
+            if let Some(caption) = caption {
                 let label = format!(" {caption} ");
-                let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
-                let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                buf.set_string(
-                    caption_right.saturating_sub(label_w),
-                    div_y,
-                    &trunc,
-                    title_style,
-                );
+                let label_cols = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+                // A title that fits keeps the info-line column (one cell before the corner).
+                // A title that does not fit stops two cells earlier so both ends of the rule stay dashes.
+                let (paint, end_col) = if label_cols <= max_fit && max_fit >= 6 {
+                    (label, caption_right)
+                } else {
+                    let trunc_max = max_fit.saturating_sub(2);
+                    if trunc_max < 6 {
+                        (String::new(), 0)
+                    } else {
+                        (
+                            crate::render::line_utils::truncate_str(&label, trunc_max as usize),
+                            caption_right.saturating_sub(2),
+                        )
+                    }
+                };
+                if !paint.is_empty() {
+                    let label_w = unicode_width::UnicodeWidthStr::width(paint.as_str()) as u16;
+                    buf.set_string(end_col.saturating_sub(label_w), div_y, &paint, title_style);
+                }
             }
         }
 
@@ -3256,7 +3303,7 @@ impl PromptWidget {
         // Slash overlays: teal command name and args ghost text
         // Both use the same snapshot, so clone once
         // Capture flags for later ghost text suppression to avoid a second clone
-        let (slash_active, slash_has_inline_ghost) = {
+        let (slash_active, slash_has_inline_ghost, inline_ghost_at_cursor, args_ghost_at_cursor) = {
             let snap = self.slash_state.snapshot();
 
             // Slash command-name highlight color
@@ -3346,7 +3393,20 @@ impl PromptWidget {
                 );
             }
 
-            (snap.active, snap.inline_ghost.is_some())
+            let inline_ghost_at_cursor = snap.inline_ghost.as_ref().is_some_and(|ghost| {
+                !ghost.text.is_empty() && ghost.token_range.end == self.textarea.cursor()
+            });
+            let args_ghost_at_cursor = snap.args_query_is_empty
+                && snap
+                    .args_placeholder
+                    .as_ref()
+                    .is_some_and(|placeholder| !placeholder.is_empty());
+            (
+                snap.active,
+                snap.inline_ghost.is_some(),
+                inline_ghost_at_cursor,
+                args_ghost_at_cursor,
+            )
         };
 
         // Interim STT: muted italic overlay (not in the textarea)
@@ -3490,7 +3550,7 @@ impl PromptWidget {
             }
         }
 
-        // Bottom divider: ╰──────────grok-3 · flags──╯
+        // Bottom divider: └──────────grok-3 · flags──┘
         // Guard on actual allocated height, not requested `info_block`
         // During resize the layout may squeeze the info block to 0 rows, leaving chunks[2].y past the buffer boundary
         if info_block > 0
@@ -3506,9 +3566,9 @@ impl PromptWidget {
             for x in area.x..area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, div_y)) {
                     let ch = if x == left_x {
-                        '\u{2570}' // ╰
+                        '\u{2514}' // └
                     } else if x == right_x {
-                        '\u{256f}' // ╯
+                        '\u{2518}' // ┘
                     } else {
                         '\u{2500}' // ─
                     };
@@ -3545,21 +3605,25 @@ impl PromptWidget {
         let layout_cursor_pos = self
             .textarea
             .cursor_pos_with_state(ta_area, self.textarea_state);
-        let cursor_pos = if !style.focused {
-            None
-        } else {
-            // `interim_caret` is only set while the interim shows
-            interim_caret.or(layout_cursor_pos)
-        };
+        // The software box caret is the insertion point. The hardware cursor stays hidden.
+        let caret_cell = interim_caret.or(layout_cursor_pos);
+        // A full row keeps the caret on the last content cell (`col >= tw`).
+        // That cell is still the typed character. Ghost text starts at the
+        // unclamped insertion column, which is the row edge, so width is 0
+        // and an ellipsis is not painted over the last letter.
+        let ghost_anchor = self
+            .textarea
+            .screen_position_of(self.textarea.cursor(), ta_area, self.textarea_state)
+            .or(layout_cursor_pos);
 
         // Ghost suffixes (shell completion / predicted prompt)
-        // Voice interim owns the end-of-text cells when shown, so skip both ghosts then
-        if !voice_interim_shown {
+        // Unfocused composers skip ghosts. Voice interim owns the end-of-text cells when shown.
+        if style.focused && !voice_interim_shown {
             if let Some(ghost) = self.suggestions.ghost_text()
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = layout_cursor_pos
+                && let Some((cx, cy)) = ghost_anchor
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3567,16 +3631,46 @@ impl PromptWidget {
                     buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
                 }
             }
+        }
 
-            if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = layout_cursor_pos
-            {
-                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-                if avail > 0 {
-                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
-                }
-            }
+        // Ghost text owns the insertion cell. A block glyph must not replace it.
+        let cursor_at_end = self.textarea.cursor() == self.textarea.text().len();
+        let shell_ghost_at_caret = style.focused
+            && !voice_interim_shown
+            && cursor_at_end
+            && self.suggestions.ghost_text().is_some()
+            && !slash_active
+            && !slash_has_inline_ghost;
+        let prompt_ghost_at_caret = false;
+        let ghost_covers_caret = shell_ghost_at_caret
+            || prompt_ghost_at_caret
+            || inline_ghost_at_cursor
+            || args_ghost_at_cursor;
+
+        // Bordered composer: software block caret, hardware cursor hidden.
+        // Chromeless draws keep cell symbols (voice row text, ghost text) and
+        // report the layout cursor instead. Filled half is Operator green.
+        // Empty half on a letter is normal text.
+        if style.focused
+            && style.chrome
+            && !voice_interim_shown
+            && !ghost_covers_caret
+            && let Some((cx, cy)) = caret_cell
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            let allow_block_glyph = cursor_at_end;
+            paint_composer_box_cursor_phase(
+                buf,
+                cx,
+                cy,
+                &theme,
+                bg,
+                crate::glyphs::cursor_box_filled_phase(now_ms),
+                allow_block_glyph,
+            );
         }
 
         // Paste preview overlay: show when cursor is on or right after a paste element
@@ -3602,8 +3696,8 @@ impl PromptWidget {
         if let Some(image) = preview_image {
             let Some(overlay) = overlay_area else {
                 return PromptRenderResult {
-                    cursor_pos,
-                    caret_cell: layout_cursor_pos,
+                    cursor_pos: None,
+                    caret_cell,
                     post_flush_escapes: None,
                 };
             };
@@ -3622,14 +3716,25 @@ impl PromptWidget {
             post_flush_escapes = crate::terminal::overlay::clear();
         }
 
+        // While interim words show, the reported cursor is the cell after
+        // those words (empty draft + "there" is column 5 on row 0), including
+        // a wrap onto the next row when the first row is full. A bordered
+        // composer paints the software block caret and reports no hardware
+        // cursor. A chromeless composer reports the layout cell.
         PromptRenderResult {
-            cursor_pos,
-            caret_cell: layout_cursor_pos,
+            cursor_pos: if voice_interim_shown {
+                interim_caret
+            } else if style.focused && !style.chrome {
+                layout_cursor_pos
+            } else {
+                None
+            },
+            caret_cell,
             post_flush_escapes,
         }
     }
 
-    /// Caption style for text embedded in the prompt's border chrome (the info line's model name on `╰─╯` and the session title on `╭─╮`).
+    /// Caption style for text embedded in the prompt's border chrome (the info line's model name on `└─┘` and the session title on `┌─┐`).
     /// Dimmed secondary text over the prompt bg, fading further when unfocused, so both borders read as one chrome.
     fn chrome_caption_style(bg: ratatui::style::Color, theme: &Theme, focused: bool) -> Style {
         let opacity = if focused { 0.6 } else { 0.4 };
@@ -3663,13 +3768,20 @@ impl PromptWidget {
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_fg = if focused {
-            theme.accent_model
+        // Bandless terminal chrome stores gray as Reset. The model name then stays
+        // default-fg plus DIM so a plan-colored border underneath does not recolor it.
+        let model_style = if theme.gray == ratatui::style::Color::Reset {
+            Style::default()
+                .fg(ratatui::style::Color::Reset)
+                .bg(bg)
+                .add_modifier(Modifier::DIM)
+        } else if focused {
+            Style::default().fg(theme.accent_model).bg(bg)
         } else {
-            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
-                .unwrap_or(theme.accent_model)
+            let model_fg = crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model);
+            Style::default().fg(model_fg).bg(bg)
         };
-        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {
@@ -3680,7 +3792,7 @@ impl PromptWidget {
         let flag_style = theme.muted().bg(bg);
 
         // Left side: model name and flags. Wrap with leading/trailing spaces so the cells adjacent to the
-        // corner borders (╰ / ╯) are blanked out. They would otherwise show the underlying `─` glyphs from
+        // corner borders (└ / ┘) are blanked out. They would otherwise show the underlying `─` glyphs from
         // the bottom-border fill. That gives 1 cell of visual padding on each side.
         let pad_style = Style::default().bg(bg);
         let mut left_spans = vec![Span::styled(" ", pad_style)];
@@ -3744,7 +3856,7 @@ impl PromptWidget {
         }
 
         if !right_spans.is_empty() {
-            // Pad the right side so it doesn't sit flush against the ╯ corner.
+            // Pad the right side so it doesn't sit flush against the ┘ corner.
             right_spans.push(Span::styled(" ", pad_style));
             let right_line = Line::from(right_spans);
             let right_w = right_line.width() as u16;
@@ -3988,9 +4100,10 @@ fn images_high_water(images: &[PastedImage]) -> usize {
 mod image_state;
 mod recording_frame;
 
-#[cfg(test)]
 /// Composer caret with an explicit filled phase, so tests do not sleep on the clock.
-/// A mid-buffer space keeps the space and takes an `accent_user` plate.
+/// End of the draft paints a block. A letter keeps its grapheme: filled half is an
+/// `accent_user` plate with `text_primary` ink, empty half is normal text on the canvas.
+/// A mid-buffer space keeps the space. The filled half takes an `accent_user` plate.
 pub(crate) fn paint_composer_box_cursor_phase(
     buf: &mut Buffer,
     x: u16,
@@ -4005,20 +4118,29 @@ pub(crate) fn paint_composer_box_cursor_phase(
     };
     let accent = theme.accent_user;
     if !allow_block_glyph && cell.symbol() == " " {
-        cell.set_bg(accent);
+        if filled_phase {
+            cell.set_bg(accent);
+        } else {
+            cell.set_fg(theme.text_primary);
+            cell.set_bg(canvas_bg);
+        }
         return;
     }
-    if allow_block_glyph && filled_phase {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
+    if !allow_block_glyph {
+        cell.set_fg(theme.text_primary);
+        if filled_phase {
+            cell.set_bg(accent);
+        } else {
+            cell.set_bg(canvas_bg);
+        }
+        return;
+    }
+    cell.set_symbol(crate::glyphs::cursor_box_filled());
+    cell.set_fg(accent);
+    if filled_phase {
         cell.set_bg(accent);
-    } else if allow_block_glyph {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(canvas_bg);
     } else {
-        cell.set_fg(accent);
-        cell.set_bg(accent);
+        cell.set_bg(canvas_bg);
     }
 }
 

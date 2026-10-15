@@ -888,7 +888,7 @@ pub(crate) fn hidden_external_hint(
     source_filter: SourceFilter,
 ) -> Option<String> {
     match source_filter {
-        SourceFilter::Headless => {
+        SourceFilter::Grok | SourceFilter::Headless => {
             let hidden = entries?
                 .iter()
                 .filter(|entry| crate::app::is_foreign_picker_source(&entry.source))
@@ -1418,7 +1418,7 @@ mod tests {
             entry_with_source("s1", "claude"),
             entry_with_source("s2", "codex"),
         ];
-        assert!(hidden_external_hint(Some(&entries), SourceFilter::Grok).is_none());
+        assert!(hidden_external_hint(Some(&entries), SourceFilter::Grok).is_some());
         assert!(hidden_external_hint(Some(&entries), SourceFilter::Local).is_none());
         assert!(hidden_external_hint(Some(&entries), SourceFilter::Remote).is_none());
         assert!(hidden_external_hint(Some(&entries), SourceFilter::Headless).is_some());

@@ -927,6 +927,26 @@ cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_
   peer_pids_to_signal_excludes_self_dead_and_non_grok
 ```
 
+#### `/rebuild` restarts every running grok-oss process and resumes in-flight tasks
+
+Sending SIGUSR1 is not enough when the peer never claims that signal. The
+default action kills the process. `/rebuild` gracefully restarts every
+running grok-oss process, including peers that did not receive the command.
+Each peer claims SIGUSR1, re-execs onto the new binary, and resumes every
+in-flight task the same way a network interruption resumes it. The relaunch
+continues that task. A session that has restored its context still continues
+the task that was in flight. Prompt write-ahead log, unsent composer draft,
+and `pending_prompts.json` stay. Unstaged work is not the rebuild source.
+This test was not executed in the session that added it.
+
+| path::test | Contract |
+|------------|----------|
+| `rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption` | `/rebuild` restarts every running grok-oss process and each in-flight task resumes like a network interruption |
+
+```bash
+cargo test -p xai-grok-pager --lib -- rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption
+```
+
 #### Nucleo reuse-per-root
 
 Per-matcher pool size `NUM_NUCLEO_THREADS = 2` is shipped in code. No `fn`
@@ -1346,6 +1366,8 @@ Named tests are Surmount / grok-oss fork contracts.
 | `nested_overlay_title_elapsed_matches_host_subagent_finished_duration` | Overlay title elapsed equals host `duration_ms` (54m34s), not spawn-wall 1h14m |
 | `reopening_finished_nested_overlay_does_not_start_climbing_title_clock` | Reopening a finished overlay must idle the child and keep host duration |
 | `subagents_live_list_drops_responding_after_subagent_finished` | Live Subagents list must not keep Responding after `SubagentFinished` |
+| `finished_nested_agent_is_not_painted_responding_with_a_climbing_timer_and_live_cell_is_not_0k_after_tool_work` | Finished nested agent is not painted Responding with a climbing timer; live status cell is not 0K/0K after tool work when usage.jsonl has input_tokens |
+| `vacant_occupancy_restore_drops_responding_when_meta_says_host_exited` | Vacant occupancy restore of a host that already exited must not stay painted Responding |
 | `l2_finish_surfaces_to_l1_without_opening_nested_overlay` | L2 finish surfaces on the parent session; wait tool completes |
 | `wait_on_completed_nested_id_missing_from_map_does_not_stay_running` | Completed nested id missing from the map is not treated as still running |
 | `silent_subagent_completed_wake_surfaces_turn_completed` | Silent `subagent-completed-*` wake still paints TurnCompleted |
@@ -1750,6 +1772,7 @@ with FORK pointers.
 |------------|----------|
 | `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | Surmount. `/what` instruction and the in-tree what skill prefer Operator and Agent, name the Operator box, and forbid You or Human / Me or Grok as speaker labels. FORK `/what` restatement. |
 | `xai-grok-pager` `what_skill_does_not_mix_grok_build_version_with_grok_oss` | Surmount. `/what` skill never mixes Grok Build `grok --version` with grok-oss `grok-oss --version`. Isolated Preview and plan chrome are grok-oss unless launched as `grok`. Probe this turn. Do not reuse leftover Grok Build 1.0.13 as grok-oss. FORK `/what` restatement. |
+| `xai-grok-pager` `what_and_subagent_skills_read_output_tokens_not_a_null_zero` | Surmount. `/what` and `/subagent` call `local_usage_events_for_session`. The reconcile cell is that row's `output_tokens`, not `total_tokens`, and not the standing estimate. A null `output_tokens` is not printed as `0`. Chain of thought is `reasoning_tokens` and is not added again. Do not write `not_fetched` when `output_tokens` is present. The Billing Credits card wire `not_fetched` stays a different meter. |
 | `xai-grok-pager` `user_guide_what_does_not_mix_grok_build_version_with_grok_oss` | Surmount. User-guide `/what` keeps grok-oss and Grok Build versions distinct. Isolated Preview chrome is grok-oss unless launched as `grok`. Probe this turn. FORK user-guide table `04-slash-commands`. |
 | `xai-grok-pager` `user_guide_operator_agent_speaker_labels_not_human_user_grok` | Surmount. User-guide theming and composer copy paint Operator, not Human/User/Grok as speaker. Keep Isolated Preview leftover-present, Comment then Approve, `/plan` extra text, empty Enter never Approves. FORK user-guide table `06-theming`. |
 | `xai-grok-pager` `waiting_chrome_does_not_paint_human_user_or_grok_as_speaker` | Surmount. Waiting chrome names the model request and does not paint Human, User, or Grok as a speaker. FORK `/what` restatement. |
@@ -1760,6 +1783,7 @@ with FORK pointers.
 cargo test -p xai-grok-pager --lib -- \
   what_instruction_prefers_operator_and_agent_speaker_labels \
   what_skill_does_not_mix_grok_build_version_with_grok_oss \
+  what_and_subagent_skills_read_output_tokens_not_a_null_zero \
   user_guide_what_does_not_mix_grok_build_version_with_grok_oss \
   user_guide_operator_agent_speaker_labels_not_human_user_grok \
   waiting_chrome_does_not_paint_human_user_or_grok_as_speaker \
@@ -2235,6 +2259,20 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_h
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining
 cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers
 cargo test -p xai-grok-pager-bin --test version_without_tty
+```
+
+### SuperGrok session secret omitted from auth.json
+
+The shell row is the duplicate writer in `xai-grok-shell` `src/auth/storage.rs`. It is not a re-export of login `storage`. This catalog entry is the named filter. It is not a claim that the full suite passed.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-login` `storage::write_fallback_tests::supergrok_session_secret_is_not_written_to_auth_json` | A successful `CredentialsStore` write omits the SuperGrok session secret from `auth.json`. A failed store write leaves the file unchanged, secret included. A Grok Build file that still has `key` or `refresh_token` still loads. The service label stays `grok-build`. `write_auth_json` does not return an error solely because a secret was present. |
+| `xai-grok-shell` `auth::shell_auth_storage::write_fallback_tests::supergrok_session_secret_is_not_written_to_auth_json` | The shell duplicate writer follows the same contract. |
+
+```bash
+cargo test -p xai-grok-login --lib -- supergrok_session_secret_is_not_written_to_auth_json
+cargo test -p xai-grok-shell --lib -- supergrok_session_secret_is_not_written_to_auth_json
 ```
 
 ---
@@ -2804,6 +2842,21 @@ cargo test -p xai-grok-tools --lib -- \
   reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot \
   two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file
 ```
+
+### Personal refresh and plan instructions
+
+This list does not mark the tests passed.
+
+- `rejected_personal_refresh_does_not_send_the_expired_access_token`
+- `network_refresh_failure_keeps_the_stored_token_and_is_not_a_rejected_grant`
+- `use_personal_limits_installs_a_fresh_personal_token_and_does_not_keep_the_business_bearer`
+- `personal_tab_says_run_grok_oss_login_when_the_personal_refresh_token_is_rejected`
+- `header_says_grok_oss_login_when_the_personal_refresh_token_is_rejected`
+- `plan_reminder_puts_open_questions_in_read_this_first`
+- `named_home_agents_plans_path_is_writable_in_plan_mode`
+- `repo_agents_reports_path_stays_refused_in_plan_mode`
+- `personal_auth_poll_after_a_fresh_session_stores_credit_usage_percent_not_a_no_authorization_post`
+- `plan_instructions_start_disjoint_contracts_together`
 
 ---
 

@@ -482,7 +482,14 @@ fn format_subagent_task_output(c: &SubagentCompletionSummary, poll_tool: Option<
     if let SubagentSnapshotStatus::Completed { output, .. } = &mut snapshot.status {
         *output = inline_subagent_output(c, poll_tool);
     }
-    let output = format_subagent_snapshot(&snapshot, WaitHint::NotRequested);
+    let output = if poll_tool.is_none() {
+        crate::implementations::grok_build::task_output::format_subagent_snapshot_uncapped(
+            &snapshot,
+            WaitHint::NotRequested,
+        )
+    } else {
+        format_subagent_snapshot(&snapshot, WaitHint::NotRequested)
+    };
     ToolOutput::TaskOutput(output).to_prompt_format()
 }
 fn outcome_words(c: &SubagentCompletionSummary) -> (&'static str, &'static str) {

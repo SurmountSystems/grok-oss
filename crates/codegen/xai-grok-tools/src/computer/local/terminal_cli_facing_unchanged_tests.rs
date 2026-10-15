@@ -124,15 +124,8 @@ fn main_spawn_shell_command(
     shell_env_policy: Option<&ShellEnvironmentPolicy>,
 ) -> std::io::Result<tokio::process::Child> {
     let shell = shell_state::ShellKind::detect();
-    let wrapped_command = {
-        let inject =
-            crate::computer::local::embedded_search_tools::search_injection(search_shadows);
-        if inject.is_empty() {
-            command.to_string()
-        } else {
-            format!("{inject}{command}")
-        }
-    };
+    let wrapped_command =
+        super::wrapped_shell_command(command, search_shadows, login_env, env, shell_env_policy);
     let mut cmd = tokio::process::Command::new(shell.binary_path());
     if matches!(shell, shell_state::ShellKind::Zsh) {
         cmd.arg("-o").arg("nonomatch");

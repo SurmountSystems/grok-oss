@@ -60,6 +60,9 @@ pub enum SettingsKeyOutcome {
 
 impl SettingsKeyOutcome {
     /// Split a bool or string setter into a typed outcome. Other actions stay wrapped.
+    /// Space, Enter, and mouse toggles must dispatch the typed `Action::Set*`
+    /// variant. `settings_value_payload_matches_kind` is the exception: turbo
+    /// planning and process-rule reminders are named as `SetBool`.
     pub fn from_typed_setter(action: Action) -> Self {
         match action {
             Action::SetCompactMode(value) => Self::SetBool {
@@ -208,6 +211,14 @@ impl SettingsKeyOutcome {
                     "reconcile_management_usage" => "token_economy.reconcile_management_usage",
                     _ => return Self::Action(Action::SetTokenEconomyBool { field, value }),
                 },
+                value,
+            },
+            Action::SetTurboPlanning(value) => Self::SetBool {
+                key: "turbo_planning",
+                value,
+            },
+            Action::SetProcessRuleRemindersEnabled(value) => Self::SetBool {
+                key: "process_rule_reminders_enabled",
                 value,
             },
             other => Self::Action(other),

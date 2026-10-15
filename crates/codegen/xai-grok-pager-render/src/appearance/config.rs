@@ -460,7 +460,8 @@ impl Default for PromptConfig {
 
 #[derive(Debug, Clone)]
 pub struct ThinkingConfig {
-    /// Accent color for the thinking block.
+    /// Left-rail color for the thinking block. The default is
+    /// `accent_system` (cyan on DOGE). The body stays `text_primary`.
     pub accent: Color,
     /// Whether accent line is enabled. When false, no accent in any mode.
     pub accent_enabled: bool,
@@ -481,7 +482,7 @@ pub struct ThinkingConfig {
     /// Render the reasoning body de-emphasized (SGR dim and italic) on top of the `bg_blend` fade.
     /// **Not a TOML key**: minimal mode sets it because there the fade alone cannot separate reasoning from the answer.
     pub body_dim_italic: bool,
-    /// Append a dim "(ctrl+e to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
+    /// Append a dim "(ctrl+t to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
     /// **Not a TOML key**: minimal mode sets it, the only mode where a folded block cannot be unfolded in place.
     pub collapsed_expand_hint: bool,
     /// Draw the reasoning rail inside the body lines (a `┃ ` prefix directly below the header's bullet) instead of painting the reserved accent column.
@@ -493,7 +494,7 @@ pub struct ThinkingConfig {
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
-            accent: crate::theme::Theme::current().gray_dim,
+            accent: crate::theme::Theme::current().accent_system,
             accent_enabled: true,
             bg_blend: 0.7,
             truncated_lines: 3,
@@ -1434,8 +1435,8 @@ impl From<RawPromptConfig> for PromptConfig {
 
 impl From<RawThinkingConfig> for ThinkingConfig {
     fn from(raw: RawThinkingConfig) -> Self {
-        // Default accent is gray_dim from theme, already quantized
-        let default_accent = crate::theme::Theme::current().gray_dim;
+        // Default left accent is accent_system (cyan on DOGE), already quantized.
+        let default_accent = crate::theme::Theme::current().accent_system;
         let accent = raw.accent.to_option().unwrap_or(default_accent);
         let bg_blend = (raw.bg_blend.min(100) as f32) / 100.0;
         Self {

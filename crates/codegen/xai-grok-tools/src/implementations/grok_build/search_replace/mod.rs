@@ -60,9 +60,9 @@ ${% if tools.by_kind.read -%}
 ${% endif -%}
 - `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
 - To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
-/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
-/// `empty_old_string_does_not_override` is enabled (opt-in; the default is the legacy overwrite
-/// behavior); `versioned_definition` strips it unless a config enables the guard.
+/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. An empty `old_string` never
+/// replaces an existing file. `versioned_definition` still serves this sentence only when
+/// `empty_old_string_does_not_override` is set.
 pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
     " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 /// Input for the search_replace tool.
@@ -100,9 +100,9 @@ pub struct SearchReplaceParams {
     /// `deny_unknown_fields`. Still gates the config-time Read-tool requirement (`requires_expr`).
     #[serde(default)]
     pub skip_read_before_edit: bool,
-    /// When true (opt-in), an empty `old_string` may only create a new file or fill an empty one — it never silently overwrites an existing
-    /// non-empty file. Defaults to false (the legacy behavior): an empty `old_string` replaces the file's entire contents. The served description
-    /// includes the guard sentence only when this is enabled (see `versioned_definition`).
+    /// Kept so older configs still deserialize. Runtime no longer consults it: an empty
+    /// `old_string` creates a missing file and refuses to replace an existing one, empty or not.
+    /// The served description includes the guard sentence only when this is enabled (see `versioned_definition`).
     #[serde(default)]
     pub empty_old_string_does_not_override: bool,
     /// When true, enable normalized-fallback matching for Unicode confusable characters (smart quotes, em-dashes, etc.).
@@ -305,17 +305,13 @@ async fn handle_new_file_creation(
     cwd: &std::path::Path,
     display_cwd: Option<&std::path::Path>,
     hints_enabled: bool,
-    empty_old_string_does_not_override: bool,
+    _empty_old_string_does_not_override: bool,
 ) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
-    let file_exists = match fs.read_file(path).await {
-        Ok(bytes) => !bytes.is_empty(),
-        Err(_) => false,
-    };
-    let old_text = match fs.read_file(path).await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
-        Err(_) => None,
-    };
-    if file_exists && empty_old_string_does_not_override {
+    let read_result = fs.read_file(path).await;
+    // Any successful read means the file exists, including a zero-byte file.
+    // An empty `old_string` is not a unique anchor, so it cannot replace that file.
+    let file_exists = read_result.is_ok();
+    if file_exists {
         let old_string_name;
         {
             let res = resources.lock().await;
@@ -325,8 +321,7 @@ async fn handle_new_file_creation(
                 .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
         }
         return Ok(SearchReplaceOutput::FileAlreadyExists(format!(
-            "{} is empty, which is only allowed when creating a new file or when the file is empty.",
-            old_string_name
+            "{old_string_name} is empty, which is not a unique anchor. search_replace refuses to replace an existing file. Read the file and pass a unique non-empty {old_string_name}. An empty {old_string_name} can only create a new file.",
         )));
     }
     let is_memory_write = match crate::types::memory_v2::write_memory_v2_file(
@@ -382,26 +377,13 @@ async fn handle_new_file_creation(
             "ACP filesystem sync of rustfmt output failed; disk already formatted"
         );
     }
-    if let Some(old_text) = old_text
-        && file_exists
-        && !empty_old_string_does_not_override
-    {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: written,
-            previous_content: Some(old_text.clone()),
-            is_new_file: false,
-        });
-    } else {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: written,
-            previous_content: None,
-            is_new_file: true,
-        });
-    }
+    notification_handle.send_file_written(FileWritten {
+        tool_call_id: tool_call_id.to_string(),
+        absolute_path: path.to_path_buf(),
+        content: written,
+        previous_content: None,
+        is_new_file: true,
+    });
     let tool_output_for_prompt = format!(
         "The file {} has been created successfully.",
         input.file_path
@@ -809,9 +791,8 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
     fn description_template(&self) -> &str {
         DESCRIPTION_FULL
     }
-    /// Params-aware description: the "cannot overwrite" sentence in [`DESCRIPTION_FULL`] only holds
-    /// while `empty_old_string_does_not_override` is enabled, so it is served only for configs that
-    /// opt into the guard and stripped by default (legacy overwrite behavior).
+    /// Params-aware description: the "cannot overwrite" sentence is always true at runtime.
+    /// It is still served only when `empty_old_string_does_not_override` is set, and stripped otherwise.
     fn versioned_definition(
         &self,
         _contract_version: Option<&str>,
@@ -1312,6 +1293,90 @@ mod tests {
             other => panic!("Expected MultipleMatchesFound, got {:?}", other),
         }
     }
+    /// Empty `old_string` is not a unique anchor on an existing file.
+    /// A repeated anchor with `replace_all` false is refused. A short unique
+    /// anchor is applied after `read_file`. This tool does not record that read.
+    #[tokio::test]
+    async fn search_replace_refuses_empty_old_string_and_a_non_unique_anchor_and_applies_a_short_unique_one()
+     {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("anchor.txt");
+        let original = "alpha beta alpha\n";
+        std::fs::write(&path, original).unwrap();
+        let tool = SearchReplaceTool;
+        let shared = test_resources(tmp.path()).into_shared();
+        let empty = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared.clone()),
+            make_input("anchor.txt", "", "replaced everything\n"),
+        )
+        .await
+        .unwrap();
+        match empty {
+            SearchReplaceOutput::FileAlreadyExists(msg)
+            | SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("empty") || msg.contains("old_string"),
+                    "empty old_string refusal should say why: {msg}"
+                );
+            }
+            other => panic!("empty old_string must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "empty old_string must not replace the file"
+        );
+        let repeated = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared.clone()),
+            make_input("anchor.txt", "alpha", "ALPHA"),
+        )
+        .await
+        .unwrap();
+        match repeated {
+            SearchReplaceOutput::MultipleMatchesFound(msg) => {
+                assert!(
+                    msg.contains("multiple") || msg.contains("replace_all"),
+                    "{msg}"
+                );
+            }
+            other => panic!("non-unique old_string must be refused, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let read = xai_tool_runtime::Tool::run(
+            &crate::implementations::grok_build::read_file::ReadFileTool,
+            test_ctx(shared.clone()),
+            crate::implementations::grok_build::read_file::ReadFileInput {
+                path: "anchor.txt".to_string(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(read, crate::types::output::ReadFileOutput::FileContent(_)),
+            "the file must be read before the short unique replace: {read:?}"
+        );
+        let unique = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared),
+            make_input("anchor.txt", "beta", "BETA"),
+        )
+        .await
+        .unwrap();
+        match unique {
+            SearchReplaceOutput::EditsApplied(_) => {}
+            other => panic!("short unique old_string must be applied, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "alpha BETA alpha\n"
+        );
+    }
     #[tokio::test]
     async fn legacy_multiple_matches_returns_exact_historical_invalid_input() {
         let tmp = TempDir::new().unwrap();
@@ -1424,7 +1489,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overwrites_existing_file_by_default() {
+    async fn empty_old_string_refuses_to_replace_an_existing_file_by_default() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
@@ -1434,16 +1499,16 @@ mod tests {
             .await
             .unwrap();
         match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
+            SearchReplaceOutput::FileAlreadyExists(msg) => {
+                assert!(msg.contains("old_string"), "{msg}");
                 let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
-                assert_eq!(content, "completely new content\n");
+                assert_eq!(content, "existing content\n");
             }
-            other => panic!("Expected EditsApplied, got {:?}", other),
+            other => panic!("Expected FileAlreadyExists, got {:?}", other),
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overrides_with_explicit_false() {
+    async fn empty_old_string_refuses_to_replace_even_when_override_flag_is_false() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
@@ -1457,12 +1522,12 @@ mod tests {
             .await
             .unwrap();
         match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
+            SearchReplaceOutput::FileAlreadyExists(msg) => {
+                assert!(msg.contains("old_string"), "{msg}");
                 let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
-                assert_eq!(content, "completely new content\n");
+                assert_eq!(content, "existing content\n");
             }
-            other => panic!("Expected EditsApplied, got {:?}", other),
+            other => panic!("Expected FileAlreadyExists, got {:?}", other),
         }
     }
     #[tokio::test]
@@ -1517,7 +1582,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overwrites_empty_file_even_with_guard() {
+    async fn empty_old_string_refuses_to_replace_an_empty_existing_file() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("empty.txt"), "").unwrap();
         let tool = SearchReplaceTool;
@@ -1532,12 +1597,12 @@ mod tests {
             .await
             .unwrap();
         match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
+            SearchReplaceOutput::FileAlreadyExists(msg) => {
+                assert!(msg.contains("old_string"), "{msg}");
                 let content = std::fs::read_to_string(tmp.path().join("empty.txt")).unwrap();
-                assert_eq!(content, "new content\n");
+                assert_eq!(content, "");
             }
-            other => panic!("Expected EditsApplied, got {:?}", other),
+            other => panic!("Expected FileAlreadyExists, got {:?}", other),
         }
     }
     #[tokio::test]

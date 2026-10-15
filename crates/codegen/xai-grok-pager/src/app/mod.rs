@@ -2501,15 +2501,7 @@ mod tests {
         print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            concat!(
-                "\n",
-                "Fix flaky CI test\n",
-                "> make the suite deterministic\n",
-                "  Pinned the seed; 200 consecutive green runs.\n",
-                "\n",
-                "Resume this session with:\n",
-                "  grok-oss --resume sess-abc\n",
-            )
+            "\nResume this session with:\n  grok-oss --minimal --resume sess-abc\n"
         );
     }
     #[test]
@@ -2553,7 +2545,7 @@ mod tests {
                 "  Pinned the seed; 200 consecutive green runs.\n",
                 "\n",
                 "Resume this session with:\n",
-                "  grok --resume sess-abc\n",
+                "  grok-oss --resume sess-abc\n",
             )
         );
     }

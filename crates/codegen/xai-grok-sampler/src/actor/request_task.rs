@@ -545,6 +545,28 @@ async fn apply_retry_decision(
         }
     }
 
+    // Plain HTTP 429 with another identity hops now. Same-key backoff stays
+    // for a single key. RateLimited does not write the credit memo.
+    if err.is_rate_limited()
+        && let Some(hop_reason) = try_rotate_to_failover_key(
+            config,
+            client,
+            crate::exhausted_identity::HopCause::RateLimited,
+        )
+    {
+        *retry_count += 1;
+        emit_retrying_with_reason(
+            event_tx,
+            request_id,
+            *retry_count,
+            max_retries,
+            err,
+            config,
+            hop_reason,
+        );
+        return true;
+    }
+
     let rate_limit_threshold = config
         .rate_limit_retry_threshold
         .unwrap_or(retry_policy.rate_limit_retry_threshold);

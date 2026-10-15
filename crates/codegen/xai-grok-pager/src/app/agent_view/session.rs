@@ -359,16 +359,28 @@ impl AgentView {
         let Ok(rows) = serde_json::from_str::<Vec<PersistedNestedOccupancy>>(&body) else {
             return;
         };
+        let parent_sid = session_id.0.to_string();
+        let parent_cwd = self.session.cwd.clone();
         for row in rows {
             if row.child_session_id.trim().is_empty() {
                 continue;
             }
             // Occupied rows stay as-is, including finished. The occupancy
             // snapshot always has finished: false, so overwriting would
-            // un-finish a dead host. Vacant insert is still-running resume.
+            // un-finish a dead host. Vacant insert is still-running resume
+            // unless meta.json already says the host exited.
+            let child_sid = row.child_session_id.clone();
+            let vacant = !self.subagent_sessions.contains_key(&child_sid);
             self.subagent_sessions
-                .entry(row.child_session_id.clone())
+                .entry(child_sid.clone())
                 .or_insert_with(|| nested_info_from_occupancy(&row));
+            if vacant && let Some(info) = self.subagent_sessions.get_mut(&child_sid) {
+                crate::app::subagent::mark_finished_from_meta_if_host_exited(
+                    info,
+                    &parent_cwd,
+                    &parent_sid,
+                );
+            }
         }
         self.retain_still_running_nested_occupancy();
     }
@@ -380,9 +392,50 @@ impl AgentView {
         let _keep_finished_hosts = &self.subagent_sessions;
     }
 
-    /// Write the unsent composer draft and still-running nested occupancy.
+    /// Write the unsent composer draft, the still-unsent queue, and a
+    /// rebuild-flush line for each unsent row. A queue body that is already
+    /// a Human turn is issued. A second rebuild must not write that body
+    /// into `pending_prompts.json` or the rebuild-flush log.
     pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
         self.persist_unsent_prompt_draft();
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let committed = self.committed_human_turn_texts(true, true);
+        let rows: Vec<_> = self
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.continue_prior_work
+                    || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                    || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+            })
+            .map(|prompt| {
+                xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
+                    id: prompt.id,
+                    text: prompt.text.clone(),
+                    kind: prompt.kind.as_label().to_string(),
+                }
+            })
+            .collect();
+        for row in &rows {
+            if row.text.trim().is_empty() {
+                continue;
+            }
+            self.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                &row.text,
+                &[],
+            );
+        }
+        let _ =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                &rows,
+            );
     }
 
     #[cfg(test)]
@@ -704,6 +757,9 @@ impl AgentView {
             dock_reveal_pending: false,
             dock_hovered: None,
             dock_stop_button: None,
+            dock_clear_rect: None,
+            dock_clear_hovered: false,
+            dock_specialist_hits: Vec::new(),
             dock_queued_expanded: true,
             dock_on: false,
             dock_shown: false,
@@ -918,6 +974,8 @@ impl AgentView {
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,
             plan_decision_resolved: false,
+            operator_closed_plan_pane: false,
+            plan_approved_implement: false,
             paste_chip_approval_not_wire_interject: false,
             plan_feedback_in_flight: None,
             isolated_preview_rewrite_wait_prompt: None,
@@ -970,6 +1028,7 @@ impl AgentView {
             finished_nested_wait_ids: HashSet::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
+            overlay_return_sid: None,
             role: AgentRole::Root,
             activity_row_clocks: false,
             hit_subagent_frame_close: Default::default(),
@@ -1782,6 +1841,15 @@ impl AgentView {
                 let subject = self
                     .subject_for_wait_tasks(&task_ids)
                     .or_else(|| self.live_specialist_wait_subject());
+                // An empty description is not a subject. One task id with
+                // only that id fallback stays unlabeled so `label()` keeps
+                // `Waiting on task output…`. A real description stays.
+                let subject = match subject {
+                    Some(name) if task_ids.len() == 1 && self.bare_specialist_id_subject(&name) => {
+                        None
+                    }
+                    other => other,
+                };
                 TurnActivity::Waiting(WaitingReason::TaskOutput {
                     task_ids,
                     subject,
@@ -2026,6 +2094,18 @@ impl AgentView {
         crate::acp::tracker::waiting_on_subagents_subject(
             self.running_foreground_subagents().count(),
         )
+    }
+    /// True when `name` is only the id of a running specialist whose
+    /// description is empty. That is not a resolved wait subject.
+    fn bare_specialist_id_subject(&self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        self.running_live_specialists().any(|info| {
+            info.description.trim().is_empty()
+                && (info.subagent_id.as_ref() == name || info.child_session_id.as_ref() == name)
+        })
     }
     /// Name a live specialist (description, else id) plus last tool/progress
     /// when the registry has it. Used when a task-output wait has no resolved
@@ -2328,22 +2408,18 @@ fn specialist_wait_subject_from(
     let activity = running.first().and_then(|info| info.wait_progress_label());
     match activity.as_deref() {
         Some(activity) => {
-            const PREFIX: &str = "Subagent (";
-            const SUFFIX_HEAD: &str = "): ";
-            const SUBAGENT_AFFIX_CHARS: usize = PREFIX.len() + SUFFIX_HEAD.len();
-            const ACTIVITY_FLOOR: usize = 8;
-            let desc_claim = description
-                .chars()
-                .count()
-                .min(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - ACTIVITY_FLOOR);
-            let activity: String = activity
-                .chars()
-                .take(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - desc_claim)
-                .collect();
+            // `{description}: {tool}`. A `Subagent (` wrapper left about 18
+            // columns for the name, so `Land check-remote full gate` was cut
+            // before the 40-character clamp and the overlay never painted it.
+            // The tool suffix stays whole so `read_file` is not cut to `read_fil`.
+            const SEP: &str = ": ";
+            let activity_budget =
+                MAX_ACTIVITY_SUBJECT_CHARS.saturating_sub(SEP.len() + SUBJECT_DESC_FLOOR);
+            let activity: String = activity.chars().take(activity_budget).collect();
             Some(budgeted_subject(
-                PREFIX,
+                "",
                 &description,
-                &format!("{SUFFIX_HEAD}{activity}"),
+                &format!("{SEP}{activity}"),
             ))
         }
         None => Some(budgeted_subject("Subagent: ", &description, "")),

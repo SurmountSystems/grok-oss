@@ -57,7 +57,7 @@ fn assistant_with_reasoning_items(
     if !reasoning_text.is_empty() {
         out.push(ConversationItem::Reasoning(
             xai_grok_sampling_types::rs::ReasoningItem {
-                id: String::new(),
+                id: Some(String::new()),
                 summary: vec![xai_grok_sampling_types::rs::SummaryPart::SummaryText(
                     xai_grok_sampling_types::rs::SummaryTextContent {
                         text: reasoning_text.to_string(),
@@ -185,7 +185,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
     // Encrypted reasoning is opaque to a text classifier, so drop it rather than emit a meaningless line
     let items = vec![
         ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
-            id: String::new(),
+            id: Some(String::new()),
             summary: vec![],
             content: None,
             encrypted_content: Some("opaque_base64".into()),
@@ -212,7 +212,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
     // Empty-string reasoning is treated as no reasoning; a line with no content would only waste tokens
     let items = vec![
         ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
-            id: String::new(),
+            id: Some(String::new()),
             summary: vec![xai_grok_sampling_types::rs::SummaryPart::SummaryText(
                 xai_grok_sampling_types::rs::SummaryTextContent {
                     text: String::new(),

@@ -529,7 +529,16 @@ impl ScrollbackState {
     // Content Management
 
     /// Keep the viewport pinned to the tail when the operator has not scrolled away.
+    ///
+    /// Arriving rows while the viewport is already on the real tail re-arm follow.
+    /// A page-flip pin that still owns the padded bottom is not that tail.
     fn follow_tail_if_operator_still_there(&mut self) {
+        let at_tail = !self.has_content_below();
+        let parked_on_pin = self.pin_reserve_active && !self.follow_mode;
+        if at_tail && !self.follow_mode && !parked_on_pin {
+            self.follow_mode = true;
+            self.follow_preserve_scroll = false;
+        }
         if self.follow_mode && !self.follow_preserve_scroll {
             self.scroll_offset = self.max_scroll_offset();
         }

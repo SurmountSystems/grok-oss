@@ -374,9 +374,11 @@ impl SessionActor {
                 }
                 None => wrapped.clone(),
             };
-            let mut item = ConversationItem::interjection(model_text);
-            // Nested grok-oss may attach `file://` parts. Parent must not
-            // (`prepare_interjection_images` already returns empty there).
+            let mut item = ConversationItem::interjection(model_text.clone());
+            // Nested grok-oss attaches a `file://` handle. A parent grok-oss
+            // turn attaches the inline `data:` URL unless the text was
+            // truncated. Truncation keeps image bytes off the conversation item.
+            let text_was_truncated = model_text.contains("[truncated]");
             if nested_grok_oss_inlines_images(
                 self.is_cursor_harness(),
                 self.tool_context.subagent_depth,
@@ -385,6 +387,13 @@ impl SessionActor {
                     xai_grok_shared::session::session_dir(&self.session_info).join("images");
                 for img in &images {
                     item.add_image(conversation_image_handle(img, Some(&images_dir)));
+                }
+            } else if !self.is_cursor_harness()
+                && self.tool_context.subagent_depth == 0
+                && !text_was_truncated
+            {
+                for img in &images {
+                    item.add_image(pick_user_image_url(img));
                 }
             }
             prepared.push((wrapped, sanitized, images, item));

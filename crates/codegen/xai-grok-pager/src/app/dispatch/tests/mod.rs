@@ -302,6 +302,7 @@ fn test_app() -> AppView {
         session_picker_pending_delete: None,
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
+        caret_blink_filled: None,
         startup_warnings: Vec::new(),
         is_api_key_auth: false,
         pending_update_version: None,
@@ -363,6 +364,7 @@ fn test_app() -> AppView {
         voice_state: VoiceState::Idle,
         pending_exit_plan_mode: None,
         scheduler_background_loops_seed: true,
+        session_loop_fire_detached: std::collections::HashMap::new(),
     }
 }
 /// Build a default `AgentSession` for tests.

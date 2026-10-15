@@ -2295,6 +2295,7 @@ fn defaults_round_trip_through_registry() {
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
+            "cancel_subagents_on_turn_cancel" => SettingValue::Enum("ask"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
@@ -2303,6 +2304,9 @@ fn defaults_round_trip_through_registry() {
             "always_expand_thinking" => SettingValue::Bool(false),
             "scrub_ascii_punct" => SettingValue::Bool(true),
             "ulid_session_ids" => SettingValue::Bool(true),
+            "notifications.session_recap" => SettingValue::Bool(true),
+            "notifications.session_recap_threshold_secs" => SettingValue::Int(30),
+            "features.session_recap" => SettingValue::Bool(true),
             "allow_worktree" => SettingValue::Bool(false),
             "turbo_planning" => SettingValue::Bool(true),
             "process_rule_reminders_enabled" => SettingValue::Bool(true),
@@ -7835,9 +7839,9 @@ fn collapsed_edit_blocks_mouse_click_two_stage_toggles() {
         10,
         row_y,
     );
-    // Cache pinned off above, so the toggle dispatches true
-    assert_set_bool_action(outcome, "prompt_suggestions", true);
-    xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
+    // Cache pinned off above, so the toggle dispatches true. Same contract as space and enter.
+    assert_set_bool_action(outcome, "collapsed_edit_blocks", true);
+    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
 }
 
 #[test]
@@ -8257,8 +8261,8 @@ fn auto_run_implement_mouse_click_two_stage_toggles() {
         10,
         row_y,
     );
-    // Default is true, so the toggle dispatches false
-    assert_set_bool_action(outcome, "group_tool_verbs", false);
+    // Cache pinned off above, so the toggle dispatches true. Same contract as space and enter.
+    assert_set_bool_action(outcome, "auto_run_implement", true);
 }
 
 #[test]
@@ -8324,8 +8328,8 @@ fn economic_mode_mouse_click_two_stage_toggles() {
         10,
         row_y,
     );
-    // Default is false, so the toggle dispatches true
-    assert_set_bool_action(outcome, "collapsed_edit_blocks", true);
+    // Cache pinned off above, so the toggle dispatches true. Same contract as enter.
+    assert_set_bool_action(outcome, "economic_mode", true);
 }
 
 #[test]

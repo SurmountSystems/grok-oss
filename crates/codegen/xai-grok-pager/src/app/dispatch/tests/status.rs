@@ -1871,6 +1871,110 @@ fn session_usage_keeps_scroll_when_page_flip_off() {
     crate::appearance::cache::set_page_flip_on_send(prev);
 }
 
+/// The click writes only. The ack is the accepted reply, not the click.
+/// A click ack makes `duplicate_settings_opt_out_rides_the_pending_write` see two effects.
+#[test]
+fn settings_opt_out_from_in_acks_now_and_writes() {
+    let mut app = privacy_banner_ready_app();
+    app.coding_data_retention_opt_out = false;
+    assert!(!app.privacy_banner_should_show());
+
+    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+
+    match effects.as_slice() {
+        [
+            Effect::SetCodingDataSharing {
+                opted_in: false,
+                seq,
+                ..
+            },
+        ] => {
+            assert_eq!(*seq, app.coding_data_write_seq);
+            assert_eq!(*seq, 1);
+        }
+        other => panic!(
+            "changed opt-out must write, and only write, until the server accepts: {other:?}"
+        ),
+    }
+    assert!(
+        app.coding_data_pending_write
+            .as_ref()
+            .is_some_and(|pending| pending.rollback_to_opted_in)
+    );
+    assert!(app.privacy_banner_acked.is_none());
+    assert!(app.coding_data_retention_opt_out);
+    assert!(!app.privacy_banner_should_show());
+    assert!(app.coding_data_pending_opted_in() != Some(true));
+
+    let ack_effects = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+            agent_id: AgentId(0),
+            opted_in: false,
+            seq: 1,
+        }),
+        &mut app,
+    );
+    assert!(
+        ack_effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "the accepted opt-out must still ack: {ack_effects:?}"
+    );
+    assert!(app.privacy_banner_acked.is_some());
+}
+
+/// `ConfirmResetSetting { choice: Reset }` on a SHARED Bool
+/// target restores the Settings modal AND fires the typed
+/// `Action::SetCompactMode(default)` via recursive dispatch —
+/// the `Effect::PersistSetting` is the externally-observable
+/// signal. Also asserts the ui_snapshot was
+/// refreshed to the new (post-reset) value (symmetric with the
+/// Cancel test's snapshot assertion).
+#[test]
+fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool() {
+    use crate::settings::SettingValue;
+    use crate::views::modal::{ActiveModal, ResetSettingsResult};
+    let mut app = test_app_with_agent();
+    // Flip compact_mode to true so we can observe the reset back
+    // to its default (false).
+    let _ = dispatch(Action::SetCompactMode(true), &mut app);
+    assert!(app.current_ui.compact_mode);
+
+    setup_reset_confirm_open(&mut app, "compact_mode");
+
+    let effects = dispatch(
+        Action::ConfirmResetSetting {
+            choice: ResetSettingsResult::Reset,
+        },
+        &mut app,
+    );
+
+    // Recursive dispatch into Action::SetCompactMode(false) emits
+    // the persist effect.
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting { key, value, .. } => {
+            assert_eq!(*key, "compact_mode");
+            assert_eq!(value, &SettingValue::Bool(false));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    // In-memory state is reset to the default.
+    assert!(!app.current_ui.compact_mode);
+    // Modal is restored AND ui_snapshot reflects the new value
+    // (symmetric with the Cancel test).
+    let agent = app.agents.get(&AgentId(0)).expect("agent must exist");
+    match &agent.active_modal {
+        Some(ActiveModal::Settings { state }) => {
+            assert!(
+                !state.ui_snapshot.compact_mode,
+                "ui_snapshot must reflect the post-reset value"
+            );
+        }
+        _ => panic!("Reset branch must restore the Settings modal"),
+    }
+}
+
 #[test]
 fn settings_opt_out_from_in_acks_now_and_writes() {
     let mut app = privacy_banner_ready_app();

@@ -1943,3 +1943,110 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
         })
         .await;
 }
+
+/// When limits mode is on, the next model request draws included SuperGrok
+/// period limits. `SamplingClient::post` stamps `bearer_resolver`, not the
+/// ranked `api_key`. A live Team JWT stays on that session when no live
+/// personal SuperGrok session exists. A live personal session on disk becomes
+/// the bearer before the request is built.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn limits_mode_next_request_draws_included_period_limits_on_the_bearer() {
+    use xai_grok_login::model::upsert_supergrok_session;
+    use xai_grok_sampler::BearerResolver;
+    use xai_grok_test_support::EnvGuard;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().expect("temp grok home");
+            let _home = EnvGuard::set("GROK_HOME", dir.path());
+            let _inline = EnvGuard::unset("GROK_AUTH");
+            let _auth_path = EnvGuard::unset("GROK_AUTH_PATH");
+            let _api_key = EnvGuard::unset("XAI_API_KEY");
+
+            let grok_cfg = GrokComConfig::default();
+            assert!(
+                grok_cfg.auto_use_included_limits,
+                "limits mode keeps included SuperGrok period limits enabled"
+            );
+            assert_ne!(
+                grok_cfg.preferred_method,
+                Some(xai_grok_login::PreferredAuthMethod::ApiKey),
+                "this path is the SuperGrok session, not the console API key"
+            );
+            let scope = grok_cfg.auth_scope();
+            let live = chrono::Utc::now() + chrono::Duration::days(1);
+            let session = |key: &str, user_id: &str, team: bool| GrokAuth {
+                key: key.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: user_id.into(),
+                principal_type: team.then(|| "Team".to_string()),
+                principal_id: team.then(|| "team-fixture".to_string()),
+                team_id: team.then(|| "team-fixture".to_string()),
+                expires_at: Some(live),
+                refresh_token: Some("rt-fixture".into()),
+                ..GrokAuth::test_default()
+            };
+            let path = dir.path().join("auth.json");
+            let mut map = xai_grok_login::model::AuthStore::new();
+            upsert_supergrok_session(
+                &mut map,
+                &scope,
+                session("tok-team-only", "u-team", true),
+            );
+            xai_grok_login::storage::write_auth_json(&path, &map).expect("team session");
+
+            let am = Arc::new(AuthManager::new(dir.path(), grok_cfg));
+            assert_eq!(
+                am.current_wire_valid().map(|auth| auth.key).as_deref(),
+                Some("tok-team-only"),
+                "team-only login loads the Team JWT"
+            );
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am.clone()),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "stale-buffered-key".to_string(),
+            )
+            .await;
+
+            let team_cfg = actor.reconstruct_full_config().await;
+            assert!(
+                team_cfg.bearer_resolver.is_some(),
+                "limits mode still sends the session bearer"
+            );
+            assert_eq!(
+                team_cfg
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.current_bearer())
+                    .as_deref(),
+                Some("tok-team-only"),
+                "a live Team JWT with no live personal SuperGrok session stays the bearer; do not hop to the console API key"
+            );
+
+            upsert_supergrok_session(
+                &mut map,
+                &scope,
+                session("tok-personal-included", "u-personal", false),
+            );
+            xai_grok_login::storage::write_auth_json(&path, &map).expect("personal session");
+            let personal_cfg = actor.reconstruct_full_config().await;
+            assert_eq!(
+                personal_cfg
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.current_bearer())
+                    .as_deref(),
+                Some("tok-personal-included"),
+                "when limits mode is on, the next model request draws included SuperGrok period limits"
+            );
+            assert_ne!(
+                personal_cfg.api_key.as_deref(),
+                Some("stale-buffered-key"),
+                "the stamped bearer is the live personal session, not the buffered key"
+            );
+        })
+        .await;
+}

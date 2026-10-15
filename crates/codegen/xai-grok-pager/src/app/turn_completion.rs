@@ -842,7 +842,10 @@ pub(in crate::app) fn note_announcement_hide() {
 }
 
 fn outcome_from_failure(http_status: Option<u16>, text: &str) -> Option<crate::uptime::Outcome> {
-    if text.contains("Stopped: repeating sentence") || text.contains("repetitive_generation") {
+    if text.contains("Stopped: repeating sentence")
+        || text.contains("Stopped: the reply was repeating the same sentence")
+        || text.contains("repetitive_generation")
+    {
         return Some(crate::uptime::Outcome::RepeatingSentenceStop);
     }
     if http_status == Some(500)

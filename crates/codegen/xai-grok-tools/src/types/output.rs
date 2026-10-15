@@ -652,9 +652,16 @@ impl ToolOutput {
         }
     }
     fn format_task_duration_secs(duration_secs: f64) -> String {
-        xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
-            duration_secs.max(0.0),
-        ))
+        // Under 60 seconds the single-task prompt is two decimal places
+        // (`Duration: 5.00s`). At 60 seconds and above the same helper prints
+        // compact minutes (`Duration: 15m43s` for 943), never a raw second count.
+        if duration_secs < 60.0 {
+            format!("{duration_secs:.2}s")
+        } else {
+            xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+                duration_secs.max(0.0),
+            ))
+        }
     }
     /// Render tool output for inclusion in the model prompt with specified format.
     pub fn to_prompt_format(&self) -> String {
@@ -917,6 +924,7 @@ impl ToolOutput {
                 // `ask` is named only so the model knows which tool not to use for that.
                 format!(
                     "{message}\n\n\
+                     The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\n\
                      {plan_status}\n\n\
                      In plan mode, you should:\n\
                      1. Thoroughly explore the codebase to understand existing patterns\n\
@@ -925,7 +933,8 @@ impl ToolOutput {
                      4. Write your plan to the plan file above. Put open questions as plain \
                      bullets in the plan file or freeform chat; do not use {ask} multi-choice \
                      questionnaires for plan clarifications\n\
-                     5. When ready, use {exit} to present your plan to the user."
+                     5. When ready, use {exit} to present your plan to the user.\n\n\
+                     When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {

@@ -1,6 +1,6 @@
 # Limits
 
-SuperGrok is a paid product. This page is the weekly limits chip on the status row, and the Credits and Limits card that click opens. It is not external OpenTelemetry. It is not the Token Economy ledger (`/spend`).
+SuperGrok is a paid product. This page is the weekly limits chip on the status row, and the Limits and Credits card that click opens. It is not external OpenTelemetry. It is not the Token Economy ledger (`/spend`).
 
 Included SuperGrok period limits are the subscription-included quota for the current SuperGrok billing period. They are not SuperGrok dollar credits. They are not console API credits.
 
@@ -10,17 +10,19 @@ When 28% of this week's included SuperGrok period limits are used, the status ch
 
 The header, the chip, and the hover do not say `SuperGrok period`, a workspace name, `behind linear burn`, `15m`, or `24h`.
 
-Click the chip to open Credits and Limits.
+Click the chip to open Limits and Credits. The chip says `limits N%` only when the next request draws included SuperGrok period limits. It does not say limits when the request draws SuperGrok dollar credits or console team prepaid / console API credits.
 
 When included limits and console API credits are both out, the chip shows `2d 4h 12m` until that included period resets. If the period end is missing, the reset time says not available. grok-oss does not invent a clock.
 
-## Credits and Limits
+## Limits and Credits
 
-The card has two tabs: Credits and Limits. Changing tabs does not change which meter the next request uses.
+The card has two tabs: Limits, then Credits. Limits is the default tab. When the mode is limits, included SuperGrok period limits are enabled. Changing tabs does not change which meter the next request uses.
 
 The Limits tab shows how far ahead of a linear week the included usage is, or how far behind. That pacing stays on the Limits tab. It is not on the header.
 
-The Credits tab has two fields: `Personal credits` and `Console API credits`. The amounts are separate. Console API credits are the business credits. That is the console team prepaid balance. There is not a third field named Business credits.
+The open Limits tab lists four cells: Personal limits, Personal credits, Business limits, and Business credits. Personal limits are that personal session's included SuperGrok period limits. Business limits are that Team session's included SuperGrok period limits. Personal credits are that personal session's SuperGrok dollar credits. Business credits are that Team session's SuperGrok dollar credits. A missing poll leaves that cell without a figure. One session's percent is not copied onto the other cell.
+
+The Credits tab has two fields: `Personal credits` and `Console API credits`. The amounts are separate. Console API credits are console team prepaid. They are not Business credits. The Credits tab does not add a Business credits field.
 
 Personal credits are the personal account's SuperGrok dollar credits. The card shows them. The automatic path does not spend them.
 

@@ -526,9 +526,10 @@ pub fn render_peek_panel(
                         };
                         let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
                         if selected && panel.focused {
-                            // Software box caret hides the terminal cursor
-                            // (`draw` returns `cursor_pos: None`). Peek still
-                            // reports the insertion cell for mouse routing.
+                            // Chromeless reply reports the layout cursor.
+                            // `caret_cell` covers a frame that painted the
+                            // software caret instead. Either one is the
+                            // insertion cell for mouse routing.
                             caret = res.caret_cell.or(res.cursor_pos);
                         }
                     }
@@ -639,16 +640,20 @@ pub fn render_peek_panel(
             color: theme.accent_running,
         },
     );
-    let caret = reply
-        .draw(
-            buf,
-            text_area,
-            overlay_area,
-            &widget_style,
-            None,
-            voice_overlay,
-        )
-        .cursor_pos;
+    let drawn = reply.draw(
+        buf,
+        text_area,
+        overlay_area,
+        &widget_style,
+        None,
+        voice_overlay,
+    );
+    // Focused reply reports the insertion cell. Unfocused stays None.
+    let caret = if panel.focused {
+        drawn.cursor_pos.or(drawn.caret_cell)
+    } else {
+        None
+    };
     // The clickable reply rect spans all reply rows and includes the `❯ ` prefix column for a fatter mouse target
     // The widget maps clicks left of its text area to position 0
     let reply_rect = Some(Rect {
@@ -758,6 +763,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             RenderBlock::BgTask(_) => return "Task".to_string(),
             RenderBlock::Btw(_) => return "Btw".to_string(),
             RenderBlock::ContextInfo(_) => return "Context".to_string(),
+            RenderBlock::CreditLimit(_) => return "Credit limit".to_string(),
             // The user's latest input marks the turn boundary; there's no agent response after it yet
             RenderBlock::UserPrompt(_) => break,
             // Structural blocks carry no response type; keep scanning
@@ -854,6 +860,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),
         RenderBlock::MemoryCapture(_) => Some("(memory capture)".to_string()),
+        RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),
         RenderBlock::Stub(_) => None,
     }
 }

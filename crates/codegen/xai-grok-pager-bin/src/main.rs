@@ -1918,6 +1918,7 @@ fn purge_jemalloc_retained_pages() {
         });
     }
 }
+
 /// Allocator gauges for the memory trace (`memory_trace` hook): advance the jemalloc epoch so the `stats.*` reads are current, then read each gauge.
 /// Returns `None` if any mallctl fails (trace records the absence).
 /// Uses the `tikv-jemalloc-ctl` raw helpers (shared with the heap-profile hooks below) instead of hand-rolled mallctl.
@@ -2772,6 +2773,10 @@ fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpd
         auto_update::CliUpdateTrigger::UserCommand
     }
 }
+/// `grok-oss update` without `--check`.
+///
+/// A WinGet package hands off to WinGet before the rebuild note and writes
+/// no update files. That handoff does not require `GROK_OSS_ENABLE_XAI_UPDATER`.
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2816,10 +2821,12 @@ async fn run_update_command(
                     .ok()
             });
         if let Some(agent_cfg) = telemetry_cfg {
-            let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
-                &xai_grok_shell::util::grok_home::grok_home(),
-                agent_cfg.grok_com_config.clone(),
-            ));
+            let auth_manager =
+                std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new_with_proxy_base_url(
+                    &xai_grok_shell::util::grok_home::grok_home(),
+                    agent_cfg.grok_com_config.clone(),
+                    agent_cfg.endpoints.proxy_url(),
+                ));
             xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
         }
         let result = auto_update::run_update(
@@ -2836,6 +2843,20 @@ async fn run_update_command(
         xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
             .await;
         result?;
+        return Ok(());
+    }
+
+    // WinGet owns the package directory. Hand off before the rebuild note.
+    // `run_update` prints the command and returns without writing update files.
+    if auto_update::get_installer().await == Some("winget") {
+        auto_update::run_update(
+            force_reinstall,
+            version.as_deref(),
+            channel_switch,
+            &mut update_config,
+            trigger,
+        )
+        .await?;
         return Ok(());
     }
 

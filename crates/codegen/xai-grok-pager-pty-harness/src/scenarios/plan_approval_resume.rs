@@ -27,11 +27,15 @@ const PAGER_E2E_ARGS: &[&str] = &["--yolo", "--trust", "--no-leader"];
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
-/// Word-only approval footer (separator `"  |  "` from `line_viewer` paint).
+/// Word-only approval footer (separator `"  |  "` from fullscreen paint).
 /// Unique vs card prose (`to approve,`) and vs a lone `"approve"`.
 const LABELED_APPROVE_CTA: &str = "approve  |  comment";
+/// Soft side pane footer. One space on each side of the pipe.
+const LABELED_APPROVE_CTA_SINGLE: &str = "approve | comment";
 /// Full four-CTA strip when the right pane is wide enough for separators.
 const LABELED_FOOTER_STRIP: &str = "approve  |  comment  |  revise  |  exit";
+/// Soft side pane four-CTA strip.
+const LABELED_FOOTER_STRIP_SINGLE: &str = "approve | comment | revise | exit";
 /// Narrow dock drops separators; still word-only, no letter prefixes.
 const NARROW_FOOTER_STRIP: &str = "approve comment revise exit";
 
@@ -131,8 +135,10 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
             resumed.update(Duration::from_millis(50));
             let screen = resumed.screen_contents();
             let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+                || screen.contains(LABELED_FOOTER_STRIP_SINGLE)
                 || screen.contains(NARROW_FOOTER_STRIP)
-                || screen.contains(LABELED_APPROVE_CTA);
+                || screen.contains(LABELED_APPROVE_CTA)
+                || screen.contains(LABELED_APPROVE_CTA_SINGLE);
             if footer_painted {
                 break;
             }
@@ -185,8 +191,10 @@ fn wait_for_restored_plan_ready_chrome(harness: &mut PtyHarness) -> Result<()> {
         harness.update(Duration::from_millis(50));
         let screen = harness.screen_contents();
         let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+            || screen.contains(LABELED_FOOTER_STRIP_SINGLE)
             || screen.contains(NARROW_FOOTER_STRIP)
-            || screen.contains(LABELED_APPROVE_CTA);
+            || screen.contains(LABELED_APPROVE_CTA)
+            || screen.contains(LABELED_APPROVE_CTA_SINGLE);
         // Do not treat leftover first-session "Plan ready. Side panel open"
         // in scrollback as a bound waiter after `--continue`.
         let recent_status = screen
@@ -221,8 +229,12 @@ fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
     {
         bail!("old letter-prefixed plan CTAs must not paint\n{screen}");
     }
-    if screen.contains(LABELED_APPROVE_CTA) {
+    if screen.contains(LABELED_APPROVE_CTA_SINGLE) {
         // Inset one cell into "approve" so the hit lands in the button rect.
+        return click_screen_text(harness, LABELED_APPROVE_CTA_SINGLE, 0, 1)
+            .context("click labeled Approve word");
+    }
+    if screen.contains(LABELED_APPROVE_CTA) {
         return click_screen_text(harness, LABELED_APPROVE_CTA, 0, 1)
             .context("click labeled Approve word");
     }

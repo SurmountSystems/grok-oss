@@ -7,8 +7,11 @@
 //! dollar credits, and not console team prepaid / console API credits.
 //! Operator-visible Subagents list chrome omits the word `tokens`. The unit
 //! is implicit (`90k`, `112.9k`). Each nested session id is its own window.
+//! An L2 row adds that window's present and past to each specialist once.
+//! [`format_subagents_row_figure`] appends `+` while the row is running.
+//! The L1 `NK/500K` window is not that sum.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -144,6 +147,9 @@ fn peek_process_tracker<R>(f: impl FnOnce(&L2TokenTracker) -> R) -> R {
 /// Also calls `insert_local_usage_event`. A zero total is not stored.
 pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
     with_process_tracker(|t| t.record_spawn(nested_session_id, description));
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
     }
@@ -151,27 +157,44 @@ pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
 
 /// Production usage-tick hook (session usage tokens, not billing meters).
 ///
-/// Always stores the live sample with `store_current`, including when the new
+/// Stores the live sample with `store_current`, including when the new
 /// count is below the in-memory high-water. `record_usage` still `fetch_max`s
-/// `measured_tokens` and does not lower that high-water.
+/// `measured_tokens` and does not lower that high-water. A zero tick is not
+/// a count: it is not stored, and it does not replace a real sample with 0.
 pub fn on_nested_l2_usage(nested_session_id: &str, measured_tokens: u64) {
+    if measured_tokens == 0 {
+        return;
+    }
     with_process_tracker(|t| {
         t.record_usage(nested_session_id, measured_tokens);
         if let Some(row) = t.get(nested_session_id) {
             row.store_current(measured_tokens);
         }
     });
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
     }
 }
 
 /// Production L2-exit hook. Keeps the last measured count and writes
-/// the same ULID row into grok-oss sqlite.
+/// the same ULID row into grok-oss sqlite. Output tokens are filled on that
+/// row when a model response reported usage. A missing report stays null.
 pub fn on_nested_l2_exit(nested_session_id: &str) {
     with_process_tracker(|t| t.record_exit(nested_session_id));
+    if let Some(total) =
+        xai_grok_shell::session::nested_output::live_output_total(nested_session_id)
+    {
+        xai_tool_types::publish_finished_output_tokens(nested_session_id, total.output_tokens);
+    }
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
+        write_nested_l2_finish_output(&store, &event.event_ulid, nested_session_id);
     }
 }
 
@@ -216,6 +239,27 @@ fn nested_l2_sqlite_pair(
     Some((store, event))
 }
 
+/// Sets `output_tokens` and `reasoning_tokens` on the existing row.
+/// No reported usage leaves both columns null. Does not insert a row.
+fn write_nested_l2_finish_output(
+    store: &xai_grok_shell::grok_oss::GrokOssStore,
+    event_ulid: &str,
+    nested_session_id: &str,
+) {
+    let Some(total) = xai_grok_shell::session::nested_output::live_output_total(nested_session_id)
+    else {
+        return;
+    };
+    let output_tokens = i64::try_from(total.output_tokens).unwrap_or(i64::MAX);
+    let reasoning_tokens = i64::try_from(total.reasoning_tokens).unwrap_or(i64::MAX);
+    let _ = xai_grok_shell::token_economy::ledger::set_nested_l2_finish_output(
+        store,
+        event_ulid,
+        output_tokens,
+        reasoning_tokens,
+    );
+}
+
 impl L2TokenTracker {
     /// Record a nested L2 spawn. Description is the Subagents list label.
     pub fn record_spawn(
@@ -233,9 +277,13 @@ impl L2TokenTracker {
     /// ACP `SubagentProgress` `tokens_used` is that nested session's live
     /// sampling window (`context_tokens_used`). `fetch_max` keeps an in-memory
     /// high-water so concurrent ticks cannot lose a later count. The current
-    /// sample is stored separately and can go down after compact. Subagents
-    /// list paint reads that current sample, not the high-water.
+    /// sample is stored separately and can go down after compact. A zero tick
+    /// is ignored so it cannot replace a real count with 0. Subagents list
+    /// paint reads that current sample, not the high-water.
     pub fn record_usage(&mut self, nested_session_id: &str, measured_tokens: u64) {
+        if measured_tokens == 0 {
+            return;
+        }
         if let Some(row) = self.by_id.get_mut(nested_session_id) {
             let _previous = row
                 .measured_tokens
@@ -263,7 +311,7 @@ impl L2TokenTracker {
     pub fn format_subagents_list_token_suffix(&self, nested_session_id: &str) -> Option<String> {
         let row = self.get(nested_session_id)?;
         let measured = row.measured_tokens();
-        if row.status == NestedL2Status::Spawned && measured == 0 {
+        if measured == 0 {
             return None;
         }
         Some(format_measured_tokens_suffix(measured))
@@ -290,6 +338,20 @@ pub fn format_subagents_list_row_from_memory(
         Some(suffix) if !suffix.is_empty() => format!("{description} ({suffix})"),
         _ => description.to_string(),
     }
+}
+
+/// True when this nested session was spawned and no usage sample is stored.
+///
+/// False when the id was never recorded. Subagents list paint keeps the
+/// labeled standing estimate on that never-spawned row. A spawned row with
+/// no sample returns true so paint omits the token figure instead of
+/// inventing `167.0k`.
+pub fn spawned_with_no_sample_yet(nested_session_id: &str) -> bool {
+    peek_process_tracker(|tracker| {
+        tracker.get(nested_session_id).is_some_and(|row| {
+            row.status == NestedL2Status::Spawned && row.current_tokens().is_none()
+        })
+    })
 }
 
 /// Current live sample for this nested id, if a tick has stored one.
@@ -336,7 +398,8 @@ pub fn format_live_subagents_list_suffix(
 /// `past` already keeps the dropped units, so that larger sample is not added
 /// on top of `past`. `None` when the host has no present sample and no past.
 pub fn shown_nested_count(session_id: &str, present: Option<u64>, past: u64) -> Option<u64> {
-    let live = current_live_sample(session_id);
+    // A stored 0 is not a count. Do not let it replace a real present window.
+    let live = current_live_sample(session_id).filter(|count| *count > 0);
     let present_window = match (live, present) {
         (Some(live), Some(snapshot)) if past > 0 && live > snapshot => Some(snapshot),
         (Some(live), _) => Some(live),
@@ -364,6 +427,127 @@ pub fn sum_shown_counts_once(own: Option<u64>, l3_counts: &[Option<u64>]) -> Opt
         any = true;
     }
     any.then_some(total)
+}
+
+/// L2 Subagents row: that session's present plus past, plus each specialist once.
+///
+/// A live sample replaces a stale present window, then past is added once.
+/// The same cumulative `tokens_used` tick does not increase the total: usage
+/// recording stores the tick (`fetch_max` on the high-water), it does not
+/// `fetch_add`. A repeated specialist id is counted once. `None` when every
+/// count is missing. A real count is returned as itself, never as 0.
+/// This reads the existing per-session atomics. It does not keep a second counter.
+pub fn l2_row_count_present_past_and_each_specialist_once(
+    l2_id: &str,
+    l2_present: Option<u64>,
+    l2_past: u64,
+    specialists: &[(&str, Option<u64>, u64)],
+) -> Option<u64> {
+    let own = shown_nested_count(l2_id, l2_present, l2_past).filter(|count| *count > 0);
+    let mut seen = HashSet::new();
+    let mut l3_counts = Vec::new();
+    for (id, present, past) in specialists {
+        if *id == l2_id || !seen.insert(*id) {
+            continue;
+        }
+        l3_counts.push(shown_nested_count(id, *present, *past).filter(|count| *count > 0));
+    }
+    sum_shown_counts_once(own, &l3_counts).filter(|count| *count > 0)
+}
+
+/// Specialist row: that specialist's present plus past only.
+///
+/// Not the parent L2 total. `None` when the count is missing. A real count is
+/// not returned as 0.
+pub fn specialist_row_count(session_id: &str, present: Option<u64>, past: u64) -> Option<u64> {
+    shown_nested_count(session_id, present, past).filter(|count| *count > 0)
+}
+
+/// Compact figure for one Subagents row.
+///
+/// `10.2k` for 10232. A running row is `10.2k+`. A finished row has no `+`.
+/// A missing count is `None`. A real count is that compact figure, never `0`.
+/// The word `measured` is not part of this figure. Cached tokens are not added
+/// here, and `total_tokens` from one usage event is not this figure.
+pub fn format_subagents_row_figure(count: Option<u64>, running: bool) -> Option<String> {
+    let count = count.filter(|n| *n > 0)?;
+    let compact = format_measured_tokens_suffix(count);
+    if running {
+        Some(format!("{compact}+"))
+    } else {
+        Some(compact)
+    }
+}
+
+/// Nested sampling window when the host did not name one. L2 and L3 use 200k.
+const NESTED_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+
+/// Resolve the context integer for a Subagents overlay status cell.
+///
+/// Host chrome `0K/0K` after tool work is not `0`. The last `usage.jsonl`
+/// `input_tokens` is that integer. Cached tokens are already inside input.
+pub fn resolve_nested_context_used(
+    host_used: Option<u64>,
+    host_chrome: Option<&str>,
+    did_tool_work: bool,
+    usage_last_input: Option<u64>,
+) -> Option<u64> {
+    let chrome_zero =
+        host_chrome.is_some_and(xai_grok_shell::token_economy::host_chrome_is_zero_context);
+    if chrome_zero && did_tool_work {
+        return usage_last_input.filter(|n| *n > 0);
+    }
+    host_used.filter(|n| *n > 0).or_else(|| {
+        if did_tool_work {
+            usage_last_input.filter(|n| *n > 0)
+        } else {
+            None
+        }
+    })
+}
+
+/// Subagents overlay status cell: host context line plus a trailing `+`
+/// while the nested agent is still running.
+///
+/// Live: `152K/200K context+`. Finished: `152K/200K context`. That window
+/// is input. Do not print `0` for a `0K/0K` reading after tool work. Do
+/// not write not_fetched, not accepted, or not stored.
+pub fn format_nested_context_status_cell(
+    host_used: Option<u64>,
+    host_window: Option<u64>,
+    host_chrome: Option<&str>,
+    did_tool_work: bool,
+    usage_last_input: Option<u64>,
+    running: bool,
+) -> Option<String> {
+    let used =
+        resolve_nested_context_used(host_used, host_chrome, did_tool_work, usage_last_input)?;
+    let window = host_window
+        .filter(|n| *n > 0)
+        .unwrap_or(NESTED_CONTEXT_WINDOW_TOKENS);
+    let cell = format!(
+        "{}/{} context",
+        crate::views::context_bar::fmt_tokens(used),
+        crate::views::context_bar::fmt_tokens(window),
+    );
+    if running {
+        Some(format!("{cell}+"))
+    } else {
+        Some(cell)
+    }
+}
+
+/// Overlay status cell from in-memory SubagentInfo. Paint never opens
+/// `usage.jsonl`; fill `tokens_used` before paint when host chrome is 0.
+pub fn subagent_overlay_status_cell(info: &crate::app::subagent::SubagentInfo) -> Option<String> {
+    format_nested_context_status_cell(
+        info.attempt.tokens_used,
+        info.attempt.context_window_tokens,
+        None,
+        false,
+        None,
+        info.is_running(),
+    )
 }
 
 /// Grok 4.6-era wrap average. It stays an estimate until the host returns a figure.
@@ -536,6 +720,60 @@ mod tests {
             "Subagents list omits the word tokens; truncation must not become 112.6k token...; got {row:?}"
         );
         assert_eq!(row, "Isolated Preview (112.6k)");
+    }
+
+    /// Status cell is the host context line. Live has a trailing plus.
+    /// Finished keeps the label context with no plus. Host chrome 0K/0K
+    /// after tool work uses last usage.jsonl input_tokens. Do not print 0.
+    #[test]
+    fn finished_nested_status_cell_is_not_0k_after_tool_work_when_usage_has_input() {
+        let live = format_nested_context_status_cell(
+            Some(0),
+            Some(200_000),
+            Some("0K/0K"),
+            true,
+            Some(152_000),
+            true,
+        );
+        assert_eq!(live.as_deref(), Some("152K/200K context+"));
+        assert_ne!(live.as_deref(), Some("0K/0K context+"));
+        assert_ne!(live.as_deref(), Some("0"));
+        let finished = format_nested_context_status_cell(
+            Some(0),
+            Some(200_000),
+            Some("0K/0K context+"),
+            true,
+            Some(152_000),
+            false,
+        );
+        assert_eq!(finished.as_deref(), Some("152K/200K context"));
+        assert!(!finished.as_deref().unwrap_or("").contains('+'));
+        assert!(!finished.as_deref().unwrap_or("").contains("not_fetched"));
+        assert!(!finished.as_deref().unwrap_or("").contains("not accepted"));
+        assert!(!finished.as_deref().unwrap_or("").contains("not stored"));
+        assert!(
+            format_nested_context_status_cell(
+                Some(0),
+                Some(200_000),
+                Some("0K/0K"),
+                true,
+                None,
+                true,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            format_nested_context_status_cell(
+                Some(152_000),
+                Some(200_000),
+                None,
+                false,
+                None,
+                true,
+            )
+            .as_deref(),
+            Some("152K/200K context+")
+        );
     }
 
     /// Live sampling wins over tracker high-water. A later smaller window
@@ -987,6 +1225,221 @@ mod tests {
         assert_eq!(format_measured_tokens_suffix(HIGH_WATER), "10.2k");
     }
 
+    /// An L2 Subagents row is that L2's present plus past, plus each specialist
+    /// once. The same cumulative tick does not increase the total. The specialist
+    /// row is that specialist only. The L1 window is not that sum.
+    #[test]
+    fn each_l2_row_counts_present_and_past_and_each_specialist_once() {
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        struct ClearLiveTokenEconomy;
+        impl Drop for ClearLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::clear_token_economy_live();
+            }
+        }
+        let _clear_live_token_economy = ClearLiveTokenEconomy;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let l2 = format!("l2-present-past-{}-{stamp}", std::process::id());
+        let l3 = format!("l3-present-past-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&l2, "Residual");
+        on_nested_l2_spawn(&l3, "specialist");
+        on_nested_l2_usage(&l2, 25_000);
+        on_nested_l2_usage(&l3, 50_000);
+
+        let specialists = [(l3.as_str(), Some(50_000u64), 0u64)];
+        let total = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(25_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(total, Some(140_000));
+        assert_eq!(current_live_sample(&l2), Some(25_000));
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            peek_process_tracker(|t| t.get(&l2).map(|row| row.measured_tokens())),
+            Some(25_000)
+        );
+
+        on_nested_l2_usage(&l2, 25_000);
+        on_nested_l2_usage(&l3, 50_000);
+        let again = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(25_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(again, Some(140_000));
+        assert_eq!(
+            current_live_sample(&l2),
+            Some(25_000),
+            "the same cumulative tick must not be added a second time"
+        );
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            peek_process_tracker(|t| t.get(&l2).map(|row| row.measured_tokens())),
+            Some(25_000)
+        );
+
+        assert_eq!(specialist_row_count(&l3, Some(50_000), 0), Some(50_000));
+        assert_ne!(specialist_row_count(&l3, Some(50_000), 0), total);
+
+        let duplicated = [
+            (l3.as_str(), Some(50_000u64), 0u64),
+            (l3.as_str(), Some(50_000u64), 0u64),
+            (l2.as_str(), Some(25_000u64), 65_000u64),
+        ];
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(25_000),
+                65_000,
+                &duplicated,
+            ),
+            Some(140_000),
+            "a repeated specialist id is counted once, and the L2 id is not added as its own specialist"
+        );
+
+        assert_eq!(
+            format_subagents_row_figure(total, true).as_deref(),
+            Some("140k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(total, false).as_deref(),
+            Some("140k")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(50_000), true).as_deref(),
+            Some("50k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(50_000), false).as_deref(),
+            Some("50k")
+        );
+        assert_eq!(format_measured_tokens_suffix(10_232), "10.2k");
+        assert_eq!(
+            format_subagents_row_figure(Some(10_232), true).as_deref(),
+            Some("10.2k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(10_232), false).as_deref(),
+            Some("10.2k")
+        );
+        let running = format_subagents_row_figure(total, true).expect("running figure");
+        assert!(!running.contains("measured"));
+        assert!(!running.contains("tokens"));
+        assert_ne!(running, "0");
+
+        let input_plus_cached = 20_000u64.saturating_add(5_000);
+        let output_plus_reasoning = 8_000u64.saturating_add(2_000);
+        assert_ne!(total, Some(input_plus_cached));
+        assert_ne!(total, Some(output_plus_reasoning));
+        assert_ne!(total, Some(30_000));
+
+        let l1_before = crate::views::context_bar::context_chip_token_text(
+            239_000,
+            Some(500_000),
+            Some(500_000),
+        );
+        let l1_after = crate::views::context_bar::context_chip_token_text(
+            239_000,
+            Some(500_000),
+            Some(500_000),
+        );
+        assert_eq!(l1_before.as_deref(), Some("239K / 500K"));
+        assert_eq!(l1_after, l1_before);
+        let summed = crate::views::context_bar::context_chip_token_text(
+            239_000u64.saturating_add(140_000),
+            Some(500_000),
+            Some(500_000),
+        );
+        assert_ne!(l1_before, summed);
+        assert_eq!(summed.as_deref(), Some("379K / 500K"));
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.tokens_used = 1_000;
+        goal.token_baseline = 0;
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        assert_eq!(
+            goal.live_tokens_used(Some(239_000), 0),
+            goal.live_tokens_used(Some(239_000), 140_000)
+        );
+        assert_eq!(goal.live_tokens_used(Some(239_000), 140_000), 239_000);
+
+        on_nested_l2_usage(&l2, 0);
+        on_nested_l2_usage(&l3, 0);
+        assert_eq!(current_live_sample(&l2), Some(25_000));
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(25_000),
+                65_000,
+                &specialists,
+            ),
+            Some(140_000),
+            "a zero tick must not replace a real count"
+        );
+        assert_eq!(format_subagents_row_figure(Some(0), true), None);
+        assert_eq!(format_subagents_row_figure(None, true), None);
+
+        let quiet = format!("l2-present-past-quiet-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&quiet, "quiet");
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(&quiet, None, 0, &[]),
+            None
+        );
+        assert_eq!(specialist_row_count(&quiet, None, 0), None);
+
+        on_nested_l2_usage(&l2, 30_000);
+        let grew = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(30_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(grew, Some(145_000));
+        assert_eq!(
+            format_subagents_row_figure(grew, true).as_deref(),
+            Some("145k+")
+        );
+        on_nested_l2_usage(&l2, 30_000);
+        assert_eq!(current_live_sample(&l2), Some(30_000));
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(30_000),
+                65_000,
+                &specialists,
+            ),
+            Some(145_000)
+        );
+
+        let stale = format!("l2-present-past-stale-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&stale, "before compact");
+        on_nested_l2_usage(&stale, 90_000);
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(&stale, Some(20_000), 65_000, &[]),
+            Some(85_000),
+            "a live sample above the post-compact present is not added on top of past"
+        );
+
+        let src = include_str!("l2_token_tracking.rs");
+        let record = fn_body(src, "pub fn record_usage", "pub fn record_exit");
+        assert!(
+            record.contains("fetch_max"),
+            "a cumulative tokens_used tick keeps each token once with fetch_max"
+        );
+        assert!(
+            !record.contains("fetch_add"),
+            "adding a cumulative tick on every sample would count the same tokens twice"
+        );
+    }
+
     /// Operator: when the host has a real token count, the row shows that
     /// count. An estimate stays labeled as an estimate. When the host has
     /// no count, the row omits the token clause. Do not invent 167.0k.
@@ -1221,6 +1674,161 @@ mod tests {
             "\npub(crate) fn session_usage_block_text",
         );
         assert_paint_calls_formatter("/tasks block", block_fn, CONTRACT);
+    }
+
+    /// A finished L2 stores output tokens as its own completion tokens minus
+    /// chain of thought, plus each descendant once. Reasoning stays in
+    /// `reasoning_tokens`. `total_tokens` stays the context high-water.
+    /// A progress tick leaves `output_tokens` null. A missing usage report
+    /// is not stored as 0. No second row, and no row for a descendant whose
+    /// output is already inside that total.
+    #[test]
+    #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+    fn finished_l2_output_tokens_exclude_chain_of_thought_and_include_each_l3_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "grok-l2-output-tokens-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("grok_oss.db");
+        let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
+            grok_oss_database_path: Some(db_path.clone()),
+            ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+        };
+        xai_grok_shell::token_economy::set_token_economy_live(cfg);
+        struct ResetLiveTokenEconomy;
+        impl Drop for ResetLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+            }
+        }
+        let _reset_live_token_economy = ResetLiveTokenEconomy;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let l2 = format!("nested-output-l2-{}-{stamp}", std::process::id());
+        let l3 = format!("nested-output-l3-{}-{stamp}", std::process::id());
+        let grandchild = format!("nested-output-gc-{}-{stamp}", std::process::id());
+        let missing = format!("nested-output-missing-{}-{stamp}", std::process::id());
+
+        xai_grok_shell::session::nested_output::mark_nested_session(&l2);
+        xai_grok_shell::session::nested_output::note_descendant_if_parent_nested(&l2, &l3);
+        xai_grok_shell::session::nested_output::mark_nested_session(&l3);
+        xai_grok_shell::session::nested_output::note_descendant_if_parent_nested(&l3, &grandchild);
+        xai_grok_shell::session::nested_output::mark_nested_session(&grandchild);
+
+        // Own calls, then each descendant once. Recorded before the progress tick.
+        xai_grok_shell::session::nested_output::record_own_model_response(&l2, 1000, 400);
+        xai_grok_shell::session::nested_output::record_own_model_response(&l2, 80, 0);
+        xai_grok_shell::session::nested_output::record_own_model_response(&l3, 200, 50);
+        xai_grok_shell::session::nested_output::record_own_model_response(&grandchild, 80, 30);
+
+        on_nested_l2_spawn(&l2, "output token writer");
+        on_nested_l2_usage(&l2, 180_000);
+
+        let store = xai_grok_shell::grok_oss::open_at(&db_path).expect("grok_oss.db");
+        let progress =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("progress rows");
+        assert_eq!(progress.len(), 1, "one row after the progress tick");
+        assert_eq!(progress[0].output_tokens, None);
+        assert_eq!(progress[0].reasoning_tokens, None);
+        assert_eq!(progress[0].total_tokens, Some(180_000));
+        assert!(progress[0].cost_missing);
+        let event_ulid = progress[0].event_ulid.clone();
+
+        on_nested_l2_spawn(&l3, "descendant");
+        on_nested_l2_usage(&l3, 50_000);
+        on_nested_l2_exit(&l3);
+        on_nested_l2_spawn(&grandchild, "grandchild");
+        on_nested_l2_usage(&grandchild, 20_000);
+        on_nested_l2_exit(&grandchild);
+
+        let after_descendants =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("l2 rows after descendants");
+        assert_eq!(after_descendants.len(), 1);
+        assert_eq!(after_descendants[0].event_ulid, event_ulid);
+        assert_eq!(
+            after_descendants[0].output_tokens, None,
+            "a descendant exit does not fill the L2 output column"
+        );
+        assert_eq!(after_descendants[0].total_tokens, Some(180_000));
+        let l3_rows =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l3)
+                .expect("l3 rows");
+        let grandchild_rows =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(
+                &store,
+                &grandchild,
+            )
+            .expect("grandchild rows");
+        assert!(
+            l3_rows.is_empty() && grandchild_rows.is_empty(),
+            "no second row for a descendant already inside the L2 output total"
+        );
+
+        on_nested_l2_exit(&l2);
+        let finished =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("finished rows");
+        assert_eq!(finished.len(), 1, "finish does not insert a second row");
+        assert_eq!(finished[0].event_ulid, event_ulid);
+        assert_eq!(finished[0].agent_kind, "l2");
+        assert_eq!(
+            finished[0].output_tokens,
+            Some(880),
+            "own completion minus chain of thought, plus each descendant once"
+        );
+        assert_eq!(finished[0].reasoning_tokens, Some(480));
+        assert_ne!(finished[0].output_tokens, Some(880 + 480));
+        assert_ne!(finished[0].output_tokens, Some(1360));
+        assert_ne!(finished[0].output_tokens, Some(930));
+        assert_eq!(
+            finished[0].total_tokens,
+            Some(180_000),
+            "total_tokens stays the context high-water"
+        );
+        assert!(finished[0].cost_missing);
+
+        xai_grok_shell::session::nested_output::mark_nested_session(&missing);
+        on_nested_l2_spawn(&missing, "no usage report");
+        on_nested_l2_usage(&missing, 12_000);
+        on_nested_l2_exit(&missing);
+        let unread =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &missing)
+                .expect("missing-usage rows");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].output_tokens, None);
+        assert_eq!(unread[0].reasoning_tokens, None);
+        assert_ne!(unread[0].output_tokens, Some(0));
+        assert_eq!(unread[0].total_tokens, Some(12_000));
+
+        let mut result = xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
+            subagent_id: l2.clone(),
+            child_session_id: l2.clone(),
+            output_tokens_used: 1360,
+            ..xai_grok_tools::implementations::grok_build::task::types::SubagentResult::default()
+        };
+        assert!(xai_grok_shell::session::nested_output::assign_subagent_output_tokens(&mut result));
+        assert_eq!(result.output_tokens_used, 880);
+        assert_ne!(result.output_tokens_used, 1360);
+
+        let text = xai_tool_types::format_subagent_completed("done", &l2, 1, 1, 1, None);
+        assert!(
+            text.contains("output_tokens=880"),
+            "finished tool text must show the same integer, got {text:?}"
+        );
+        assert!(!text.contains("1360"));
+        assert!(!text.contains("not_fetched"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn fn_body<'a>(src: &'a str, start_needle: &str, end_needle: &str) -> &'a str {

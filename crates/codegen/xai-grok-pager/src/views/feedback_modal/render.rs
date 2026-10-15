@@ -89,7 +89,9 @@ impl FeedbackModalState {
             cursor: if self.metadata_focus.is_some() {
                 None
             } else {
-                prompt_result.cursor_pos
+                // The Write composer paints a software caret and hides the
+                // terminal cursor. The modal still places that caret.
+                prompt_result.cursor_pos.or(prompt_result.caret_cell)
             },
             post_flush: prompt_result.post_flush_escapes.map(Into::into),
         })

@@ -548,7 +548,7 @@ fn auto_backgrounded_summary(label: &str, wait_ms: u64) -> String {
 fn block_expired_summary(label: &str, wait_ms: u64, block_param: &str, task_id: &str) -> String {
     let wait_secs = millis_as_secs_label(wait_ms);
     format!(
-        "Command \"{label}\" is still running after {wait_secs}s ({block_param}) and has been moved to the background as task {task_id}."
+        "Command \"{label}\" is still running after {wait_secs}s ({block_param}) and has been moved to the background as task {task_id}. Do not start the same command again."
     )
 }
 
@@ -1501,7 +1501,7 @@ impl BashTool {
                         let fg_budget_secs = millis_as_secs_label(wait_ms);
                         let cap_hours = background_cap_hours();
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. Kill deadline for a command that is still in the foreground. This does not extend how long the tool waits: a foreground command still running after about {fg_budget_secs}s is moved to the background and you receive a task id. Once backgrounded, the command is no longer bound by this value; it runs until it exits (background cap {cap_hours}h). If you do not receive a task id, the command was killed at timeout instead."
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. Kill deadline for a command that is still in the foreground. This does not extend how long the tool waits: a foreground command still running after about {fg_budget_secs}s is moved to the background and you receive a task id. Once backgrounded, the command is no longer bound by this value; it runs until it exits (background cap {cap_hours}h). If you do not receive a task id, the command was killed at timeout instead. This deadline is enforced for foreground commands only."
                         )
                     } else {
                         format!(
@@ -2014,6 +2014,10 @@ impl xai_tool_runtime::Tool for BashTool {
         if single_knob {
             Self::fold_single_knob_into_legacy_knobs(&mut input, &mut params);
             tracing::Span::current().record("is_background", input.is_background);
+        } else {
+            // Pinned two-knob versions kill at the foreground timeout. Host
+            // auto-background belongs to the current single-knob contract.
+            params.auto_background_on_timeout = false;
         }
         let params = params;
 
@@ -5578,7 +5582,7 @@ mod tests {
             assert_eq!(bg.pid, Some(4242));
             assert_eq!(
                 bg.summary,
-                "Command \"build the crate\" is still running after 45s (block_until_ms) and has been moved to the background as task call-9."
+                "Command \"build the crate\" is still running after 45s (block_until_ms) and has been moved to the background as task call-9. Do not start the same command again."
             );
             assert!(bg.retrieval_hint.contains("get_task_output"));
         }

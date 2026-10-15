@@ -66,7 +66,10 @@ fn unreached_denied_samples() -> Vec<Action> {
             images: Vec::new(),
         },
         Action::SubmitFollowUp(String::from("f")),
-        Action::RevisePlan(String::from("revise the plan")),
+        Action::RevisePlan {
+            text: String::from("revise the plan"),
+            images: Vec::new(),
+        },
         Action::SendSlashCommandPreservingDraft(String::from("/help")),
         Action::QueueRemoveShared {
             id: String::from("p1"),
@@ -140,7 +143,10 @@ fn child_gate_denies_post_turn_plan_actions() {
             plan_file_content: String::from("# Build it\n"),
             plan_file_uri: None,
         },
-        Action::RevisePlan(String::from("revise the plan")),
+        Action::RevisePlan {
+            text: String::from("revise the plan"),
+            images: Vec::new(),
+        },
         Action::SetPlanMode(crate::app::actions::PlanModeKind::Off),
     ] {
         assert_eq!(

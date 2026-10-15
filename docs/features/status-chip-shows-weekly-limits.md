@@ -2,11 +2,11 @@
 
 One grok-oss session calls the billing APIs. The status chip shows this week's included SuperGrok period usage. SuperGrok is a paid product. Included SuperGrok period limits are not SuperGrok dollar credits, and they are not console API credits.
 
-When 28% of that week is used, the chip reads `limits 28%`. Hover reads `72% left`. Click opens Credits and Limits. The header does not say `SuperGrok period`, a workspace name, `behind linear burn`, `15m`, or `24h`.
+When 28% of that week is used and the next request draws included SuperGrok period limits, the chip reads `limits 28%`. Hover reads `72% left`. The chip does not say limits when that meter is not the one in use. Click opens Limits and Credits. Limits is the default tab. The header does not say `SuperGrok period`, a workspace name, `behind linear burn`, `15m`, or `24h`.
 
 The Limits tab shows ahead of a linear week, or behind. That pacing stays on the Limits tab.
 
-The Credits tab fields are `Personal credits` and `Console API credits`. Console API credits are the business credits. Personal credits are the personal account's SuperGrok dollar credits. They are shown. The automatic path does not spend them. A failed fetch says `not available`. A figure from chat is not a balance.
+The open Limits tab lists Personal limits, Personal credits, Business limits, and Business credits. Business credits are that Team session's SuperGrok dollar credits. They are not team postpaid Billing Credits and they are not console team prepaid. The Credits tab fields are `Personal credits` and `Console API credits`. Console API credits are console team prepaid. Personal credits are the personal account's SuperGrok dollar credits. They are shown. The automatic path does not spend them. A failed fetch says `not available`. A figure from chat is not a balance.
 
 `Use credits` changes the next request to console API credits while included limits remain and that balance is available. A real SuperGrok HTTP 402 fails over to console API credits when they are available. A client printout of 100% does not. When included limits and console API credits are both out, the chip shows `2d 4h 12m`.
 

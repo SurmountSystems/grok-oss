@@ -174,6 +174,8 @@ impl SessionActor {
                 chunk_index,
             } => match channel {
                 SamplingChannel::Text => {
+                    let text =
+                        crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
                     self.bump_stream_apply_span(&request_id, text.len());
                     // Append to the out-of-band trace accumulator; it never enters chat_state
                     // See `StreamingTurnCapture` for how the capture begins and ends

@@ -27,10 +27,10 @@ Manage both in the agents modal. Open it with `/config-agents` (alias `/agents`)
 
 ## Disabling Subagents
 
-Disable subagents with a CLI flag, an environment variable, or the config file (highest priority first). The same rules apply to the interactive `grok` TUI, `grok agent stdio`, and headless runs.
+Disable subagents with a CLI flag, an environment variable, or the config file (highest priority first). The same rules apply to the interactive `grok` TUI, `grok-oss agent stdio`, and headless runs.
 
 ```bash
-grok --no-subagents                  # This session only
+grok-oss --no-subagents                  # This session only
 export GROK_SUBAGENTS=0              # Environment variable
 ```
 
@@ -383,7 +383,7 @@ For blocking subagents the single entry updates its bullet color when the child 
 
 ### Tasks pane (Ctrl+G)
 
-As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all.
+As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all. `[clear]` on the Subagents list removes completed rows and leaves a running row. A left click on the painted `[clear]` removes completed rows and leaves the running row. `[clear]` rests yellow and turns white on hover. A left click on the `1 specialist` count opens that running L3 transcript, the L2 row stays, the count stays, and Esc or q from the L3 returns to the L2.
 
 ### Dock (when enabled)
 
@@ -397,7 +397,7 @@ When you open a subagent (from a scrollback block or the tasks pane), a bordered
 - The child's own scrollback, thinking, and tool calls render inside the frame.
 - The parent tasks pane, todos pane, and dock hide for the duration of the view.
 
-This view is observational. The composer is hidden (zero rows). You cannot focus it, type a prompt, stash a draft, or send a follow-up from here. The parent session still owns prompts. To steer a running child, close the view and use `send_subagent_message` from the parent (see [Sending messages to subagents](#sending-messages-to-subagents)).
+An L2 coordinator view has a floor prompt. That prompt is the Operator box on that view. Enter with text in that box sends the text to that L2 and does not start a new L1 turn. An L3 specialist view has no prompt. Empty Enter on the L2 floor opens the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count and does not list specialist names in place of that count. Enter:open stays when the floor is empty.
 
 **What still works**
 
@@ -421,7 +421,8 @@ If a prompt-queue overlay appears, it is a **read-only mirror**. You cannot edit
 
 **How to leave**
 
-- `q` or `Esc` from bare scrollback, or click [✗].
+- `q` or `Esc` from an L3 returns to the L2 and does not cancel the L2.
+- `q` or `Esc` from the L2 returns to L1 and leaves the L2 running.
 - If scrollback search is open, `q` / `Esc` closes search first. A later press closes the view.
 - `Ctrl+Q` always quits Grok. It is never swallowed here.
 

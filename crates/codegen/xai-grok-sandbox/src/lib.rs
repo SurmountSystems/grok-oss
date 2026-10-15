@@ -400,29 +400,30 @@ fn chmod_000(path: &Path) -> Option<()> {
     std::fs::set_permissions(path, perms).ok()?;
     Some(())
 }
-/// Directories that may hold the zero-permission bwrap bind source.
+/// Directories that may hold bwrap bind sources (mode-000 placeholders and the containment sentinel).
 ///
 /// Prefer `grok_home` (already in the writable set). When that tree cannot be
 /// created (Nix `HOME=/homeless-shelter`, `$GROK_HOME` under `/nonexistent`),
 /// use `/tmp`, which sandbox profiles already write-allow. Skip `$NIX_BUILD_TOP`
 /// (`/build`): the quality sandbox's build tree is not a place for mode-000
-/// bind sources.
-#[cfg(all(feature = "enforce", target_os = "linux"))]
-fn bwrap_placeholder_parent_dirs() -> Vec<PathBuf> {
+/// bind sources. Sentinel creation and inner verification walk this list in the
+/// same order, so both sides name the directory the re-exec actually binds.
+#[cfg(target_os = "linux")]
+fn bwrap_state_parent_candidates() -> Vec<PathBuf> {
     let mut parents = Vec::new();
     for candidate in [
         paths::grok_home(),
         PathBuf::from("/tmp"),
         std::env::temp_dir(),
     ] {
-        if bwrap_placeholder_parent_usable(&candidate) && !parents.contains(&candidate) {
+        if bwrap_state_parent_usable(&candidate) && !parents.contains(&candidate) {
             parents.push(candidate);
         }
     }
     parents
 }
-#[cfg(all(feature = "enforce", target_os = "linux"))]
-fn bwrap_placeholder_parent_usable(parent: &Path) -> bool {
+#[cfg(target_os = "linux")]
+fn bwrap_state_parent_usable(parent: &Path) -> bool {
     if parent.as_os_str().is_empty() {
         return false;
     }
@@ -436,13 +437,29 @@ fn bwrap_placeholder_parent_usable(parent: &Path) -> bool {
     }
     true
 }
+/// First candidate whose directory can be created. `grok_home()` still returns
+/// the unwritable Nix path after its own create fails, so this probes again.
+#[cfg(target_os = "linux")]
+pub(crate) fn bwrap_writable_state_parent() -> Result<PathBuf, String> {
+    let mut errors = Vec::new();
+    for parent in bwrap_state_parent_candidates() {
+        match std::fs::create_dir_all(&parent) {
+            Ok(()) => return Ok(parent),
+            Err(error) => errors.push(format!("{}: {error}", parent.display())),
+        }
+    }
+    Err(format!(
+        "could not create a writable directory for the bwrap sentinel ({})",
+        errors.join("; ")
+    ))
+}
 /// Zero-permission placeholder (file or dir) under `grok_home` used by bwrap bind-over. The placeholder name is suffixed
 /// with the current PID so concurrent grok processes don't race each other's create/remove/chmod on a shared path. A lost
 /// race could yield `None`, silently dropping the bind and failing open.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn bwrap_blocked_placeholder(name: &str, want_dir: bool) -> Option<PathBuf> {
     let filename = format!("{name}.{}", std::process::id());
-    for parent in bwrap_placeholder_parent_dirs() {
+    for parent in bwrap_state_parent_candidates() {
         if let Some(path) = try_bwrap_placeholder_in(&parent, &filename, want_dir) {
             return Some(path);
         }

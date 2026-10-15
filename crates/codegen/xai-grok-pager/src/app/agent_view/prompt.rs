@@ -22,6 +22,49 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 }
 
 impl AgentView {
+    /// Shift-Enter, the four bare arrows, Ctrl-Left, Ctrl-Right,
+    /// Ctrl-Backspace, Ctrl-A, Ctrl-E, Y, and Shift+Y on a plan prompt
+    /// use the same composer path as the main composer. Ctrl-A and Ctrl-E
+    /// are line start and line end on that path. Y is text in that prompt.
+    /// It is not the plan-pane copy command. Lowercase y on an empty plan
+    /// preview still copies the plan. Bare Left and Right stay one cell.
+    /// Control on those two keys is word motion. Up and Down stay bare,
+    /// so a modified vertical arrow still belongs to the plan list.
+    pub(super) fn plan_prompt_key_reaches_main_composer(key: &KeyEvent) -> bool {
+        // Char('Y'), Shift+Y, and Shift on an already-uppercase Y all insert Y.
+        let bare_or_shift = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if bare_or_shift
+            && match key.code {
+                KeyCode::Char('Y') => true,
+                KeyCode::Char('y') => key.modifiers == KeyModifiers::SHIFT,
+                _ => false,
+            }
+        {
+            return true;
+        }
+        if crate::input::is_mod_enter(key) {
+            return true;
+        }
+        let bare_arrow = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+        ) && key.modifiers.is_empty();
+        if bare_arrow {
+            return true;
+        }
+        let word_arrow = matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && key.modifiers == KeyModifiers::CONTROL;
+        if word_arrow {
+            return true;
+        }
+        let line_home_or_end =
+            matches!(key.code, KeyCode::Char('a' | 'e')) && key.modifiers == KeyModifiers::CONTROL;
+        if line_home_or_end {
+            return true;
+        }
+        key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL
+    }
+
     /// When Ctrl+Enter must interject (`x.ai/interject`) instead of inserting
     /// a newline. Appropriate: a sampler turn is running, the Human box has
     /// text or images, and the target can take it (L1 or L2 overlay). Not
@@ -45,6 +88,21 @@ impl AgentView {
             return false;
         }
         true
+    }
+
+    /// Cancel-and-send from the composer. The unbound-placeholder notice
+    /// rides the action. This handler has no `AppView` to toast from.
+    pub(crate) fn send_now_action_from_composer(&mut self) -> Action {
+        let image_notice = self.unbound_image_placeholder_notice();
+        let text = self.prompt.text().trim().to_string();
+        let images = self.prompt.drain_images();
+        self.prompt.set_text("");
+        self.note_draft_consumed();
+        Action::SendPromptNow {
+            text,
+            images,
+            image_notice,
+        }
     }
 
     pub fn prompt_history_loading(&self) -> bool {
@@ -538,10 +596,16 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // 1. Element interaction: Enter on a paste/file-ref chip inlines (expands) it.
-        //    Enter on an image chip opens the preview (handled by caller)
-        //    Must check before registry lookup since Enter is also SendPrompt.
-        if let Some(interaction) = self.prompt.try_element_interaction(key) {
+        // 1. Element interaction: Enter on a file-ref chip inlines it.
+        //    Plain Enter on a paste chip falls through to send. Calling
+        //    try_element_interaction here would clear the chip before
+        //    dispatch proves the send landed. Enter on an image chip opens
+        //    the preview (handled by caller). Must check before registry
+        //    lookup since Enter is also SendPrompt.
+        let paste_chip_enter = key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.prompt.paste_element_at_cursor().is_some();
+        if !paste_chip_enter && let Some(interaction) = self.prompt.try_element_interaction(key) {
             use crate::views::prompt_widget::ElementInteraction;
             match interaction {
                 ElementInteraction::Inlined => {
@@ -599,13 +663,25 @@ impl AgentView {
                 if let Some(outcome) = self.interject_editing_queued_intercept() {
                     return outcome;
                 }
-                let text = self.prompt.text().trim().to_string();
                 if self.paste_probe_in_flight > 0 {
                     self.deferred_send = Some(AgentDeferredSend::Interject);
                     return InputOutcome::Changed;
                 }
+                // Unbound `[Image #N]` placeholders ride Send now so the
+                // notice is on the action and dispatch can join a read
+                // failure into the same toast. A body with no unbound
+                // placeholder still interjects.
+                self.prompt.rebind_image_placeholders();
+                if !self.prompt.unbound_image_placeholders().is_empty() {
+                    return InputOutcome::Action(self.send_now_action_from_composer());
+                }
+                // A running turn with a body in the Operator box interjects.
+                // Do not cancel-and-send that body. Empty stays a newline
+                // above, because interjection_is_appropriate is false then.
+                let text = self.prompt.text().trim().to_string();
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
+                self.note_draft_consumed();
                 return InputOutcome::Action(Action::Interject { text, images });
             }
             self.prompt.textarea.insert_str("\n");
@@ -661,10 +737,32 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        self.prompt.insert_replacing_selection("\n");
-                        return InputOutcome::Changed;
+                        // Bare Enter at the end of the last line submits.
+                        // Mid-line Enter still inserts a newline. Shift+Enter
+                        // already returned above.
+                        let submit_at_end = composer_cursor_at_end_of_last_line(&self.prompt)
+                            && !self.prompt.text().trim().is_empty();
+                        if !submit_at_end {
+                            self.prompt.insert_replacing_selection("\n");
+                            return InputOutcome::Changed;
+                        }
                     }
                     if let Some(text) = self.prompt.try_send() {
+                        // Plan mode sends the attached image with the notes.
+                        // SendPrompt is text only, so the planner would not see the chip.
+                        if self.plan_mode_active && !self.prompt.images.is_empty() {
+                            self.prompt_input_mode = PromptInputMode::Normal;
+                            if self.interjection_is_appropriate() {
+                                let images = self.prompt.drain_images();
+                                self.prompt.set_text("");
+                                self.note_draft_consumed();
+                                return InputOutcome::Action(Action::Interject {
+                                    text: text.trim().to_string(),
+                                    images,
+                                });
+                            }
+                            return InputOutcome::Action(self.send_now_action_from_composer());
+                        }
                         // Remember mode with slash_accepted_send: treat as normal SendPrompt (the slash path accepted a no-arg command)
                         let action_mode = if self.prompt_input_mode == PromptInputMode::Remember
                             && slash_accepted_send
@@ -712,16 +810,14 @@ impl AgentView {
                                 self.deferred_send = Some(AgentDeferredSend::Interject);
                                 return InputOutcome::Changed;
                             }
-                            // Drain images BEFORE set_text("") wipes the chip elements.
-                            let image_notice = self.unbound_image_placeholder_notice();
+                            // The Operator box still holds this body, so the
+                            // running turn interjects. Drain images before
+                            // set_text wipes the chip elements. An empty
+                            // composer still send-nows the queued row below.
                             let images = self.prompt.drain_images();
                             self.prompt.set_text("");
                             self.note_draft_consumed();
-                            return InputOutcome::Action(Action::SendPromptNow {
-                                text,
-                                images,
-                                image_notice,
-                            });
+                            return InputOutcome::Action(Action::Interject { text, images });
                         }
                     } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -766,6 +862,19 @@ impl AgentView {
                 || clipboard_text
                     .as_deref()
                     .is_none_or(|text| text.trim().is_empty())
+            {
+                return self.handle_paste_key_deferred(clipboard_text);
+            }
+        }
+        // Ctrl+Shift+V with real text stays an inline paste. Image-only
+        // (empty clipboard text) must take the same deferred probe as Ctrl+V.
+        if crate::input::key::is_inline_paste_key(key) {
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            if clipboard_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
             {
                 return self.handle_paste_key_deferred(clipboard_text);
             }
@@ -917,24 +1026,37 @@ impl AgentView {
             return Some(InputOutcome::Changed);
         }
 
-        // Mid-turn (running or already cancelling), every mode: Esc never cancels; point at the registry cancel binding instead
-        // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
-        // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
-        if self.stoppable_activity_running() || self.any_cancel_pending() {
-            if self.stoppable_activity_running()
-                && let Some(cancel_key) = registry.key_for(ActionId::CancelTurn)
-            {
+        // Already cancelling: swallow. Do not re-hint Ctrl+C and do not arm.
+        if self.any_cancel_pending() {
+            self.suppress_rewind_arm(std::time::Instant::now());
+            return Some(InputOutcome::Changed);
+        }
+        // Full-screen local turn and `/compact`: hint immediately. Do not arm.
+        // A dashboard overlay non-vim prompt arms in AppView before this policy.
+        if self.session.state.is_turn_running() || self.session.state.is_compact_running() {
+            if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
                 let cancel_key = cancel_key.display();
                 self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
             }
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Changed);
         }
-        // Busy primary (minimal / non-vim): first Esc arms confirm. Second
-        // Esc within the double-press window fires CancelTurn via
-        // PendingAction. First Esc must not start Cancelling.
-        if self.session.state.is_turn_running() || self.wake_turn_active() {
+        // Idle streaming wake: an empty composer hints and arms CancelTurn.
+        // The second Esc returns that action without stamping a cancel
+        // trigger and without marking the wake cancel sent. A composer that
+        // still holds a draft swallows this Esc. AppView drops a ClearPrompt
+        // arm from before the wake and then continues into this policy, so
+        // arming CancelTurn here would replace the arm the caller just dropped.
+        if self.wake_turn_active() && !self.wake_turn_cancelling() {
+            if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
+                let cancel_key = cancel_key.display();
+                self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
+            }
             self.suppress_rewind_arm(std::time::Instant::now());
+            let has_draft = !self.prompt.text().is_empty() || !self.prompt.images.is_empty();
+            if has_draft {
+                return Some(InputOutcome::Changed);
+            }
             return Some(InputOutcome::ArmPending {
                 action: Action::CancelTurn,
                 shortcut: crate::input::key::KeyShortcut::from(*key),
@@ -2813,7 +2935,7 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
         assert!(
             matches!(
                 outcome,
-                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                InputOutcome::Action(Action::Interject { ref text, .. })
                     if text == "steer mid-turn"
             ),
             "running + payload: interject must win over CTA, got {outcome:?}"
@@ -2905,5 +3027,429 @@ mod queue_recall_tests {
 
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert_eq!(agent.prompt.text(), "an older prompt");
+    }
+}
+
+#[cfg(test)]
+mod shared_prompt_key_tests {
+    use super::test_fixtures;
+    use crate::actions::ActionRegistry;
+    use crate::views::file_search::line_viewer::{LineViewerKind, LineViewerState};
+    use crate::views::plan_approval_view::PlanApprovalFocus;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    /// Same seed on every surface. The caret sits in the middle line so Up,
+    /// Down, Left, and Right each move, and Ctrl-Backspace has a word to delete.
+    const SEED: &str = "alpha beta\nsecond line\nthird";
+
+    fn caret() -> usize {
+        SEED.find("second").expect("second") + 3
+    }
+
+    fn key_event(name: &str) -> KeyEvent {
+        match name {
+            "Shift-Enter" => KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            "Up" => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            "Down" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            "Left" => KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            "Right" => KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            "Ctrl-Backspace" => KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            "Ctrl-A" => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            "Ctrl-E" => KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            other => panic!("unknown prompt key {other}"),
+        }
+    }
+
+    /// Start of the seeded middle line. Ctrl-A must land here.
+    fn current_line_start() -> usize {
+        let cursor = caret();
+        SEED[..cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    /// End of the seeded middle line, on the newline. Ctrl-E must land here.
+    fn current_line_end() -> usize {
+        let cursor = caret();
+        SEED[cursor..]
+            .find('\n')
+            .map(|index| cursor + index)
+            .unwrap_or(SEED.len())
+    }
+
+    /// `handle_prompt_key` clears this at entry. A second match that only
+    /// calls `prompt.handle_key` leaves it set.
+    fn arm_composer_toast(agent: &mut super::AgentView) {
+        agent.toast = Some(("main-composer-key".to_string(), 1));
+    }
+
+    fn composer(agent: &super::AgentView) -> (String, usize) {
+        (agent.prompt.text().to_string(), agent.prompt.cursor())
+    }
+
+    fn seed(agent: &mut super::AgentView) {
+        agent.multiline_mode = true;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.prompt.set_text(SEED);
+        agent.prompt.set_cursor(caret());
+    }
+
+    /// Plan side panel open. Preview focus is the default, so Shift-Enter,
+    /// the arrows, and Ctrl-Backspace do not reach `handle_prompt_key`.
+    fn plan_approval_screen() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = true;
+        agent.plan_approval_view = Some(test_fixtures::make_plan_approval_view_state());
+        let Some(mut viewer) =
+            LineViewerState::open_markdown_content("plan.md", "# Plan\n\nStep\n".to_owned(), None)
+        else {
+            panic!("plan side panel must open");
+        };
+        viewer.kind = LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+        agent
+    }
+
+    fn ask_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = false;
+        agent.session_mode_pending = None;
+        agent.session_mode = xai_grok_tools::types::SessionMode::Ask;
+        agent
+    }
+
+    /// Comment composer on the plan screen. Session multiline is on, so
+    /// Shift-Enter can submit here instead of inserting a newline.
+    fn comment_prompt() -> super::AgentView {
+        let mut agent = plan_approval_screen();
+        let Some(pav) = agent.plan_approval_view.as_mut() else {
+            panic!("comment needs the plan-approval screen");
+        };
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.commenting_range = Some(0..1);
+        agent
+    }
+
+    /// Plan mode with no plan pane. This is not the plan-approval prompt:
+    /// that screen keeps the line viewer open on Preview.
+    fn plan_mode_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = true;
+        agent.session_mode_pending = None;
+        agent.session_mode = xai_grok_tools::types::SessionMode::Plan;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent
+    }
+
+    fn oracle(key: &KeyEvent) -> (String, usize) {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        arm_composer_toast(&mut agent);
+        let _ = agent.handle_prompt_key_for_test(key);
+        assert!(
+            agent.toast.is_none(),
+            "main composer handle_prompt_key clears the toast"
+        );
+        composer(&agent)
+    }
+
+    fn press_screen(agent: &mut super::AgentView, key: &KeyEvent) -> (String, usize) {
+        arm_composer_toast(agent);
+        let registry = ActionRegistry::non_vscode_for_test();
+        let _ = agent.handle_input(&Event::Key(*key), &registry);
+        composer(agent)
+    }
+
+    /// Shift-Enter, Up, Down, Left, Right, Ctrl-Backspace, Ctrl-A, and
+    /// Ctrl-E on the plan-mode prompt, the plan-approval prompt, Ask, and
+    /// comment must match the main composer (`AgentView::handle_prompt_key`).
+    /// A dropped key is a failure. Ctrl-A moves to the start of the current
+    /// line. Ctrl-E moves to the end of that line. The text stays. A surface
+    /// that skips `handle_prompt_key`, including one that only calls
+    /// `prompt.handle_key`, leaves the toast set.
+    #[test]
+    fn every_prompt_handles_shift_enter_arrows_and_ctrl_backspace_like_the_main_composer() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let names = [
+            "Shift-Enter",
+            "Up",
+            "Down",
+            "Left",
+            "Right",
+            "Ctrl-Backspace",
+            "Ctrl-A",
+            "Ctrl-E",
+        ];
+        let seed_snap = (SEED.to_string(), caret());
+        let mut misses = Vec::new();
+        for name in names {
+            let key = key_event(name);
+            let expected = oracle(&key);
+            assert_ne!(
+                expected, seed_snap,
+                "main composer handle_prompt_key must change the prompt for {name}"
+            );
+            if name == "Ctrl-A" {
+                assert_eq!(
+                    expected,
+                    (SEED.to_string(), current_line_start()),
+                    "Ctrl-A on the main composer moves to the start of the current line and keeps the text"
+                );
+            }
+            if name == "Ctrl-E" {
+                assert_eq!(
+                    expected,
+                    (SEED.to_string(), current_line_end()),
+                    "Ctrl-E on the main composer moves to the end of the current line and keeps the text"
+                );
+            }
+            let surfaces: [(&str, super::AgentView); 4] = [
+                ("plan-mode prompt", plan_mode_prompt()),
+                ("plan-approval prompt", plan_approval_screen()),
+                ("Ask", ask_prompt()),
+                ("comment", comment_prompt()),
+            ];
+            for (surface, mut agent) in surfaces {
+                let got = press_screen(&mut agent, &key);
+                if got != expected {
+                    misses.push(format!(
+                        "{surface} dropped or diverged on {name}: composer {got:?}, main composer {expected:?}"
+                    ));
+                }
+                if agent.toast.is_some() {
+                    misses.push(format!(
+                        "{surface} kept the toast on {name}; the key did not reach AgentView::handle_prompt_key"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "prompt keys must match AgentView::handle_prompt_key:\n{}",
+            misses.join("\n")
+        );
+    }
+
+    /// Ctrl-Left and Ctrl-Right move by a word on the main composer, the
+    /// plan-approval prompt, Ask, and comment. Plain Left and Right still
+    /// move one cell. The caret starts inside a word on a multi-word line.
+    /// `plan_prompt_key_reaches_main_composer` forwards Ctrl-Left and
+    /// Ctrl-Right so the plan-approval prompt uses that same word motion.
+    #[test]
+    fn ctrl_left_and_ctrl_right_move_by_word_on_every_prompt() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let word_start = SEED.find("second").expect("second");
+        let word_end = word_start + "second".len();
+        let origin = caret();
+        assert!(
+            origin > word_start + 1 && origin + 1 < word_end,
+            "caret must sit inside the word, not on an edge"
+        );
+        let cases = [
+            (
+                "Left",
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                origin - 1,
+            ),
+            (
+                "Right",
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                origin + 1,
+            ),
+            (
+                "Ctrl-Left",
+                KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+                word_start,
+            ),
+            (
+                "Ctrl-Right",
+                KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+                word_end,
+            ),
+        ];
+        let mut misses = Vec::new();
+        for (name, key, want_cursor) in cases {
+            let mut main = test_fixtures::make_agent();
+            seed(&mut main);
+            let _ = main.handle_prompt_key_for_test(&key);
+            let (text, cursor) = composer(&main);
+            if text != SEED || cursor != want_cursor {
+                misses.push(format!(
+                    "main composer {name}: text {text:?} cursor {cursor}, want cursor {want_cursor}"
+                ));
+            }
+            let surfaces: [(&str, super::AgentView); 3] = [
+                ("plan approval", plan_approval_screen()),
+                ("Ask", ask_prompt()),
+                ("comment", comment_prompt()),
+            ];
+            for (surface, mut agent) in surfaces {
+                let (text, cursor) = press_screen(&mut agent, &key);
+                if text != SEED || cursor != want_cursor {
+                    misses.push(format!(
+                        "{surface} {name}: text {text:?} cursor {cursor}, want cursor {want_cursor}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "Ctrl-Left and Ctrl-Right must move by a word, and plain Left and Right must move one cell:\n{}",
+            misses.join("\n")
+        );
+    }
+
+    fn empty_main_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        agent.plan_mode_active = false;
+        agent.line_viewer = None;
+        agent.plan_approval_view = None;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent
+    }
+
+    /// Plan mode with the plan pane open. Preview focus is where a copy
+    /// shortcut can take Y before the planning prompt inserts it.
+    fn empty_planning_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        agent.plan_mode_active = true;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.plan_approval_view = Some(test_fixtures::make_plan_approval_view_state());
+        let Some(mut viewer) =
+            LineViewerState::open_markdown_content("plan.md", "# Plan\n\nStep\n".to_owned(), None)
+        else {
+            panic!("the planning prompt must open the plan pane");
+        };
+        viewer.kind = LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview),
+            "the planning prompt starts on the plan pane"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "the planning prompt starts empty so Y is an insert"
+        );
+        agent
+    }
+
+    fn press_char(agent: &mut super::AgentView, key: KeyEvent) {
+        let registry = ActionRegistry::non_vscode_for_test();
+        let _ = agent.handle_input(&Event::Key(key), &registry);
+    }
+
+    fn assert_straight_lower_left_after_y(agent: &mut super::AgentView, surface: &str) {
+        let _theme = crate::theme::cache::pin_theme();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "{surface}: the prompt input is open after Y; got {prompt:?}"
+        );
+        let rounded = ["\u{256d}", "\u{256e}", "\u{2570}", "\u{256f}"];
+        let mut painted_rounded = Vec::new();
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if let Some(cell) = buf.cell((x, y))
+                    && rounded.contains(&cell.symbol())
+                {
+                    painted_rounded.push(cell.symbol().to_string());
+                }
+            }
+        }
+        assert!(
+            painted_rounded.is_empty(),
+            "{surface}: after Y, the prompt input keeps a straight lower-left corner └. \
+             This draw paints rounded corners {painted_rounded:?}"
+        );
+        let bottom = prompt.y.saturating_add(prompt.height).saturating_sub(1);
+        let lower_left = buf
+            .cell((prompt.x, bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            lower_left, "\u{2514}",
+            "{surface}: after Y, the prompt's lower-left cell is └"
+        );
+        let next = buf
+            .cell((prompt.x.saturating_add(1), bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            next, "\u{2500}",
+            "{surface}: after Y, the lower border row stays intact, got {next:?}"
+        );
+    }
+
+    /// The character Y and Shift+Y both insert Y in the main prompt and in
+    /// the planning prompt. The key is not swallowed by a shortcut. After Y,
+    /// the lower-left prompt corner stays └.
+    #[test]
+    fn character_y_and_shift_y_insert_y_in_the_main_prompt_and_the_planning_prompt() {
+        let keys = [
+            ("Y", KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
+            (
+                "Shift+Y",
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SHIFT),
+            ),
+            (
+                "Shift+Y uppercase",
+                KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            ),
+        ];
+        let mut misses = Vec::new();
+        for (name, key) in keys {
+            let mut main = empty_main_prompt();
+            press_char(&mut main, key);
+            if main.prompt.text() != "Y" {
+                misses.push(format!(
+                    "main prompt {name} must insert Y, got {:?}",
+                    main.prompt.text()
+                ));
+            } else {
+                assert_straight_lower_left_after_y(&mut main, &format!("main prompt {name}"));
+            }
+            let mut planning = empty_planning_prompt();
+            press_char(&mut planning, key);
+            if planning.prompt.text() != "Y" {
+                misses.push(format!(
+                    "planning prompt {name} must insert Y and must not swallow the key, got {:?}",
+                    planning.prompt.text()
+                ));
+            } else {
+                assert_straight_lower_left_after_y(
+                    &mut planning,
+                    &format!("planning prompt {name}"),
+                );
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "Y and Shift+Y insert Y in the main prompt and in the planning prompt:\n{}",
+            misses.join("\n")
+        );
     }
 }

@@ -13,6 +13,72 @@ fn make_auth(expires_at: Option<DateTime<Utc>>, create_time: DateTime<Utc>) -> G
         ..GrokAuth::test_default()
     }
 }
+
+/// Persist means the store has the credential and a later load restores it.
+/// Persist does not mean the raw `auth.json` bytes keep the token after a successful store write.
+fn assert_session_persisted_and_omitted_from_file(
+    auth_path: &std::path::Path,
+    scope: &str,
+    key: &str,
+    refresh: Option<&str>,
+) {
+    let raw = std::fs::read_to_string(auth_path).unwrap();
+    assert!(
+        !raw.is_empty(),
+        "auth.json stays a parseable AuthStore after a successful store write"
+    );
+    let on_disk: AuthStore =
+        serde_json::from_str(&raw).expect("auth.json must be valid JSON after a successful write");
+    assert!(
+        on_disk.contains_key(scope),
+        "the account entry remains in auth.json"
+    );
+    assert!(
+        key.is_empty() || !raw.contains(key),
+        "after a successful store write, auth.json must omit the session key"
+    );
+    if let Some(refresh_token) = refresh {
+        assert!(
+            refresh_token.is_empty() || !raw.contains(refresh_token),
+            "after a successful store write, auth.json must omit the refresh token"
+        );
+    }
+    let store = crate::credentials_store::CredentialsStore::at_path(
+        auth_path.with_file_name("provider_credentials.json"),
+    );
+    if !key.is_empty() {
+        let read = store
+            .read(&format!("supergrok-session:{scope}"))
+            .expect("credentials store readable");
+        let Some((username, secret)) = read else {
+            panic!("session key missing from credentials store");
+        };
+        assert_eq!(username, "key", "credentials username");
+        assert_eq!(secret, key, "the store has the session key");
+    }
+    if let Some(refresh_token) = refresh {
+        let read = store
+            .read(&format!("supergrok-session:{scope}#refresh_token"))
+            .expect("credentials store readable");
+        let Some((username, secret)) = read else {
+            panic!("refresh token missing from credentials store");
+        };
+        assert_eq!(username, "refresh_token", "credentials username");
+        assert_eq!(secret, refresh_token, "the store has the refresh token");
+    }
+    let loaded = read_auth_json(auth_path).expect("a later load restores the credential");
+    let session = loaded.get(scope).expect("account entry remains");
+    assert_eq!(
+        session.key.as_str(),
+        key,
+        "a later load restores the session key"
+    );
+    assert_eq!(
+        session.refresh_token.as_deref(),
+        refresh,
+        "a later load restores the refresh token"
+    );
+}
 /// The one-read classification must match what split `current()` /
 /// `is_expired()` reads report for a stable credential, and `Valid` must
 /// carry the token so callers never re-read.
@@ -291,14 +357,12 @@ async fn update_recovers_from_corrupt_auth_json_by_backing_up_old_file() {
         current.as_ref().map(|a| a.key.as_str()),
         Some("fresh-token")
     );
-    let on_disk_raw = std::fs::read_to_string(&auth_path).unwrap();
-    assert!(
-        on_disk_raw.contains("fresh-token"),
-        "auth.json must contain the new credential after recovery, got: {on_disk_raw}"
+    assert_session_persisted_and_omitted_from_file(
+        &auth_path,
+        &cfg.auth_scope(),
+        "fresh-token",
+        Some("fresh-rt"),
     );
-    let on_disk: AuthStore =
-        serde_json::from_str(&on_disk_raw).expect("auth.json must be valid JSON after recovery");
-    assert!(on_disk.contains_key(&cfg.auth_scope()));
     let mut backup_found = None;
     for entry in std::fs::read_dir(dir.path()).unwrap() {
         let entry = entry.unwrap();
@@ -352,8 +416,7 @@ async fn update_preserves_team_fields_when_proxy_omits_them() {
     assert_eq!(on_disk.principal_type.as_deref(), Some("Team"));
     assert_eq!(on_disk.team_id.as_deref(), Some("team-xyz"));
 }
-/// Team tokens are stored under the base scope key (same as personal).
-/// There is at most one OAuth entry per issuer/client pair.
+/// A team token is stored under the base scope and under `{base}::team::{team_id}`.
 #[tokio::test]
 async fn update_stores_team_token_under_base_and_multi_slot() {
     let dir = tempfile::tempdir().unwrap();
@@ -438,7 +501,8 @@ async fn reauth_clear_keeps_supergrok_multi_slots() {
         "Business multi-slot must survive reauth clear"
     );
 }
-/// Logging in as personal must evict any existing team token (at most one OAuth session per issuer/client pair).
+/// A later personal SuperGrok login replaces the active base and writes `{base}::personal`.
+/// The earlier team multi-slot stays, so both principals remain.
 #[tokio::test]
 async fn team_login_then_personal_keeps_both_principals() {
     let dir = tempfile::tempdir().unwrap();
@@ -3288,20 +3352,11 @@ async fn update_recovers_from_empty_auth_json() {
         current.as_ref().map(|a| a.key.as_str()),
         Some("recovered-token")
     );
-    let on_disk_raw = std::fs::read_to_string(&auth_path).unwrap();
-    assert!(
-        !on_disk_raw.is_empty(),
-        "auth.json must not be empty after recovery"
-    );
-    let on_disk: AuthStore =
-        serde_json::from_str(&on_disk_raw).expect("auth.json must be valid JSON after recovery");
-    assert!(
-        on_disk.contains_key(&cfg.auth_scope()),
-        "persisted scope must be present"
-    );
-    assert_eq!(
-        on_disk.get(&cfg.auth_scope()).map(|a| a.key.as_str()),
-        Some("recovered-token")
+    assert_session_persisted_and_omitted_from_file(
+        &auth_path,
+        &cfg.auth_scope(),
+        "recovered-token",
+        Some("recovered-rt"),
     );
 }
 /// Same as above, but for whitespace-only content.
@@ -3323,8 +3378,7 @@ async fn update_recovers_from_whitespace_only_auth_json() {
         result.is_ok(),
         "update must succeed for whitespace-only file: {result:?}"
     );
-    let on_disk = std::fs::read_to_string(&auth_path).unwrap();
-    assert!(on_disk.contains("ws-token"), "credential must be persisted");
+    assert_session_persisted_and_omitted_from_file(&auth_path, &cfg.auth_scope(), "ws-token", None);
 }
 /// The demotion, and therefore whether a dozen processes keep their credentials, rests entirely on this comparison.
 /// Pin its three cases directly rather than only through the refresh chain.

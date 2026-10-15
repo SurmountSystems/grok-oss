@@ -30,6 +30,7 @@ pub mod hyperlink_route;
 pub mod inline_media_ffmpeg;
 pub mod input_log;
 pub mod l1_session_harness;
+pub mod limits_choice;
 pub mod limits_cmd;
 pub mod mcp_cmd;
 pub mod memory_cmd;

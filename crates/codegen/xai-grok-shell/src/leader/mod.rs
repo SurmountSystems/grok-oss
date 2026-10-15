@@ -73,12 +73,12 @@ pub use protocol::{
     CURSOR_WORKER_DOOR_OPEN_TIMEOUT, CURSOR_WORKER_HUB_REFUSAL_PREFIX, ClientCapabilities,
     ClientId, ClientMode, ControlCommand, ControlPayload, CursorWorkerClaim,
     CursorWorkerDoorStatus, CursorWorkerDoorSummary, CursorWorkerStartArgs, CursorWorkerSummary,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason,
+    IncludedLimitsAccount, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason,
 };
 use serde::{Deserialize, Serialize};
 pub use server::{
-    LeaderServerControlState, LeaderServerMetadata, ServerError, ServerHandle, run_leader_server,
-    spawn_leader_server,
+    LeaderServerControlState, LeaderServerMetadata, ServerError, ServerHandle,
+    leader_exits_after_last_client_disconnect, run_leader_server, spawn_leader_server,
 };
 use std::fs;
 use std::path::{Path, PathBuf};

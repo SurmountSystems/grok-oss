@@ -103,7 +103,7 @@ fn worktree_session_header_keeps_badge_and_omits_main_repo_suffix() {
         "no leftover main-repo suffix, row = {row:?}"
     );
 }
-/// Deep cwds are always middle-shortened (last two components stay full), not only when the row is tight.
+/// Issue 186: a wide status row keeps the path when columns remain, and shortens only when the measured budget does not fit.
 #[test]
 fn session_header_always_shortens_deep_cwd() {
     let _theme = crate::theme::cache::pin_theme();
@@ -113,12 +113,12 @@ fn session_header_always_shortens_deep_cwd() {
     let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
     let row = header_row(&agent, &buf);
     assert!(
-        row.contains("/d/a/b/charlie/delta"),
-        "always last-two shortening, row = {row:?}"
+        row.contains("/deep/alpha/bravo/charlie/delta"),
+        "a wide status row keeps the full path when columns remain, row = {row:?}"
     );
     assert!(
-        !row.contains("/deep/alpha"),
-        "middle components must not stay full, row = {row:?}"
+        !row.contains("/d/a/b/charlie/delta"),
+        "a wide row does not shorten while columns remain, row = {row:?}"
     );
 }
 /// Frame 5: a plain session shows `path … [Dashboard]` on one row with no title and no switcher, the path in `text_secondary`.
@@ -133,7 +133,7 @@ fn plain_session_header_has_path_and_dashboard_button_only() {
     let row = header_row(&agent, &buf);
     let y = agent.hit_dashboard.rect.unwrap().y;
     assert!(row.contains(PATH), "row = {row:?}");
-    assert!(row.contains("[Dashboard]"), "row = {row:?}");
+    assert!(row.contains("[L0]"), "row = {row:?}");
     assert!(
         !row.contains(crate::glyphs::chevron_left()) && !row.contains(crate::glyphs::chevron()),
         "no switcher in a plain session, row = {row:?}"
@@ -159,7 +159,7 @@ fn dashboard_button_follows_the_feature_gate_outside_the_overlay() {
     assert!(agent.hit_dashboard.rect.is_none());
     let screen: String = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
     assert!(
-        screen.contains(PATH) && !screen.contains("[Dashboard]"),
+        screen.contains(PATH) && !screen.contains("[L0]"),
         "the header row is painted, without the button"
     );
     draw(&mut agent, &registry, true, OverlayHeader::default());
@@ -391,7 +391,7 @@ fn long_link_preview_yields_to_the_switcher_and_dashboard_button() {
         row.contains(PATH),
         "the location keeps its floor next to the preview, row = {row:?}"
     );
-    assert_eq!(text_at(&buf, dash), "[Dashboard]");
+    assert_eq!(text_at(&buf, dash), "[L0]");
     let mut agent = agent_at(60);
     highlight(&mut agent);
     let buf = draw(&mut agent, &registry, true, header);
@@ -507,4 +507,120 @@ fn nested_subagent_keeps_the_parent_header_and_routes_like_it() {
         parent.handle_input(&click(dash.x, dash.y), &registry),
         InputOutcome::Action(Action::DashboardOverlayExit)
     ));
+}
+/// The existing dashboard control paints `[L0]`, not `[Dashboard]`.
+/// The same click still opens the dashboard.
+#[test]
+fn l0_header_control_is_labeled_l0() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    let mut agent = agent_at(120);
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let dash = agent
+        .hit_dashboard
+        .rect
+        .expect("the dashboard control must stay a click target");
+    let label = text_at(&buf, dash);
+    let row = header_row(&agent, &buf);
+    assert_eq!(
+        label, "[L0]",
+        "owed: the existing dashboard control paints `[L0]`, not `[Dashboard]`. \
+         painted {label:?} on row {row:?}"
+    );
+    assert!(
+        !row.contains("[Dashboard]"),
+        "owed: the header control is `[L0]`, not `[Dashboard]`. row = {row:?}"
+    );
+    assert!(
+        matches!(
+            agent.handle_input(&click(dash.x, dash.y), &registry),
+            InputOutcome::Action(Action::OpenDashboard)
+        ),
+        "owed: the same click still opens the dashboard"
+    );
+}
+
+fn char_index(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle).map(|byte| row[..byte].chars().count())
+}
+
+/// `~/Projects/surmount/grok-build` and `120K / 500K` on this header row.
+fn assert_projects_and_context(row: &str, owed: &str) {
+    let full = "~/Projects/surmount/grok-build";
+    let shortened = "~/P/surmount/grok-build";
+    let context = "120K / 500K";
+    assert!(
+        row.contains(full),
+        "owed: {owed} The row must paint `{full}`, not `{shortened}`.\n{row}"
+    );
+    assert!(
+        !row.contains(shortened),
+        "owed: {owed} The row must not paint `{shortened}` while empty columns remain before the context figure.\n{row}"
+    );
+    let path_at = char_index(row, full).expect("full path");
+    let context_at = char_index(row, context).unwrap_or_else(|| {
+        panic!("owed: {owed} The context figure `{context}` stays on the row.\n{row}")
+    });
+    let path_end = path_at + full.chars().count();
+    assert!(
+        path_end <= context_at,
+        "owed: {owed} `{full}` ends at or before the context figure. path_end={path_end} context_at={context_at}\n{row}"
+    );
+}
+
+/// The photographed grok-build header. Branch `HB-1`, context `120K / 500K`.
+/// Width 79 leaves a visual gap that can hold `~/Projects/surmount/grok-build`
+/// while the fit budget still shortens `Projects`. The plan side pane case
+/// is the same path plus the same context figure.
+#[test]
+#[serial_test::serial]
+fn photographed_status_row_keeps_projects_and_the_context_figure() {
+    let home = tempfile::tempdir().expect("temp HOME");
+    let grok_home = tempfile::tempdir().expect("temp GROK_HOME");
+    let _home_env = xai_grok_test_support::EnvGuard::set("HOME", home.path());
+    let _grok_env = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+
+    let mut agent = agent_at(79);
+    agent.current_branch = Some("HB-1".to_string());
+    agent.session.cwd = home
+        .path()
+        .join("Projects")
+        .join("surmount")
+        .join("grok-build");
+    agent.session.models.override_context_window(500_000);
+    agent.session_sampling_window = Some(500_000);
+    agent.context_state = Some(xai_grok_shell::session::ContextInfo {
+        used: 120_000,
+        ..xai_grok_shell::session::ContextInfo::default()
+    });
+    agent.plan_mode_active = false;
+    agent.line_viewer = None;
+
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let row = header_row(&agent, &buf);
+    assert_projects_and_context(
+        &row,
+        "A wide header whose shortened path still leaves empty columns before the context figure must paint `~/Projects/surmount/grok-build`, not `~/P/surmount/grok-build`. The context figure stays on the row.",
+    );
+
+    let mut viewer =
+        crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nKeep the path and the context figure.\n".to_string(),
+            None,
+        )
+        .expect("plan pane content");
+    viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+    viewer.fullscreen = false;
+    agent.line_viewer = Some(viewer);
+    agent.last_terminal_size = (160, 30);
+
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let row = header_row(&agent, &buf);
+    assert_projects_and_context(
+        &row,
+        "With the plan side pane open (plan preview, fullscreen off), the header still paints `~/Projects/surmount/grok-build` and the context figure stays on the row.",
+    );
 }

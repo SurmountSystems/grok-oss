@@ -674,16 +674,21 @@ pub fn format_usage_summary_with_live(
     live: SamplingIdentityKind,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted)
-    let mut lines = vec![format!(
-        "{}: {}%",
-        balance.usage_label(),
-        balance.usage_pct.floor() as i64
-    )];
+    // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted).
+    // An unknown included SuperGrok period reading must not paint a silent 0%.
+    let mut lines = if balance.included_usage_known {
+        vec![format!(
+            "{}: {}%",
+            balance.usage_label(),
+            balance.usage_pct.floor() as i64
+        )]
+    } else {
+        vec![format!("{}: not yet available", balance.usage_label())]
+    };
     if let Some(reset) = &balance.period_end_display {
         lines.push(format!("Next reset: {reset}"));
     }
-    // Free SuperGrok period linear-burn pacing (omit when bounds missing).
+    // Included SuperGrok period linear-burn pacing (omit when bounds missing).
     if balance.included_usage_known
         && let Some(pacing) = balance.pacing_sentence(live, now)
     {
@@ -1426,18 +1431,22 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
         ),
     );
 
-    // Included SuperGrok period limits % path may append linear-burn pacing.
-    // SuperGrok dollar credits $ path does not (period is full; pacing is about
-    // included burn).
+    // This helper is the chip the header would otherwise read. It keeps
+    // linear-burn pacing when period bounds are known. Header paint does
+    // not call it, so the status row does not show SuperGrok period, the
+    // workspace word, or behind linear burn. `/usage` still prints the full
+    // pacing sentence. SuperGrok dollar credits and console stay distinct.
+    // SuperGrok is paid. Do not add the word free.
     let on_dollar_credits = meter.contains("SuperGrok dollar credits");
     let on_console = meter.starts_with("console");
     let text = if on_dollar_credits || on_console {
         meter
+    } else if let Some(pacing) =
+        balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now())
+    {
+        format!("{meter} · {pacing}")
     } else {
-        match balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now()) {
-            Some(chip) if chip.len() <= 28 => format!("{meter} · {chip}"),
-            _ => meter,
-        }
+        meter
     };
 
     // Combined remaining is for multi-pool chrome (stay on included while
@@ -1605,22 +1614,58 @@ pub fn active_supergrok_poll_auth_failed_from_process() -> bool {
 
 /// Live SuperGrok principal role for compact chrome (`personal` / `business`).
 ///
-/// Reads the stored session listing for [`active_supergrok_identity_id`]. Does
-/// not invent a workspace when the listing is missing. SuperGrok Heavy is not
-/// this field.
+/// Reads the stored session listing for [`active_supergrok_identity_id`]. A
+/// base session is not a multi-slot listing key, so the principal stored on
+/// that session (Team plus team id) is read the same way. Does not invent a
+/// workspace when that principal is absent. SuperGrok Heavy is not this field.
 pub fn compact_live_principal_role_from_process() -> Option<&'static str> {
     let home = xai_grok_shell::util::grok_home::grok_home();
     let id = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
     let map = xai_grok_shell::auth::read_auth_json(&home.join("auth.json")).ok()?;
     let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
-    listings
+    if let Some(role) = listings
         .iter()
-        .find(|l| l.identity_id == id)
-        .and_then(|l| match l.role_label {
+        .find(|listing| listing.identity_id == id)
+        .and_then(|listing| match listing.role_label {
             "personal" => Some("personal"),
             "business" => Some("business"),
             _ => None,
         })
+    {
+        return Some(role);
+    }
+    let mut active_auth = None;
+    let mut team_auth = None;
+    for (scope, auth) in &map {
+        if scope.contains("::personal") {
+            continue;
+        }
+        if !xai_grok_shell::auth::is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        if xai_grok_shell::auth::supergrok_identity_id_from_auth(auth, scope) != id {
+            continue;
+        }
+        if scope.contains("::team::") {
+            if team_auth.is_none() {
+                team_auth = Some(auth);
+            }
+            continue;
+        }
+        active_auth = Some(auth);
+        break;
+    }
+    let auth = active_auth.or(team_auth)?;
+    let role = xai_grok_shell::auth::role_from_session_fields(
+        auth.principal_type.as_deref(),
+        auth.team_id.as_deref(),
+    );
+    let label = xai_grok_shell::auth::role_label(role);
+    if label == "personal" || label == "business" {
+        Some(label)
+    } else {
+        None
+    }
 }
 
 /// Compact status meter text for the live sampling identity.
@@ -2404,8 +2449,12 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Compact status: free SuperGrok period used % (no "Credits used").
-        assert_eq!(text, "free SuperGrok period · 24%");
+        // Compact status names included SuperGrok period limits as SuperGrok period.
+        assert_eq!(text, "SuperGrok period · 24%");
+        assert!(
+            !text.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {text}"
+        );
         assert!(!text.contains("Credits"));
         assert!(
             !text.contains("intent ·") && !text.split_whitespace().any(|w| w == "intent"),
@@ -2413,8 +2462,8 @@ mod tests {
         );
     }
 
-    /// Named contract (2026-08-09): status compact meter names the real meter
-    /// (free SuperGrok period), never the bare abstraction word "intent".
+    /// Named contract: compact status names included SuperGrok period limits.
+    /// SuperGrok is paid. The word free is rejected. Bare "intent" stays rejected.
     #[test]
     fn compact_status_names_free_supergrok_period_not_bare_intent() {
         let warm = compact_meter_text_for_live_identity(
@@ -2425,7 +2474,14 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(warm, "free SuperGrok period · 24%");
+        assert_eq!(
+            warm, "SuperGrok period · 24%",
+            "included SuperGrok period limits compact chrome is SuperGrok period, got {warm}"
+        );
+        assert!(
+            !warm.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {warm}"
+        );
         assert!(
             !warm.contains("intent ·") && !warm.split_whitespace().any(|w| w == "intent"),
             "paying-path label must not be bare intent: {warm}"
@@ -2439,16 +2495,27 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(cold, "free SuperGrok period · ...%");
+        assert_eq!(
+            cold, "SuperGrok period · ...%",
+            "included SuperGrok period limits cold chrome is SuperGrok period, got {cold}"
+        );
+        assert!(
+            !cold.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {cold}"
+        );
         assert!(
             !cold.contains("intent ·") && !cold.split_whitespace().any(|w| w == "intent"),
             "cold chrome must not use bare intent: {cold}"
         );
 
+        let human = ActiveSpendDriver::SuperGrokFreePeriod.as_human();
         assert_eq!(
-            ActiveSpendDriver::SuperGrokFreePeriod.as_human(),
-            "free SuperGrok period",
-            "compact prefix must stay aligned with ActiveSpendDriver human label"
+            human, "SuperGrok period",
+            "included SuperGrok period limits compact prefix must stay aligned with ActiveSpendDriver human label, got {human}"
+        );
+        assert!(
+            !human.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {human}"
         );
     }
 
@@ -2480,7 +2547,11 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(0.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 0%");
+        assert_eq!(text, "SuperGrok period · 0%");
+        assert!(
+            !text.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {text}"
+        );
         assert_eq!(
             line.spans.first().and_then(|s| s.style.fg),
             Some(theme.accent_success)

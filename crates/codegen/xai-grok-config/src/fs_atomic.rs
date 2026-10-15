@@ -367,8 +367,50 @@ fn read_followable_link_target(link: &Path) -> io::Result<PathBuf> {
 fn probe_follow(link: &Path) -> io::Result<Option<FileId>> {
     match follow_file_id(link) {
         Ok(id) => Ok(Some(id)),
+        Err(e) if is_reparse_limit_os_error(&e) => {
+            #[cfg(unix)]
+            {
+                match file_id_by_single_hops(link) {
+                    Ok(Some(id)) => Ok(Some(id)),
+                    Ok(None) => Err(e),
+                    Err(walk_err) if is_follow_hard_error(&walk_err) => Err(walk_err),
+                    Err(_) => Err(e),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                Err(e)
+            }
+        }
         Err(e) if is_follow_hard_error(&e) => Err(e),
         Err(_) => Ok(None),
+    }
+}
+
+/// One `lstat` and `read_link` per hop. A one-shot `stat` of exactly
+/// `SYMLINK_FOLLOW_LIMIT` links can return a spurious `ELOOP` under load.
+#[cfg(unix)]
+fn file_id_by_single_hops(link: &Path) -> io::Result<Option<FileId>> {
+    let mut path = link.to_path_buf();
+    let mut hops: u8 = 0;
+    loop {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.file_type().is_symlink() {
+            return Ok(Some(file_id_from_unix_meta(&meta)));
+        }
+        if hops >= SYMLINK_FOLLOW_LIMIT {
+            return Ok(None);
+        }
+        hops = hops.saturating_add(1);
+        let target = std::fs::read_link(&path)?;
+        path = if target.is_absolute() {
+            target
+        } else {
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.join(target),
+                _ => target,
+            }
+        };
     }
 }
 

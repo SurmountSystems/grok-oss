@@ -134,6 +134,10 @@ pub(crate) fn retry_clause(attempt: u32, max_retries: u32, style: RetryLabelStyl
     // Longer headline plus U+2026 wraps this status row into the prompt.
     match style {
         RetryLabelStyle::Status => format!("Retrying (attempt {attempt})..."),
+        // u32::MAX is an unknown budget, not a real attempt cap. Finite caps stay N/M.
+        RetryLabelStyle::Compact if max_retries == u32::MAX => {
+            format!("Retrying ({attempt})")
+        }
         RetryLabelStyle::Compact => format!("Retrying ({attempt}/{max_retries})"),
     }
 }
@@ -234,6 +238,21 @@ pub(crate) fn format_request_failure(
             status: None,
             headline: "Safety refusal".to_string(),
             detail: safety_refusal_detail(extracted.as_deref().unwrap_or(raw)),
+            wire,
+        };
+    }
+    // The sampler message is already "Stopped: the reply was repeating the
+    // same sentence." Do not prefix "Stopped: repeating sentence:" again.
+    if wire == WireErrorType::RepetitiveGeneration
+        && let Some(already) = extracted
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| detail.starts_with("Stopped:"))
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: already.to_string(),
+            detail: String::new(),
             wire,
         };
     }
@@ -1187,8 +1206,8 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Connection failed: error sending request. \
-             Check your network and try again."
+            "Connection failed: Transport miss: error sending request. \
+             This is not a silent hang. Check your network and try again."
         );
     }
 
@@ -1310,6 +1329,27 @@ mod tests {
         );
     }
 
+    /// Operator screenshot Wed Oct 7, 2026, 4:17 PM. The reason is already
+    /// `Stopped: the reply was repeating the same sentence.` Today's chrome
+    /// joins the headline on the front, so the line nests `Stopped:` twice.
+    #[test]
+    fn repeating_sentence_stop_does_not_prefix_stopped_twice() {
+        let reason = "Stopped: the reply was repeating the same sentence.";
+        let formatted =
+            format_request_failure(None, Some(WireErrorType::RepetitiveGeneration), reason);
+        let msg = formatted.message();
+        assert_eq!(
+            msg.matches("Stopped:").count(),
+            1,
+            "must not nest Stopped: twice, got {msg}"
+        );
+        assert!(
+            !msg.starts_with("Stopped: repeating sentence:"),
+            "must not prefix Stopped: repeating sentence: onto a reason that already says Stopped:, got {msg}"
+        );
+        assert_eq!(msg, reason);
+    }
+
     #[test]
     fn parse_http_status_from_common_shapes() {
         assert_eq!(
@@ -1384,7 +1424,7 @@ mod tests {
                 "error sending request for url (https://api.x.ai)"
             )
             .headline,
-            "Request failed"
+            "Connection failed"
         );
     }
 }

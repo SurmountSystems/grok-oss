@@ -230,6 +230,11 @@ fn classify_fallback(
     if rewrite_reason == Some(xai_fast_worktree::SKIP_SOURCE_IS_GROVE_MOUNT) {
         return Some(CloneFallbackReason::SourceIsGrove);
     }
+    // Same case as the strategy report: copy after a Grove arm that recorded
+    // no decline. The closed reason stays free of skip text.
+    if resolved == Some("copy") {
+        return Some(CloneFallbackReason::DaemonDown);
+    }
     None
 }
 
@@ -386,6 +391,12 @@ fn fallback_reason(
         // A pre-dispatch rewrite kept every arm from running, so it is the only
         // account of why grove did not serve this worktree.
         .or_else(|| rewrite_reason.map(str::to_owned))
+        // This build's Grove arm returns without recording a decline. A copy
+        // that then serves the worktree still names why Grove did not.
+        .or_else(|| {
+            (resolved == "copy")
+                .then(|| "the Grove daemon is not available in this build".to_owned())
+        })
 }
 
 pub(super) fn creating_progress(grove_enabled: bool) -> &'static str {

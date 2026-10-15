@@ -2,6 +2,8 @@
 
 Grok OSS (`grok-oss`) draws TUI colors from a central theme. You can switch themes while Grok OSS is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
 
+Operator: composer caret, Operator rails, and the Operator box use Operator green (`accent_user`). Agent activity stays magenta.
+
 The product default theme is **DOGE**, not GrokNight.
 
 ---
@@ -99,7 +101,7 @@ auto_light_theme = "grokday"
 | **macOS** | Reads `AppleInterfaceStyle` system preference |
 | **Linux** | Queries XDG Desktop Portal (`org.freedesktop.appearance.color-scheme`) |
 | **Windows** | Reads the system personalization registry |
-| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok wrap ssh …` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
+| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok-oss wrap ssh …` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
 
 Once running, Grok polls desktop APIs and env hints every 5 seconds. Toggling your OS between light and dark mode on a local desktop takes effect within seconds without restarting. Over SSH the wrap-stamped env is fixed for that hop.
 
@@ -412,3 +414,13 @@ Each theme defines the following color slots that are used throughout the TUI:
 **Markdown:** heading colors (`md_heading_h1`-`md_heading_h6`), `md_code`, `md_code_bg`, `md_text`, `md_muted`, `md_task_checked`, `md_task_unchecked`, `link_fg`
 
 The theme system manages these slots internally and quantizes them automatically for your terminal.
+
+## Transcript message colors
+
+These sentences say what the transcript must paint. They are not a claim that the tests already pass. The message body stays white. The left accent carries the color.
+
+The Operator's message body stays white. On DOGE that is `text_primary`, not `accent_user`. The left accent rail is Operator green, `accent_user` (pure green, `#00FF00`, on DOGE). That rail stays present, including when the prompt is collapsed, because the body is still on screen. The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. The named test is `operator_message_text_stays_white_and_the_left_accent_is_green`.
+
+Chain of thought body stays white (`text_primary`). Its left accent, when the thought is open, is cyan, `accent_system` (`#00FFFF` on DOGE). `accent_thinking` stays magenta and is not that left accent. The named test is `chain_of_thought_text_stays_white_and_the_left_accent_is_cyan`.
+
+The Agent's response body stays white (`text_primary`). Its left accent, while the turn is active, is magenta, `accent_running` (pure magenta, `#FF00FF`, on DOGE). A finished turn does not keep a permanent rail. The named test is `agent_response_text_stays_white_and_the_left_accent_is_magenta`.

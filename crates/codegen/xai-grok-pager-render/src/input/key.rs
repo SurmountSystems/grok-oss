@@ -1,7 +1,7 @@
 //! Key shortcut types and the `key!()` macro.
 //!
 //! ```
-//! use xai_grok_pager::input::key::key;
+//! use xai_grok_pager_render::input::key::key;
 //!
 //! // Simple key
 //! let q = key!('q');
@@ -57,11 +57,20 @@ impl KeyShortcut {
     }
 
     /// Normalizes the event's case before comparing, so both `Char('G') + NONE` and `Char('g') + SHIFT` match `key!('G')`.
+    /// Caps Lock reports Ctrl-C as `Char('C')` plus `CONTROL` and no `SHIFT`. Compare that event as `Char('c')` with the same modifiers so `key!('c', CONTROL)` still matches. Other letters stay unchanged.
     pub fn matches(&self, event: &KeyEvent) -> bool {
         if event.kind == KeyEventKind::Release {
             return false;
         }
-        let normalized = Self::new(event.code, event.modifiers);
+        let (code, modifiers) = if event.code == KeyCode::Char('C')
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+            && !event.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            (KeyCode::Char('c'), event.modifiers)
+        } else {
+            (event.code, event.modifiers)
+        };
+        let normalized = Self::new(code, modifiers);
         self.code == normalized.code && self.modifiers == normalized.modifiers
     }
 
@@ -526,6 +535,18 @@ mod tests {
 
         let wrong_mod = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(!ctrl_c.matches(&wrong_mod));
+    }
+
+    #[test]
+    fn control_uppercase_c_takes_the_same_ctrl_c_path_as_lowercase_c() {
+        let ctrl_c = key!('c', CONTROL);
+        let lower = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let upper = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL);
+        let lower_matches = ctrl_c.matches(&lower);
+        let upper_matches = ctrl_c.matches(&upper);
+        assert!(lower_matches);
+        assert!(upper_matches);
+        assert_eq!(lower_matches, upper_matches);
     }
 
     #[test]

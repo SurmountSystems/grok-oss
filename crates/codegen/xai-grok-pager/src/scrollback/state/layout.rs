@@ -771,9 +771,12 @@ impl ScrollbackState {
                 } else if !self.follow_preserve_scroll {
                     self.scroll_offset = self.max_scroll_offset();
                 }
+            } else if let Some((entry_idx, rows_into_span)) = top_anchor {
+                // Re-pin the pre-measure row. A shrink of the entry under the
+                // viewport top must not clamp the offset onto the next block.
+                self.repin_viewport_top_to_entry(entry_idx, rows_into_span);
             } else {
-                // Top-anchored: the first visible entry's offset is unchanged (nothing above it was measured), so scroll stays put
-                // Only clamp if the content shrank past the end
+                // No anchor (offset 0): only clamp if the content shrank past the end
                 let max_offset = self
                     .total_height
                     .saturating_sub(self.viewport_height as usize);
@@ -833,7 +836,7 @@ impl ScrollbackState {
 
     /// Index of the entry at the top of the current viewport (the one whose span contains the scroll top).
     /// `None` if the cache/viewport is empty.
-    fn first_visible_entry(&self) -> Option<usize> {
+    pub(super) fn first_visible_entry(&self) -> Option<usize> {
         if self.viewport_height == 0 {
             return None;
         }

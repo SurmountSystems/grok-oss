@@ -450,7 +450,7 @@ impl SessionEvent {
                         sampling.to_string()
                     };
                     return format!(
-                        "Sampling window {label} tokens (catalog window differs). Compacting…"
+                        "The sampling window is {label} tokens (catalog window differs). Compacting…"
                     );
                 }
                 match (threshold_tokens, threshold_percent) {
@@ -1305,9 +1305,11 @@ mod tests {
         let event = SessionEvent::CompactionFailed {
             error: "this conversation is too large to compact.".into(),
         };
+        // The shell passes the size failure through. The credits sentence is a
+        // different suppress reason and is not this error.
         assert_eq!(
             event.message(),
-            "Compaction failed - out of credits or over your spending limit. Add credits and retry."
+            "Compaction failed - this conversation is too large to compact."
         );
     }
 

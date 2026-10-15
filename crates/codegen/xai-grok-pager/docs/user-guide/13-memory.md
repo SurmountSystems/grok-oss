@@ -447,7 +447,7 @@ enabled = true    # default
 
 ### Memory Not Working
 
-1. Verify memory is enabled: check `grok inspect` output.
+1. Verify memory is enabled: check `grok-oss inspect` output.
 2. Check `GROK_MEMORY` or `[memory] enabled` in effective TOML.
 3. Check for `GROK_MEMORY=0` or a deprecated compatibility flag overriding config.
 

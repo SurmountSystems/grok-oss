@@ -250,7 +250,7 @@ Admins control plugins, marketplaces, and MCP servers through grok's TOML layers
 
 Layers combine **strictest-wins**: any deny wins, every restricted source must allow, and boolean pins only tighten (`false` sticks; a later `true` cannot unpin). CamelCase Claude keys and snake_case grok keys are both accepted in TOML.
 
-`grok inspect` (and `grok inspect --json`) shows the loaded MCP/marketplace lists, whether `allowManagedMcpServersOnly` is `off` / `advisory` / `enforced`, extra marketplace pins, and tighten-only pins under **Enforced by policy**.
+`grok-oss inspect` (and `grok-oss inspect --json`) shows the loaded MCP/marketplace lists, whether `allowManagedMcpServersOnly` is `off` / `advisory` / `enforced`, extra marketplace pins, and tighten-only pins under **Enforced by policy**.
 
 ### Roll a marketplace out to everyone
 
@@ -290,7 +290,7 @@ source = "github"
 repo = "ACME/more-plugins"
 ```
 
-The same lists work in Claude `managed-settings.json` (advisory for already-configured grok-native sources). URL comparison folds case on the **scheme and host only**, and strips exactly one trailing `.git` (`repo.git.git` is a different repo). Use `grok inspect` to see the loaded allowlist.
+The same lists work in Claude `managed-settings.json` (advisory for already-configured grok-native sources). URL comparison folds case on the **scheme and host only**, and strips exactly one trailing `.git` (`repo.git.git` is a different repo). Use `grok-oss inspect` to see the loaded allowlist.
 
 Provision extra sources from policy with `extraKnownMarketplaces` / `extra_known_marketplaces`. First pinning layer wins a name; a configured source already holding that name with a different URL is not overwritten (logged). `autoUpdate = false` on an extra pin turns **global** session-start plugin auto-update off (there is no per-marketplace grok equivalent).
 
@@ -301,7 +301,7 @@ source = { source = "git", url = "https://github.com/ACME/my-org-plugins.git", r
 
 ### Restrict which MCP servers can run
 
-Grok enforces MCP allow/deny lists from every native TOML policy layer and from Claude `managed-settings.json` (advisory; see above). `grok inspect` prints the merged lists.
+Grok enforces MCP allow/deny lists from every native TOML policy layer and from Claude `managed-settings.json` (advisory; see above). `grok-oss inspect` prints the merged lists.
 
 Each allow or deny entry is one of:
 
@@ -350,7 +350,7 @@ The deployment can also send MCP servers to users directly. Native allowlists st
 
 ### Turn off session-start plugin auto-update
 
-`plugin_auto_update = false` / `pluginAutoUpdate = false` is tighten-only. This global pin is Grok's own key with no Claude counterpart. When pinned, session start does not scan marketplaces or fan out per-plugin updates (no toast). Manual `grok plugin update` still works. Claude's per-marketplace `extraKnownMarketplaces.<name>.autoUpdate: false` pins the same global switch.
+`plugin_auto_update = false` / `pluginAutoUpdate = false` is tighten-only. This global pin is Grok's own key with no Claude counterpart. When pinned, session start does not scan marketplaces or fan out per-plugin updates (no toast). Manual `grok-oss plugin update` still works. Claude's per-marketplace `extraKnownMarketplaces.<name>.autoUpdate: false` pins the same global switch.
 
 ### Require pinned versions
 
@@ -385,9 +385,9 @@ Marketplaces distribute Grok content: skills, commands, agents, hooks, and MCP s
 
 **A skill or MCP server from a marketplace is missing.** Refresh the source with `grok-oss plugin marketplace update`, confirm the plugin is installed and enabled, and, if your organization restricts sources, check that the marketplace is still allowed (see [Distribute across an organization](#distribute-across-an-organization)). Some MCP servers require a sign-in and will not appear until you authenticate.
 
-**An MCP server is configured but never starts.** Org policy may have blocked it. `grok inspect` lists `allowedMcpServers` / `deniedMcpServers`, `mcpManagedServersOnly`, any locked-down policy files, and each server's source. A deny match, an allowlist / lockdown that does not grant the server, a locked-down policy file, or `enableAllProjectMcpServers = false` on a project-scoped server drops it before spawn. See [Restrict which MCP servers can run](#restrict-which-mcp-servers-can-run).
+**An MCP server is configured but never starts.** Org policy may have blocked it. `grok-oss inspect` lists `allowedMcpServers` / `deniedMcpServers`, `mcpManagedServersOnly`, any locked-down policy files, and each server's source. A deny match, an allowlist / lockdown that does not grant the server, a locked-down policy file, or `enableAllProjectMcpServers = false` on a project-scoped server drops it before spawn. See [Restrict which MCP servers can run](#restrict-which-mcp-servers-can-run).
 
-**Adding a marketplace is refused.** A `strictKnownMarketplaces` list is in effect. Only the listed git / GitHub URLs can be added; local-path adds are refused unless an admin `extraKnownMarketplaces` pin names that exact path. If `grok inspect` shows the list as locked down, the key is present but empty, malformed, or names only unsupported sources, and nothing can be added until it is fixed.
+**Adding a marketplace is refused.** A `strictKnownMarketplaces` list is in effect. Only the listed git / GitHub URLs can be added; local-path adds are refused unless an admin `extraKnownMarketplaces` pin names that exact path. If `grok-oss inspect` shows the list as locked down, the key is present but empty, malformed, or names only unsupported sources, and nothing can be added until it is fixed.
 
 **An install is refused as unpinned.** Your deployment requires pinned commits. Install an exact commit (`owner/repo@<sha>`), or use a marketplace whose `plugin-index.json` publishes `sha` values. See [Require pinned versions](#require-pinned-versions).
 

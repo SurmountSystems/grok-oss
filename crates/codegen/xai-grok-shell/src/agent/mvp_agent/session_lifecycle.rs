@@ -629,6 +629,9 @@ pub(crate) struct RegistrySnapshot {
     pub retained_resources: usize,
     pub dispatch_locks: usize,
     pub live_orphan_heal_locks: usize,
+    /// Internal registry count. Omitted from `x.ai/debug/agent` so the churn
+    /// snapshot stays the field list that contract deserializes.
+    #[serde(skip)]
     pub config_mutation_locks: usize,
     pub session_turn_numbers: usize,
     pub permission_event_receivers: usize,

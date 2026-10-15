@@ -82,8 +82,8 @@ fn paint_leftover_viewport_wait(buf: &mut Buffer, area: Rect, label: &str, style
     buf.set_string(area.x, y, label, style);
 }
 
-/// Operator-green composer caret. A mid-buffer space keeps the space and
-/// takes an `accent_user` plate. A block glyph is only for the end of the draft.
+/// Operator-green composer caret. Delegates to the shared phase painter so
+/// Preview and the focused plan editor blink the same block.
 fn paint_composer_box_cursor(
     buf: &mut Buffer,
     x: u16,
@@ -92,31 +92,279 @@ fn paint_composer_box_cursor(
     canvas_bg: ratatui::style::Color,
     allow_block_glyph: bool,
 ) {
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    let accent = theme.accent_user;
-    if !allow_block_glyph && cell.symbol() == " " {
-        cell.set_bg(accent);
-        return;
-    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0);
-    let filled = crate::glyphs::cursor_box_filled_phase(now_ms);
-    if allow_block_glyph && filled {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(accent);
-    } else if allow_block_glyph {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(canvas_bg);
-    } else {
-        cell.set_fg(accent);
-        cell.set_bg(accent);
+    crate::views::prompt_widget::paint_composer_box_cursor_phase(
+        buf,
+        x,
+        y,
+        theme,
+        canvas_bg,
+        crate::glyphs::cursor_box_filled_phase(now_ms),
+        allow_block_glyph,
+    );
+}
+
+/// Empty composer under plan Preview paints a placeholder, then one caret cell.
+/// Clear the rest of that row so a clipped tail such as `ed in.` does not stay.
+fn clear_clipped_composer_tail(
+    buf: &mut Buffer,
+    caret_x: u16,
+    caret_y: u16,
+    prompt: Rect,
+    bg: ratatui::style::Color,
+) {
+    if prompt.width <= 2 {
+        return;
     }
+    let right = prompt.x.saturating_add(prompt.width).saturating_sub(1);
+    let mut x = caret_x.saturating_add(1);
+    while x < right {
+        if let Some(cell) = buf.cell_mut((x, caret_y)) {
+            let border = matches!(
+                cell.symbol(),
+                "│" | "╭" | "╮" | "╰" | "╯" | "─" | "┌" | "┐" | "└" | "┘"
+            );
+            if !border {
+                cell.set_symbol(" ");
+                cell.set_fg(bg);
+                cell.set_bg(bg);
+                cell.modifier = ratatui::style::Modifier::empty();
+            }
+        }
+        x = x.saturating_add(1);
+    }
+}
+
+/// Three columns on the prompt's top rule: `[`, the copy glyph, `]`.
+/// Inset one column from both corners. Not the six-column yellow word `[Copy]`.
+fn paint_inset_composer_copy(buf: &mut Buffer, area: Rect, theme: &Theme) -> Option<Rect> {
+    if area.width < 8 || area.height < 2 {
+        return None;
+    }
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let x = right.saturating_sub(4);
+    if x < area.x.saturating_add(2) {
+        return None;
+    }
+    let y = area.y;
+    let style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    buf.set_string_safe(x, y, "[", style);
+    buf.set_string_safe(x.saturating_add(1), y, crate::glyphs::copy_icon(), style);
+    buf.set_string_safe(x.saturating_add(2), y, "]", style);
+    Some(Rect::new(x, y, 3, 1))
+}
+
+/// Plan approval draws the model caption on the bottom rule. Repaint that
+/// row so the left cell is `└`, the right cell is `┘`, and the rule between
+/// them is `─`. The foreground is the prompt stroke color (white on DOGE).
+fn seal_prompt_bottom_rule(
+    buf: &mut Buffer,
+    area: Rect,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let y = area.y.saturating_add(area.height).saturating_sub(1);
+    let left = area.x;
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let style = Style::default().fg(fg).bg(bg);
+    let mut x = left;
+    while x <= right {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            let ch = if x == left {
+                '\u{2514}'
+            } else if x == right {
+                '\u{2518}'
+            } else {
+                '\u{2500}'
+            };
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+        if x == u16::MAX {
+            break;
+        }
+        x = x.saturating_add(1);
+    }
+}
+
+/// Session wrap width while the soft plan pane covers the right side.
+///
+/// A long session line wraps in the columns left of the pane. It does not
+/// run under the pane and end mid-word. The pane still paints on the right.
+fn scrollback_layout_width_left_of_soft_plan(
+    viewer: Option<&crate::views::file_search::line_viewer::LineViewerState>,
+    content: Rect,
+    full_area: Rect,
+) -> u16 {
+    let Some(viewer) = viewer else {
+        return content.width;
+    };
+    if !viewer.is_soft_plan_side_pane() || full_area.width == 0 {
+        return content.width;
+    }
+    let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+        full_area.width,
+    );
+    let pane_x = full_area
+        .x
+        .saturating_add(full_area.width.saturating_sub(pane_w));
+    let left = pane_x.saturating_sub(content.x);
+    if left == 0 {
+        content.width
+    } else {
+        left.min(content.width)
+    }
+}
+
+/// Paint rect for that same left column. Scrollback render wraps to the
+/// rect it is given, so prepare_layout width alone still lets a line run
+/// under the pane.
+fn scrollback_rect_left_of_soft_plan(
+    viewer: Option<&crate::views::file_search::line_viewer::LineViewerState>,
+    content: Rect,
+    full_area: Rect,
+) -> Rect {
+    let width = scrollback_layout_width_left_of_soft_plan(viewer, content, full_area);
+    Rect { width, ..content }
+}
+
+/// Status chips the soft plan pane cleared.
+///
+/// The context figure ends at the pane. The unread placeholder
+/// `Limits and Credits` is not painted into that slot. A real meter
+/// label stays to the left of the context figure. `None` means both
+/// chips were already left of the pane. The pair is
+/// `(credits hit, context hit)`.
+fn restore_status_row_left_of_soft_plan(
+    buf: &mut Buffer,
+    full_area: Rect,
+    status_bar: Rect,
+    existing_credits: Option<Rect>,
+    existing_context: Option<Rect>,
+    theme: &Theme,
+    credits_label: &str,
+    context_text: Option<&str>,
+) -> Option<(Option<Rect>, Option<Rect>)> {
+    if status_bar.height == 0 || full_area.width == 0 {
+        return None;
+    }
+    let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+        full_area.width,
+    );
+    let pane_x = full_area
+        .x
+        .saturating_add(full_area.width.saturating_sub(pane_w));
+    let y = status_bar.y;
+    if y < full_area.y || y >= full_area.y.saturating_add(full_area.height) {
+        return None;
+    }
+    let on_row = |hit: Rect| hit.y == y && hit.width > 0;
+    let covered = |hit: Rect| on_row(hit) && hit.x.saturating_add(hit.width) > pane_x;
+    let context_covered = existing_context.is_some_and(covered);
+    let credits_width = credits_label.chars().count() as u16;
+    let credits_fully_left = existing_credits.is_some_and(|hit| {
+        on_row(hit)
+            && credits_width > 0
+            && hit.width >= credits_width
+            && hit.x.saturating_add(hit.width) <= pane_x
+    });
+    if !context_covered && credits_fully_left {
+        return None;
+    }
+    let credits_style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    let context_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    if context_covered {
+        if let Some(context_text) = context_text.filter(|text| !text.is_empty()) {
+            return paint_context_figure_left_of_pane(
+                buf,
+                full_area.x,
+                pane_x,
+                y,
+                credits_label,
+                credits_width,
+                credits_style,
+                context_text,
+                context_style,
+            );
+        }
+    }
+    paint_credits_label_left_of_pane(buf, full_area.x, pane_x, y, credits_label, credits_style)
+        .map(|rect| (Some(rect), None))
+}
+
+/// Context figure ending at the pane. Skip the unread placeholder.
+fn paint_context_figure_left_of_pane(
+    buf: &mut Buffer,
+    area_x: u16,
+    pane_x: u16,
+    y: u16,
+    credits_label: &str,
+    credits_width: u16,
+    credits_style: Style,
+    context_text: &str,
+    context_style: Style,
+) -> Option<(Option<Rect>, Option<Rect>)> {
+    let context_width = context_text.chars().count() as u16;
+    if context_width == 0 || pane_x <= area_x {
+        return None;
+    }
+    let unread = credits_label == "Limits and Credits";
+    let show_credits = !unread && credits_width > 0;
+    let sep = if show_credits { 3 } else { 0 };
+    let group = credits_width
+        .saturating_mul(u16::from(show_credits))
+        .saturating_add(sep)
+        .saturating_add(context_width);
+    let x = pane_x.saturating_sub(group).max(area_x);
+    let mut credits_hit = None;
+    let mut context_x = pane_x.saturating_sub(context_width);
+    if show_credits {
+        let room = pane_x.saturating_sub(x);
+        let need = credits_width
+            .saturating_add(sep)
+            .saturating_add(context_width);
+        if need <= room {
+            buf.set_string_safe(x, y, credits_label, credits_style);
+            credits_hit = Some(Rect::new(x, y, credits_width, 1));
+            let gap_x = x.saturating_add(credits_width);
+            buf.set_string_safe(gap_x, y, "   ", credits_style);
+            context_x = gap_x.saturating_add(sep);
+        }
+    }
+    if context_x < area_x || context_x.saturating_add(context_width) > pane_x {
+        context_x = pane_x.saturating_sub(context_width);
+    }
+    if context_x < area_x {
+        return credits_hit.map(|rect| (Some(rect), None));
+    }
+    buf.set_string_safe(context_x, y, context_text, context_style);
+    Some((credits_hit, Some(Rect::new(context_x, y, context_width, 1))))
+}
+
+fn paint_credits_label_left_of_pane(
+    buf: &mut Buffer,
+    area_x: u16,
+    pane_x: u16,
+    y: u16,
+    label: &str,
+    style: Style,
+) -> Option<Rect> {
+    let width = label.chars().count() as u16;
+    if width == 0 {
+        return None;
+    }
+    let x = pane_x.saturating_sub(width);
+    if x < area_x || x.saturating_add(width) > pane_x {
+        return None;
+    }
+    buf.set_string_safe(x, y, label, style);
+    Some(Rect::new(x, y, width, 1))
 }
 
 pub(crate) fn laid_out_prompt_height(
@@ -149,6 +397,199 @@ fn both_refused_status_chip_label(
     let hours = (total_secs % 86_400) / 3_600;
     let mins = (total_secs % 3_600) / 60;
     Some(format!("{days}d {hours}h {mins}m"))
+}
+
+/// Included percent the L1 chip paints, when the next request draws that
+/// meter. A set identity pin uses that row's stored percent and does not
+/// replace a stored percent with the view balance. When that account's
+/// stored included usage is at or above 100 percent and the other live
+/// account's stored included usage is below 100 percent, this returns the
+/// other percent before the exhausted percent. An unset pin uses the
+/// stored percent of the session the next request sends. A Team bearer
+/// uses that business row. A personal bearer uses the personal row. When
+/// that stored percent is absent, or there is no sending session, a known
+/// view `CreditBalance` percent is the reading. An unread view balance
+/// stays missing. A missing reading is `None`, not `limits 0%`.
+fn included_chip_usage_pct(
+    identity: crate::views::credit_bar::SamplingIdentityKind,
+    balance: Option<&crate::views::credit_bar::CreditBalance>,
+) -> Option<f64> {
+    if identity != crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession {
+        return None;
+    }
+    if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+        return None;
+    }
+    if let Some(role) = xai_grok_shell::auth::limits_pins::role_the_next_request_would_use()
+        && let Some(pct) =
+            xai_grok_shell::auth::limits_pins::other_included_usage_when_this_account_is_fully_used(
+                role,
+            )
+            .filter(|pct| pct.is_finite())
+    {
+        return Some(pct);
+    }
+    if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row()
+        && let Some(pct) = row.usage_pct.filter(|pct| pct.is_finite())
+    {
+        return Some(pct);
+    }
+    if let Some(pct) = xai_grok_shell::auth::limits_pins::included_usage_pct_of_sending_session()
+        && let Some(value) = pct.filter(|value| value.is_finite())
+    {
+        return Some(value);
+    }
+    let balance = balance?;
+    if balance.included_usage_known && balance.usage_pct.is_finite() {
+        Some(balance.usage_pct)
+    } else {
+        None
+    }
+}
+
+/// Team postpaid Billing Credits remaining. The Limits card uses this
+/// same reading. A Management API team id and a Team JWT team id are
+/// not the same lookup.
+fn team_postpaid_billing_credits_remaining_label() -> Option<String> {
+    crate::views::limits_modal::team_postpaid_billing_credits_remaining_dollars()
+}
+
+/// `$GROK_HOME` on each call. The process grok home OnceLock misses a
+/// fixture home written after the lock.
+fn header_reading_grok_home() -> std::path::PathBuf {
+    match std::env::var("GROK_HOME") {
+        Ok(home) if !home.is_empty() => std::path::PathBuf::from(home),
+        _ => xai_grok_shell::util::grok_home::grok_home(),
+    }
+}
+
+/// SuperGrok dollar credits remaining for the identity the pin selected.
+///
+/// When the pin is unset, this is the active session. The snapshot row
+/// wins for a selected identity. The process cache covers a poll that
+/// has not been written yet. `None` was not read. This is not team
+/// postpaid Billing Credits and not console team prepaid. It does not
+/// invent `$0`.
+fn supergrok_dollar_credits_remaining_label() -> Option<String> {
+    let cents = if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row() {
+        row.dollar_credits_cents
+    } else {
+        let home = header_reading_grok_home();
+        let identity = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
+        xai_grok_shell::auth::included_billing_fields_snapshot()
+            .get(&identity)?
+            .prepaid_balance_cents
+    }?;
+    Some(crate::views::limits_modal::format_remaining_cents_as_dollars(cents.abs()))
+}
+
+/// Console team prepaid / console API credits remaining. The snapshot
+/// file is the same reading that decides a console pin is not included
+/// SuperGrok period limits. The process cache covers an inference-key
+/// read that has not been written to that file yet. `None` was not read.
+/// This does not invent `$0`.
+fn console_team_prepaid_remaining_cents() -> Option<i64> {
+    let home = header_reading_grok_home();
+    if let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home)
+        && let Some(cents) = doc.management.and_then(|mgmt| mgmt.prepaid_cents)
+    {
+        return Some(cents);
+    }
+    xai_grok_shell::auth::cached_console_team_prepaid_cents_any()
+}
+
+fn console_team_prepaid_remaining_label() -> Option<String> {
+    let cents = console_team_prepaid_remaining_cents()?;
+    Some(crate::views::limits_modal::format_remaining_cents_as_dollars(cents.abs()))
+}
+
+/// Header text when the next request does not draw included SuperGrok
+/// period limits. A dollar-credits pin shows that meter's remaining.
+/// A console pin or `use_console` shows console team prepaid remaining.
+/// `use_console` wins when both are set, because that flag is what the
+/// next request spends. Those pins do not show team postpaid Billing
+/// Credits. A team-only JWT with no such pin shows team postpaid Billing
+/// Credits when that cache or the fetched limits snapshot was read.
+/// Without the reading the chip stays `Limits and Credits`.
+fn credits_label_when_included_period_is_not_next_request() -> String {
+    let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+    let console_meter = pins.use_console
+        || matches!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::Console)
+        );
+    let dollar_meter = matches!(
+        pins.meter_source,
+        Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+    );
+    let unread = || "Limits and Credits".to_owned();
+    if console_meter {
+        return console_team_prepaid_remaining_label().unwrap_or_else(unread);
+    }
+    if dollar_meter {
+        return supergrok_dollar_credits_remaining_label().unwrap_or_else(unread);
+    }
+    team_postpaid_billing_credits_remaining_label().unwrap_or_else(unread)
+}
+
+/// Text of the L1 credits chip. Nested views do not call this.
+/// The status figure paints percent remaining as `limits N%`, where N
+/// is 100 minus the used percent. Hover paints that same remaining as
+/// `N% left`. When an identity pin is set and that account is below 100
+/// percent used, that percent is the selected row, not the other
+/// session's balance. When the account the next request would use is at
+/// or above 100 percent used and the other live account is below 100
+/// percent used, the chip uses that other percent. When the pin is unset
+/// and that switch does not apply, a stored percent on the session the
+/// next request sends wins. When that session stored no percent, a known
+/// view balance percent is the reading. A missing reading stays `Limits
+/// and Credits`. It does not become `limits 0%` or `$0`. When the next
+/// request does not draw included
+/// SuperGrok period limits, the chip is the dollars remaining for the
+/// meter that request spends.
+fn personal_header_poll_is_reauth() -> bool {
+    let home = header_reading_grok_home();
+    let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home) else {
+        return false;
+    };
+    let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
+    let Some(personal) = candidates.iter().find(|candidate| {
+        // A hard-expired personal access token still counts when that row's poll outcome is reauth.
+        candidate.headroom.role == xai_grok_shell::auth::SupergrokAccountRole::Personal
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return false;
+    };
+    doc.identities
+        .iter()
+        .any(|row| row.identity_id == personal.headroom.identity_id && row.poll_outcome == "reauth")
+}
+
+fn l1_credits_chip_label(
+    identity: crate::views::credit_bar::SamplingIdentityKind,
+    balance: Option<&crate::views::credit_bar::CreditBalance>,
+    hovered: bool,
+) -> String {
+    if let Some(balance) = balance
+        && let Some(label) = both_refused_status_chip_label(balance)
+    {
+        return label;
+    }
+    if personal_header_poll_is_reauth() {
+        return "grok-oss login".to_owned();
+    }
+    if let Some(pct) = included_chip_usage_pct(identity, balance) {
+        let used = pct.round().clamp(0.0, 100.0) as u8;
+        let remaining = 100u8.saturating_sub(used);
+        if hovered {
+            return format!("{remaining}% left");
+        }
+        return format!("limits {remaining}%");
+    }
+    if xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+        return "Limits and Credits".to_owned();
+    }
+    credits_label_when_included_period_is_not_next_request()
 }
 
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
@@ -826,6 +1267,7 @@ impl AgentView {
             }
         });
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        self.show_active_resolved_plan_file_if_hidden();
         let casual_commenting = self.is_casual_commenting();
         let mode_accent = if effective_plan || casual_commenting {
             Some(theme.accent_plan)
@@ -857,9 +1299,9 @@ impl AgentView {
             } else {
                 mode_accent
             },
-            border_color_override: mode_accent.map(|accent| {
-                crate::render::color::blend_color(theme.bg_base, accent, 0.4).unwrap_or(accent)
-            }),
+            // Plan, comment, and Ask keep the prompt outline on
+            // `prompt_border_active`. A 0.4 blend of `bg_base` is black on DOGE.
+            border_color_override: mode_accent.map(|_| theme.prompt_border_active),
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -905,7 +1347,20 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self.prompt_caption(),
+            title: self.prompt_caption().map(|caption| {
+                let plan_pane_open = self.line_viewer.as_ref().is_some_and(|viewer| {
+                    viewer.kind
+                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                });
+                if plan_pane_open && caption == "Grok Build" {
+                    "Grok OSS".to_string()
+                } else {
+                    caption
+                }
+            }),
+            // Three copy columns plus one rule gap, so the full title stays
+            // left of `[` on this top rule. Other prompt styles stay at 0.
+            title_reserve_right: 4,
             image_preview: !self.resize_hides_prompt_preview(),
         };
         let next = crate::views::session_title::rename_source_title_raw(self)
@@ -1041,6 +1496,7 @@ impl AgentView {
             show_accent_line: false,
             show_borders: false,
             title: None,
+            title_reserve_right: 0,
             image_preview: !self.resize_hides_prompt_preview(),
         };
         let feedback_pane = self
@@ -1076,6 +1532,7 @@ impl AgentView {
                 show_accent_line: false,
                 show_borders: false,
                 title: None,
+                title_reserve_right: 0,
                 image_preview: !self.resize_hides_prompt_preview(),
             };
             let perm_text_w = crate::views::permission_view::inline_text_width(inner_width);
@@ -1198,13 +1655,17 @@ impl AgentView {
         } else {
             display_state.clone()
         };
-        let turn_status_height = if turn_status::should_show(
-            &status_state,
-            turn_status_drain_blocked,
-            self.session_starting_since,
-            turn_status_watchers,
-            turn_status_parked,
-        ) {
+        // Idle Revise / Clarify still owns the turn row after the session
+        // goes idle. `should_show` hides that row when nothing else is busy.
+        let plan_loop_row = self.plan_loop_status_label().is_some();
+        let turn_status_height = if plan_loop_row
+            || turn_status::should_show(
+                &status_state,
+                turn_status_drain_blocked,
+                self.session_starting_since,
+                turn_status_watchers,
+                turn_status_parked,
+            ) {
             1
         } else {
             0
@@ -1294,10 +1755,13 @@ impl AgentView {
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            self.scrollback.prepare_layout(
-                layout.scrollback_content.width,
-                layout.scrollback_content.height,
+            let session_width = scrollback_layout_width_left_of_soft_plan(
+                self.line_viewer.as_ref(),
+                layout.scrollback_content,
+                area,
             );
+            self.scrollback
+                .prepare_layout(session_width, layout.scrollback_content.height);
             let viewport = crate::views::timeline::RailViewport {
                 active: self.scrollback.active_turn_for_viewport(),
                 up_target: self.scrollback.turn_above_viewport_top(),
@@ -1339,10 +1803,13 @@ impl AgentView {
                             .height
                             .saturating_sub(search_reserved_rows);
                     }
-                    self.scrollback.prepare_layout(
-                        layout.scrollback_content.width,
-                        layout.scrollback_content.height,
+                    let session_width = scrollback_layout_width_left_of_soft_plan(
+                        self.line_viewer.as_ref(),
+                        layout.scrollback_content,
+                        area,
                     );
+                    self.scrollback
+                        .prepare_layout(session_width, layout.scrollback_content.height);
                 }
             }
         } else {
@@ -1453,15 +1920,20 @@ impl AgentView {
             );
         }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
-        let ctx_total = self
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
-        if let Some(ctx_line) = context_bar::context_bar_line_for_session(
+        let catalog_window = self.session.models.get_context_window().or_else(|| {
+            self.context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling_window = context_bar::footer_sampling_window(
+            self.session_sampling_window,
+            catalog_window,
+            self.child_link().is_some(),
+        );
+        if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
-            ctx_total,
+            sampling_window,
+            catalog_window,
             self.hit_context.hovered,
             &theme,
             self.chat_kind,
@@ -1469,8 +1941,6 @@ impl AgentView {
             // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
         }
-        // No SuperGrok period chip on this header. `/limits` still names that meter.
-        // The short `limits N%` chip below is not that verbose period helper.
         let hover_or = |hovered: bool, resting: Style| {
             if hovered {
                 bg.fg(theme.text_primary)
@@ -1478,6 +1948,68 @@ impl AgentView {
                 resting
             }
         };
+        // Short status chip, immediately to the right of the context figure.
+        // Nested L2 and L3 views (`child_link` set) do not paint it.
+        // The dashboard session-overlay header does not paint it either.
+        // That header is the title, the location, and the switcher, not
+        // the main L1 status row. The main session (`AgentRole::Root`,
+        // no child link, outside that overlay) keeps the chip.
+        // A task on this row does not hide it. `limits N%` only when the
+        // next request draws included SuperGrok period limits and that
+        // usage reading is known. A missing included reading still paints
+        // `Limits and Credits`, not `limits 0%` and not `$0`. A
+        // dollar-credits pin shows that meter's remaining. A console pin
+        // or use_console shows console team prepaid remaining. Otherwise
+        // the chip paints team postpaid Billing Credits remaining, or
+        // `Limits and Credits` when that reading is missing.
+        if self.child_link().is_none() && !in_dashboard_overlay {
+            let balance = self.credit_balance.as_ref();
+            let both_refused = balance.and_then(both_refused_status_chip_label);
+            let included_pct = included_chip_usage_pct(self.sampling_identity, balance);
+            let label =
+                l1_credits_chip_label(self.sampling_identity, balance, self.hit_credits.hovered);
+            let chip_style = if both_refused.is_some() {
+                let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+                if self.hit_credits.hovered {
+                    chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                chip_style
+            } else if let Some(pct) = included_pct {
+                let used = pct.round().clamp(0.0, 100.0) as u8;
+                // Under 80 percent used the chip is cyan. Operator green
+                // stays on the rail and the caret.
+                let color = if used >= 100 {
+                    theme.accent_error
+                } else if used >= 80 {
+                    theme.warning
+                } else {
+                    theme.accent_system
+                };
+                let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
+                if self.hit_credits.hovered {
+                    chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                chip_style
+            } else {
+                hover_or(
+                    self.hit_credits.hovered,
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                )
+            };
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
+        }
+        let todo_counts = self.todo.counts();
+        let todo_total = todo_counts.total();
+        if todo_total > 0 {
+            let label = format!("tasks {}/{}", todo_counts.completed, todo_total);
+            status.push(
+                "tasks",
+                Line::from(Span::styled(
+                    label,
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                )),
+            );
+        }
         if let Some((cur, total)) = overlay_header.cycle_position() {
             status.push(
                 "switcher",
@@ -1505,14 +2037,17 @@ impl AgentView {
             status.push(
                 "dashboard",
                 Line::from(Span::styled(
-                    "[Dashboard]",
+                    "[L0]",
                     hover_or(self.hit_dashboard.hovered, bg.fg(theme.gray)),
                 )),
             );
         }
         if let Some(url) = self.highlighted_link_url() {
             const LOCATION_FLOOR: u16 = 24;
-            const LINK_MIN: u16 = 12;
+            // A shortened preview must still keep `https://example.com/segment/`
+            // (28 columns) plus the ellipsis column. Narrower than that, skip
+            // the preview so the location, switcher, and `[L0]` stay put.
+            const LINK_MIN: u16 = 29;
             let max_len = status
                 .room_for_front(layout.status_bar.width)
                 .saturating_sub(LOCATION_FLOOR);
@@ -1521,40 +2056,6 @@ impl AgentView {
                 let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
                 status.push_front("link_url", Line::from(Span::styled(display, link_style)));
             }
-        }
-        // Short status chip only. Do not use the verbose SuperGrok period helper.
-        if let Some(balance) = self.credit_balance.as_ref()
-            && let Some(label) = both_refused_status_chip_label(balance)
-        {
-            let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
-            if self.hit_credits.hovered {
-                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("credits", Line::from(Span::styled(label, chip_style)));
-        } else if self.sampling_identity
-            == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
-            && let Some(balance) = self.credit_balance.as_ref()
-            && balance.included_usage_known
-            && balance.usage_pct.is_finite()
-        {
-            let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
-            let label = if self.hit_credits.hovered {
-                format!("{}% left", 100u8.saturating_sub(used))
-            } else {
-                format!("limits {used}%")
-            };
-            let color = if used >= 100 {
-                theme.accent_error
-            } else if used >= 80 {
-                theme.warning
-            } else {
-                theme.accent_success
-            };
-            let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
-            if self.hit_credits.hovered {
-                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
@@ -1576,10 +2077,12 @@ impl AgentView {
             }),
             dropdown_open,
         );
-        let location_path = self.location_path().to_string_lossy();
+        // Own the path so the header hit clears do not overlap a borrow of `self`.
+        let location_path = self.location_path().to_string_lossy().into_owned();
         let location_path = crate::views::session_title::sanitize_display_text(&location_path);
-        let short =
-            crate::util::display_location_path(std::path::Path::new(location_path.as_ref()));
+        // Abbreviate only. Measure the columns left of the chips before any
+        // one-letter shorten. `display_location_path` always shortens.
+        let abbreviated = crate::util::abbreviate_path(location_path.as_ref());
         let left_budget = areas
             .values()
             .map(|r| r.x)
@@ -1620,11 +2123,11 @@ impl AgentView {
             ));
         }
         let prefix_width: u16 = location.iter().map(|s| s.width() as u16).sum();
-        let path_width = short.width() as u16;
+        let abbreviated_width = abbreviated.width() as u16;
         let title = overlay_header.title.and_then(|title| {
             const PATH_MIN: u16 = 12;
             let sep_width = crate::views::agent_status::separator(&theme).width() as u16;
-            let location_min = prefix_width + path_width.min(PATH_MIN) + sep_width;
+            let location_min = prefix_width + abbreviated_width.min(PATH_MIN) + sep_width;
             let title_cap = (location_budget / 2).min(location_budget.saturating_sub(location_min));
             let title = crate::util::truncate_to_width(title, title_cap as usize);
             (!title.is_empty()).then(|| title.into_owned())
@@ -1637,7 +2140,6 @@ impl AgentView {
                 bg.fg(theme.text_secondary)
             },
         );
-        location.push(Span::styled(short, path_style));
         self.hit_header_dashboard.clear();
         self.hit_header_prev.clear();
         self.hit_header_next.clear();
@@ -1683,7 +2185,7 @@ impl AgentView {
                 fork_prefix.push(Span::styled(" ", gap));
                 fork_width += 1;
             }
-            let dash = "[Dashboard]";
+            let dash = "[L0]";
             let dash_w = dash.width() as u16;
             header_dash_x = Some((fork_width, dash_w));
             fork_prefix.push(Span::styled(dash, chip(self.hit_header_dashboard.hovered)));
@@ -1691,6 +2193,21 @@ impl AgentView {
             fork_prefix.push(Span::styled("  ", gap));
             fork_width += 2;
         }
+        let sep_width = crate::views::agent_status::separator(&theme).width() as u16;
+        let title_reserve = title
+            .as_ref()
+            .map(|title| (title.width() as u16).saturating_add(sep_width))
+            .unwrap_or(0);
+        let path_budget = location_budget
+            .saturating_sub(fork_width)
+            .saturating_sub(title_reserve)
+            .saturating_sub(prefix_width);
+        let fitted = xai_grok_pager_render::location_path::fit_location_path_to_budget(
+            abbreviated.as_ref(),
+            usize::from(path_budget),
+        );
+        let path_width = fitted.width() as u16;
+        location.push(Span::styled(fitted.into_owned(), path_style));
         let mut parts: Vec<Span> = fork_prefix;
         let mut path_offset: u16 = fork_width + prefix_width;
         if let Some(title) = title {
@@ -1759,10 +2276,13 @@ impl AgentView {
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            self.scrollback.prepare_layout(
-                layout.scrollback_content.width,
-                layout.scrollback_content.height,
+            let session_area = scrollback_rect_left_of_soft_plan(
+                self.line_viewer.as_ref(),
+                layout.scrollback_content,
+                area,
             );
+            self.scrollback
+                .prepare_layout(session_area.width, session_area.height);
             let rewind_dim_from = self.rewind_dim_from_entry();
             let sb_focused = self.active_pane == ActivePane::Scrollback && !overlay_focused;
             let search_highlight = if search_active {
@@ -1782,7 +2302,7 @@ impl AgentView {
                 .with_media_paths(self.media_link_paths.clone())
                 .with_activity_row_clocks(self.activity_row_clocks)
                 .render_with_scratch_and_selection_boundaries(
-                    layout.scrollback_content,
+                    session_area,
                     buf,
                     &self.scrollback,
                     scratch,
@@ -2108,6 +2628,9 @@ impl AgentView {
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
+        } else {
+            self.tasks.clear_button_rect = None;
+            self.tasks.row_hit_rects.clear();
         }
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
@@ -2177,10 +2700,20 @@ impl AgentView {
             self.hit_queue_close.clear();
         }
         self.dock_stop_button = None;
+        self.dock_clear_rect = None;
+        self.dock_specialist_hits.clear();
         if let Some(dock) = &dock_data
             && layout.dock.height > 0
         {
-            crate::views::dock::render(buf, layout.dock, &theme, dock);
+            let chrome = crate::views::dock::render_with_clear_hover(
+                buf,
+                layout.dock,
+                &theme,
+                dock,
+                self.dock_clear_hovered,
+            );
+            self.dock_clear_rect = chrome.clear_rect;
+            self.dock_specialist_hits = chrome.specialist_hits;
             self.cache_dock_stop_at(layout.dock, dock);
             let queue_body = crate::views::dock::queue_body_rect(layout.dock, dock);
             if queue_body.height > 0 {
@@ -2379,12 +2912,16 @@ impl AgentView {
                         activity_started_at: self.activity_started_at,
                         tick,
                         drain_blocked: turn_status_drain_blocked,
-                        buttons: Some(turn_status::MouseButtons {
-                            cancel_hovered: self.hit_cancel_button.hovered,
-                            pause_hovered: self.hit_pause_button.hovered,
-                            bg_hovered: self.hit_bg_button.hovered,
-                            watching_hovered: self.hit_watching_cue.hovered,
-                        }),
+                        buttons: if self.is_minimal_mode() {
+                            None
+                        } else {
+                            Some(turn_status::MouseButtons {
+                                cancel_hovered: self.hit_cancel_button.hovered,
+                                pause_hovered: self.hit_pause_button.hovered,
+                                bg_hovered: self.hit_bg_button.hovered,
+                                watching_hovered: self.hit_watching_cue.hovered,
+                            })
+                        },
                         has_running_execute,
                         total_tokens: self.context_state.as_ref().map(|c| c.used),
                         session_starting_since: self.session_starting_since,
@@ -2717,6 +3254,7 @@ impl AgentView {
                         show_accent_line: false,
                         show_borders: false,
                         title: None,
+                        title_reserve_right: 0,
                         image_preview: !self.resize_hides_prompt_preview(),
                     };
                     let prompt_h = remaining_h.saturating_sub(1).max(1);
@@ -3184,47 +3722,26 @@ impl AgentView {
             } else {
                 None
             };
-            let copy_label = super::composer_copy::COMPOSER_COPY_LABEL;
-            let copy_w = copy_label.len() as u16;
-            let copy_reserve = copy_w.saturating_add(1);
-            let (prompt_area, copy_button) = if layout.prompt.width > copy_reserve.saturating_add(8)
-            {
-                let prompt_area = Rect {
-                    x: layout.prompt.x,
-                    y: layout.prompt.y,
-                    width: layout.prompt.width.saturating_sub(copy_reserve),
-                    height: layout.prompt.height,
-                };
-                let button = Rect {
-                    x: prompt_area
-                        .x
-                        .saturating_add(prompt_area.width)
-                        .saturating_add(1),
-                    y: prompt_area.y,
-                    width: copy_w,
-                    height: 1,
-                };
-                (prompt_area, Some(button))
-            } else {
-                (layout.prompt, None)
-            };
+            // Typed glyphs stay in this planning input, on the caret row.
+            // A soft plan pane must not erase them.
             let prompt_result_inner = self.prompt.draw(
                 buf,
-                prompt_area,
+                layout.prompt,
                 Some(layout.scrollback),
                 &prompt_style,
                 Some(&info),
                 voice_overlay,
             );
-            if let Some(button) = copy_button {
-                buf.set_string_safe(
-                    button.x,
-                    button.y,
-                    copy_label,
-                    Style::default().fg(theme.gray).bg(theme.bg_base),
+            let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
+            self.set_composer_copy_button(copy_button);
+            if self.plan_approval_view.is_some() {
+                seal_prompt_bottom_rule(
+                    buf,
+                    layout.prompt,
+                    theme.prompt_border_active,
+                    theme.bg_base,
                 );
             }
-            self.set_composer_copy_button(copy_button);
             if let Some((s, ovr)) = saved_scroll {
                 self.prompt.textarea.set_scroll_override(ovr);
                 self.prompt.set_scroll(s);
@@ -3750,8 +4267,6 @@ impl AgentView {
                 if self.vim_mode {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
-                h.push(HintItem::new(key!('y'), "copy plan"));
-                h.push(HintItem::new(key!('q'), "quit plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if is_plan_viewer {
@@ -3802,7 +4317,9 @@ impl AgentView {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
             }
             self.pane_areas = layout.pane_areas();
-            let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
+            // `casual_commenting` was read before `line_viewer` was borrowed.
+            // Calling `is_casual_commenting` here borrows `self` again.
+            let viewer_cursor = if plan_prompt_focused || casual_commenting {
                 prompt_cursor_pos
             } else {
                 None
@@ -3826,6 +4343,15 @@ impl AgentView {
                 });
                 if let Some((cx, cy)) = caret {
                     let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                    if self.prompt.text().is_empty() {
+                        clear_clipped_composer_tail(
+                            buf,
+                            cx,
+                            cy,
+                            self.pane_areas.prompt,
+                            theme.bg_base,
+                        );
+                    }
                     paint_composer_box_cursor(
                         buf,
                         cx,
@@ -3834,6 +4360,64 @@ impl AgentView {
                         theme.bg_base,
                         allow_block_glyph,
                     );
+                }
+            }
+            let soft_plan_side_pane = viewer.is_soft_plan_side_pane();
+            // The pane clears a right-aligned chip that it covers. L1 keeps
+            // the chip, with the same label the status row used, including
+            // when the next request draws included SuperGrok period limits.
+            // Nested views stay omitted.
+            if soft_plan_side_pane && self.child_link().is_none() {
+                let existing_credits = self.hit_credits.rect;
+                let existing_context = self.hit_context.rect;
+                let label = l1_credits_chip_label(
+                    self.sampling_identity,
+                    self.credit_balance.as_ref(),
+                    self.hit_credits.hovered,
+                );
+                let context_text = ctx_used.and_then(|used| {
+                    context_bar::context_chip_token_text(used, sampling_window, catalog_window)
+                });
+                if let Some((credits_hit, context_hit)) = restore_status_row_left_of_soft_plan(
+                    buf,
+                    area,
+                    layout.status_bar,
+                    existing_credits,
+                    existing_context,
+                    &theme,
+                    &label,
+                    context_text.as_deref(),
+                ) {
+                    if let Some(rect) = credits_hit {
+                        if self
+                            .hit_bg_status
+                            .rect
+                            .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_bg_status.rect = None;
+                        }
+                        if self
+                            .hit_goal_status
+                            .rect
+                            .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_goal_status.rect = None;
+                        }
+                        if context_hit.is_none()
+                            && self
+                                .hit_context
+                                .rect
+                                .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_context.rect = None;
+                        }
+                        self.hit_credits.rect = Some(rect);
+                    } else if context_hit.is_some() {
+                        self.hit_credits.rect = None;
+                    }
+                    if let Some(rect) = context_hit {
+                        self.hit_context.rect = Some(rect);
+                    }
                 }
             }
             return (viewer_cursor, prompt_post_flush);
@@ -4756,6 +5340,21 @@ impl AgentView {
                 );
             }
         }
+        // Nested L2 overlay must return the Kitty clear. Do not commit it
+        // here. `write_to` is what drops the previous owner so the next
+        // static image transmits (`a=T`). A prompt flush that already
+        // carries `a=d` is that clear.
+        if self
+            .active_subagent
+            .as_deref()
+            .is_some_and(|sid| self.subagent_views.contains_key(sid))
+            && prompt_post_flush
+                .as_ref()
+                .is_none_or(|flush| !flush.as_str().contains("a=d"))
+            && let Some(clear) = crate::terminal::overlay::clear()
+        {
+            prompt_post_flush = Some(clear.into());
+        }
         let on_link = self.hovered_link_idx.is_some() || self.hovered_bubble_copy;
         if supports_osc22() && on_link != self.last_pointer_on_link {
             self.last_pointer_on_link = on_link;
@@ -5241,6 +5840,138 @@ mod plan_approval_draw_contract_tests {
         }
     }
 
+    /// The focused plan editor must have a visible blinking block caret.
+    /// Filled half is Operator green (`accent_user`). The empty half on a
+    /// letter is normal text (`text_primary`), not neon ink on the letter.
+    #[test]
+    fn focused_plan_editor_paints_blinking_block_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let filled = crate::glyphs::cursor_box_filled();
+        let owed = "the focused plan editor must have a visible blinking block caret";
+        assert_eq!(
+            theme.accent_user,
+            ratatui::style::Color::Rgb(0, 255, 0),
+            "{owed}: DOGE caret is Operator green"
+        );
+
+        let area = Rect::new(0, 0, 100, 40);
+        let draw = |agent: &mut AgentView| {
+            let reg = ActionRegistry::defaults();
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            buf
+        };
+        let cell_at = |buf: &Buffer, symbol: &str| -> Option<ratatui::buffer::Cell> {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == symbol
+                    {
+                        return Some(cell.clone());
+                    }
+                }
+            }
+            None
+        };
+
+        let mut agent = plan_approval_agent();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.prompt.set_text("Q");
+        agent.prompt.set_cursor(agent.prompt.text().len());
+
+        let filled_block = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            cell_at(&buf, filled)
+        };
+        let hollow_block = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            cell_at(&buf, filled)
+        };
+        let filled_block = filled_block.unwrap_or_else(|| {
+            panic!("{owed}: filled half must paint the block glyph");
+        });
+        let hollow_block = hollow_block.unwrap_or_else(|| {
+            panic!("{owed}: empty half must keep a visible block glyph");
+        });
+        assert_eq!(
+            filled_block.bg, theme.accent_user,
+            "{owed}: filled half is Operator green"
+        );
+        assert_ne!(
+            hollow_block.bg, theme.accent_user,
+            "{owed}: the two blink halves must differ"
+        );
+        assert_eq!(
+            hollow_block.fg, theme.accent_user,
+            "{owed}: empty insertion cell stays Operator-green ink"
+        );
+
+        agent.prompt.set_cursor(0);
+        let filled_letter = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            cell_at(&buf, "Q")
+        };
+        let hollow_letter = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            cell_at(&buf, "Q")
+        };
+        let filled_letter = filled_letter.expect("letter Q under the caret");
+        let hollow_letter = hollow_letter.expect("letter Q on the empty blink half");
+        assert_eq!(
+            filled_letter.symbol(),
+            "Q",
+            "{owed}: a letter must stay a letter, not a block glyph"
+        );
+        assert_eq!(
+            filled_letter.bg, theme.accent_user,
+            "{owed}: filled half on a letter is an Operator-green plate"
+        );
+        assert_eq!(
+            filled_letter.fg, theme.text_primary,
+            "{owed}: filled half must not paint neon ink on the letter"
+        );
+        assert_eq!(
+            hollow_letter.fg, theme.text_primary,
+            "{owed}: an empty blink half is normal text (text_primary), not neon ink on the letter"
+        );
+        assert_ne!(
+            hollow_letter.fg, theme.accent_user,
+            "{owed}: an empty blink half is normal text (text_primary), not neon ink on the letter"
+        );
+        assert_ne!(
+            hollow_letter.bg, theme.accent_user,
+            "{owed}: the letter's empty half drops the Operator-green plate"
+        );
+    }
+
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
     /// Same 1.0.3 leftover the live screenshot still shows until rebuild:
     /// `request changes` / `c comment` / `copy plan` / `quit plan` plus
@@ -5393,6 +6124,103 @@ mod plan_approval_draw_contract_tests {
         assert!(plan.comment_button_area.is_some());
         assert!(plan.send_button_area.is_some());
         assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// Active plan mode with a resolved decision still shows the plan file,
+    /// the plan input, and one "Grok OSS" title. Opening the pane by hand
+    /// is not this screen.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn active_plan_mode_shows_the_plan_file_the_input_and_one_grok_build_title() {
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-pane-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        // Test-only home. Do not read or write the live plan.md.
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("Grok Build".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let text = render_text(&mut agent, false);
+        assert!(
+            text.contains("pane-sentinel-plan-body"),
+            "active plan mode must show the plan file text:\n{text}"
+        );
+        assert!(
+            agent.pane_areas.prompt.width > 4 && agent.pane_areas.prompt.height > 2,
+            "plan input must be on screen; prompt={:?}",
+            agent.pane_areas.prompt
+        );
+        assert!(
+            text.contains("Grok OSS")
+                && !text.contains("Grok Build")
+                && !text.contains("Grok Grok"),
+            "title must contain Grok OSS and must not contain Grok Build or Grok Grok:\n{text}"
+        );
+    }
+
+    /// The plan pane title is this product's chrome. It says Grok OSS.
+    /// A display name of Grok Build is the wrong product name on that title.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn plan_pane_title_says_grok_oss() {
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-pane-title-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("Grok Build".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let text = render_text(&mut agent, false);
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            }),
+            "the plan pane must be open"
+        );
+        assert!(
+            text.contains("Grok OSS"),
+            "plan pane title must say Grok OSS:\n{text}"
+        );
+        assert!(
+            !text.contains("Grok Build"),
+            "plan pane title must not say Grok Build:\n{text}"
+        );
     }
 
     /// Local idle park (`/view-plan` and other idle parks) first-paints
@@ -5570,8 +6398,8 @@ mod plan_approval_draw_contract_tests {
         let top_left = buf.cell((prompt.x, prompt.y)).expect("top-left frame");
         assert_eq!(
             top_left.symbol(),
-            "\u{256d}",
-            "plan prompt top-left must be ╭; got {:?}",
+            "\u{250c}",
+            "plan prompt top-left must be ┌; got {:?}",
             top_left.symbol()
         );
         assert_eq!(
@@ -5585,6 +6413,736 @@ mod plan_approval_draw_contract_tests {
             mid_left.fg, white,
             "plan prompt side must stay white; got {:?}",
             mid_left.fg
+        );
+    }
+
+    /// While plan mode is open, the prompt input keeps a white outline.
+    /// Ask mode keeps that same white stroke. The frame glyph is `┌` or
+    /// `─`, its foreground is `Rgb(255, 255, 255)`, and that foreground is
+    /// not `theme.bg_base`. This is the prompt input, not the plan side panel.
+    #[test]
+    fn plan_mode_prompt_input_keeps_a_white_outline() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt outline is white"
+        );
+        assert_ne!(
+            theme.bg_base, white,
+            "DOGE bg_base is not the white outline"
+        );
+
+        fn prompt_frame_fg(agent: &mut AgentView, label: &str) -> Color {
+            let reg = ActionRegistry::defaults();
+            let area = Rect::new(0, 0, 100, 40);
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams::default(),
+            );
+            let prompt = agent.pane_areas.prompt;
+            assert!(
+                prompt.width > 4 && prompt.height > 2,
+                "{label}: prompt input must have a painted area; got {prompt:?}"
+            );
+            let mut corner = None;
+            let mut rule = None;
+            for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+                for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                    let Some(cell) = buf.cell((x, y)) else {
+                        continue;
+                    };
+                    if cell.symbol() == "\u{250c}" {
+                        corner = Some(cell.fg);
+                        break;
+                    }
+                    if rule.is_none() && cell.symbol() == "\u{2500}" {
+                        rule = Some(cell.fg);
+                    }
+                }
+                if corner.is_some() {
+                    break;
+                }
+            }
+            corner.or(rule).unwrap_or_else(|| {
+                panic!("{label}: prompt input must paint ┌ or ─");
+            })
+        }
+
+        let mut plan = make_agent();
+        plan.plan_mode_active = true;
+        let plan_fg = prompt_frame_fg(&mut plan, "plan mode");
+        assert_eq!(
+            plan_fg, white,
+            "plan mode prompt outline must be white Rgb(255, 255, 255); got {plan_fg:?}"
+        );
+        assert_ne!(
+            plan_fg, theme.bg_base,
+            "plan mode prompt outline must not use theme.bg_base; got {plan_fg:?}"
+        );
+
+        let mut ask = make_agent();
+        ask.plan_mode_active = false;
+        ask.session_mode_pending = None;
+        ask.session_mode = xai_grok_tools::types::SessionMode::Ask;
+        let ask_fg = prompt_frame_fg(&mut ask, "ask mode");
+        assert_eq!(
+            ask_fg, white,
+            "ask mode prompt outline must be white Rgb(255, 255, 255); got {ask_fg:?}"
+        );
+        assert_ne!(
+            ask_fg, theme.bg_base,
+            "ask mode prompt outline must not use theme.bg_base; got {ask_fg:?}"
+        );
+    }
+
+    fn draw_buf(agent: &mut AgentView) -> (Buffer, String) {
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (buf, text)
+    }
+
+    struct PromptStroke {
+        left: u16,
+        right: u16,
+        top: u16,
+        bottom: u16,
+    }
+
+    /// Top-left `┌`, top-right `┐`, and bottom-left `└` of the prompt box.
+    fn prompt_stroke(buf: &Buffer, prompt: Rect) -> PromptStroke {
+        let mut top_left = None;
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if buf
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{250c}")
+                {
+                    top_left = Some((x, y));
+                    break;
+                }
+            }
+            if top_left.is_some() {
+                break;
+            }
+        }
+        let (left, top) = top_left.expect("prompt input must paint a top-left stroke");
+        let right = (left + 1..prompt.x.saturating_add(prompt.width))
+            .rev()
+            .find(|&x| {
+                buf.cell((x, top))
+                    .is_some_and(|cell| cell.symbol() == "\u{2510}")
+            })
+            .expect("prompt input must paint a top-right stroke");
+        let bottom = (top + 1..prompt.y.saturating_add(prompt.height))
+            .rev()
+            .find(|&y| {
+                buf.cell((left, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{2514}")
+            })
+            .unwrap_or(prompt.y.saturating_add(prompt.height).saturating_sub(1));
+        PromptStroke {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    fn yellow_copy_on_row(
+        buf: &Buffer,
+        prompt: Rect,
+        y: u16,
+        yellow: ratatui::style::Color,
+    ) -> bool {
+        if prompt.width < 6 {
+            return false;
+        }
+        let end = prompt.x.saturating_add(prompt.width).saturating_sub(5);
+        for x in prompt.x..end {
+            let word: String = (0..6)
+                .filter_map(|i| buf.cell((x + i, y)).map(|cell| cell.symbol().to_string()))
+                .collect();
+            let yellow_word =
+                (0..6).all(|i| buf.cell((x + i, y)).is_some_and(|cell| cell.fg == yellow));
+            if word == "[Copy]" && yellow_word {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `[`, copy glyph, `]` at least one column inside the prompt stroke.
+    fn bracketed_copy_inset(buf: &Buffer, stroke: &PromptStroke) -> bool {
+        let glyph = crate::glyphs::copy_icon();
+        let last = stroke.right.saturating_sub(2);
+        for y in stroke.top..=stroke.bottom {
+            let mut x = stroke.left.saturating_add(2);
+            while x.saturating_add(2) <= last {
+                let symbols = ["[", glyph, "]"];
+                let visible = symbols.iter().enumerate().all(|(i, symbol)| {
+                    buf.cell((x + i as u16, y))
+                        .is_some_and(|cell| cell.symbol() == *symbol)
+                });
+                if visible {
+                    return true;
+                }
+                x = x.saturating_add(1);
+            }
+        }
+        false
+    }
+
+    /// On DOGE, while the Operator box is open, the copy control is three
+    /// columns: `[`, the copy glyph, `]`, inset from the white prompt stroke,
+    /// fully visible. The screen must not show the six-column yellow word
+    /// `[Copy]` on the prompt's top border row.
+    #[test]
+    fn composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        let (buf, _) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "Operator box must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_left = buf
+            .cell((stroke.left, stroke.top))
+            .expect("top-left prompt stroke");
+        assert_eq!(top_left.fg, white, "Operator box stroke is white");
+
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.top, theme.gray);
+        let inset = bracketed_copy_inset(&buf, &stroke);
+        assert!(
+            !yellow_copy && inset,
+            "AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) on the prompt's top border row; the copy control must be three columns `[`, the copy glyph, `]`, inset from the white prompt stroke, fully visible. yellow `[Copy]` on that row: {yellow_copy}; bracketed glyph inset and fully visible: {inset}"
+        );
+    }
+
+    /// Main composer on DOGE. The bottom caption is
+    /// `Grok 4.7 (high) · always-approve`. The bottom right must not show
+    /// the six-column yellow word `[Copy]`.
+    /// `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`
+    /// only checks the prompt's top border row. This test does not change
+    /// that check.
+    #[test]
+    fn main_composer_does_not_paint_yellow_copy_at_the_bottom_right() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.plan_mode_pending = None;
+        agent.session_mode_pending = None;
+        agent
+            .session
+            .models
+            .set_served_model_name(Some("Grok 4.7".to_string()));
+        agent.session.models.reasoning_effort =
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High);
+        agent.session.set_yolo_mode_for_test(true);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 8 && prompt.height > 2,
+            "main composer must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let bottom_row: String = (stroke.left..=stroke.right)
+            .filter_map(|x| {
+                buf.cell((x, stroke.bottom))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        let caption = "Grok 4.7 (high) · always-approve";
+        assert!(
+            bottom_row.contains(caption),
+            "bottom caption must be `{caption}`; bottom row: {bottom_row}\n{text}"
+        );
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.bottom, theme.gray);
+        assert!(
+            !yellow_copy,
+            "the bottom right still shows the six-column yellow word `[Copy]` next to `{caption}`. AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) at the bottom right of the main composer, next to the mode caption. yellow `[Copy]` on that row: {yellow_copy}; bottom row: {bottom_row}"
+        );
+    }
+
+    /// `[`, copy glyph, `]` on one stroke row, inset from both corners.
+    fn bracketed_copy_on_stroke_row(buf: &Buffer, stroke: &PromptStroke, y: u16) -> bool {
+        let glyph = crate::glyphs::copy_icon();
+        let last = stroke.right.saturating_sub(2);
+        let mut x = stroke.left.saturating_add(2);
+        while x.saturating_add(2) <= last {
+            let symbols = ["[", glyph, "]"];
+            let visible = symbols.iter().enumerate().all(|(i, symbol)| {
+                buf.cell((x + i as u16, y))
+                    .is_some_and(|cell| cell.symbol() == *symbol)
+            });
+            if visible {
+                return true;
+            }
+            x = x.saturating_add(1);
+        }
+        false
+    }
+
+    /// Main composer on DOGE. Served model Grok 4.7, reasoning high,
+    /// always-approve on, plan mode off. The bottom row contains
+    /// `Grok 4.7 (high) · always-approve`. That bottom row contains no
+    /// six-column `[Copy]` and no three-column `[`, copy glyph, `]`.
+    /// The copy control is three columns, `[`, the copy glyph, `]`,
+    /// inset from the white stroke on the top of the Operator box,
+    /// fully visible.
+    #[test]
+    fn main_composer_copy_control_is_on_the_top_stroke_and_the_bottom_row_keeps_the_caption() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.plan_mode_pending = None;
+        agent.session_mode_pending = None;
+        agent
+            .session
+            .models
+            .set_served_model_name(Some("Grok 4.7".to_string()));
+        agent.session.models.reasoning_effort =
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High);
+        agent.session.set_yolo_mode_for_test(true);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 8 && prompt.height > 2,
+            "main composer must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_right = buf
+            .cell((stroke.right, stroke.top))
+            .expect("top-right prompt stroke");
+        assert_eq!(
+            top_right.symbol(),
+            "\u{2510}",
+            "the copy control stays inset from the white stroke; the top-right corner stays the stroke"
+        );
+        assert_eq!(top_right.fg, white, "Operator box stroke is white");
+
+        let owed = "the copy control is three columns, `[`, the copy glyph, `]`, inset from the white stroke on the top of the Operator box, fully visible. The bottom row contains `Grok 4.7 (high) · always-approve` and contains no six-column `[Copy]` and no three-column copy control";
+        let on_top = bracketed_copy_on_stroke_row(&buf, &stroke, stroke.top);
+        assert!(
+            on_top,
+            "owed: {owed}. The top stroke does not show that inset control.\n{text}"
+        );
+        let bottom_row: String = (stroke.left..=stroke.right)
+            .filter_map(|x| {
+                buf.cell((x, stroke.bottom))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        let caption = "Grok 4.7 (high) · always-approve";
+        assert!(
+            bottom_row.contains(caption),
+            "owed: {owed}. Bottom row: {bottom_row}\n{text}"
+        );
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.bottom, theme.gray);
+        let on_bottom = bracketed_copy_on_stroke_row(&buf, &stroke, stroke.bottom);
+        assert!(
+            !yellow_copy && !on_bottom,
+            "owed: {owed}. yellow `[Copy]` on the bottom row: {yellow_copy}; three-column copy control on the bottom row: {on_bottom}; bottom row: {bottom_row}"
+        );
+    }
+
+    /// Plan-approval screen from the 11:16 shot (`Plan ready. Side panel open`).
+    /// Footer text is `approve | comment | revise | exit`. Every side of the
+    /// prompt stroke is `Rgb(255, 255, 255)`. Left, top, and right are already
+    /// white. The bottom rule does not meet the bottom-right corner because
+    /// the status row sits on it.
+    #[test]
+    fn plan_approval_prompt_stroke_is_white_on_every_side() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.feedback_active()),
+            "file-backed approval sets feedback_active() on Plan ready. Side panel open"
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "this is the side-panel approval screen:\n{text}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "footer must read approve | comment | revise | exit; missing {needle}:\n{text}"
+            );
+        }
+
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "plan approval prompt must have a painted area; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_left = buf
+            .cell((stroke.left, stroke.top))
+            .expect("top-left stroke");
+        assert_eq!(top_left.symbol(), "\u{250c}");
+        assert_eq!(top_left.fg, white, "top stroke is white");
+        let top_right = buf
+            .cell((stroke.right, stroke.top))
+            .expect("top-right stroke");
+        assert_eq!(top_right.symbol(), "\u{2510}");
+        assert_eq!(top_right.fg, white, "top-right stroke is white");
+        let left_y = (stroke.top + 1..stroke.bottom)
+            .find(|&y| {
+                buf.cell((stroke.left, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{2502}")
+            })
+            .expect("left stroke");
+        let left_side = buf.cell((stroke.left, left_y)).expect("left stroke cell");
+        assert_eq!(left_side.fg, white, "left stroke is white");
+        let right_side = buf.cell((stroke.right, left_y)).expect("right stroke cell");
+        assert_eq!(right_side.symbol(), "\u{2502}");
+        assert_eq!(right_side.fg, white, "right stroke is white");
+
+        let lower_left = buf.cell((stroke.left, stroke.bottom));
+        assert!(
+            lower_left.is_some_and(|cell| cell.symbol() == "\u{2514}" && cell.fg == white),
+            "the approval prompt's lower-left cell is └ and white"
+        );
+        let mut broken = None;
+        let mut x = stroke.right;
+        while x > stroke.left.saturating_add(1) {
+            x -= 1;
+            let Some(cell) = buf.cell((x, stroke.bottom)) else {
+                broken = Some((x, "?".to_string(), Color::Reset));
+                break;
+            };
+            if cell.symbol() != "\u{2500}" || cell.fg != white {
+                broken = Some((x, cell.symbol().to_string(), cell.fg));
+                break;
+            }
+        }
+        let corner = buf.cell((stroke.right, stroke.bottom));
+        let corner_white =
+            corner.is_some_and(|cell| cell.symbol() == "\u{2518}" && cell.fg == white);
+        assert!(
+            broken.is_none() && corner_white,
+            "the bottom rule does not meet the bottom-right corner because the status row sits on it (Grok 4.7 (high) · plan approval · always-approve); every side of the prompt stroke must be Rgb(255, 255, 255). first break at {broken:?}"
+        );
+    }
+
+    /// Characters typed into a planning input paint inside that input, at the
+    /// caret. They do not paint in another region. The Operator typed `BBBBB`
+    /// and could not see it where they were typing. The first row shows those
+    /// glyphs in `text_primary` at the caret. After the text wraps, the second
+    /// row stays `text_primary` inside that same input. A first row whose
+    /// glyphs are missing, the wrong color, or outside that input fails.
+    #[test]
+    fn planning_input_paints_typed_text_at_the_caret() {
+        use crate::theme::{Theme, cache};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let body = theme.text_primary;
+        let owed = "characters typed into a planning input paint inside that input, at the caret. They do not paint in another region";
+
+        fn interior(prompt: Rect) -> Rect {
+            Rect {
+                x: prompt.x.saturating_add(1),
+                y: prompt.y.saturating_add(1),
+                width: prompt.width.saturating_sub(2),
+                height: prompt.height.saturating_sub(2),
+            }
+        }
+
+        fn covers(rect: Rect, x: u16, y: u16) -> bool {
+            x >= rect.x
+                && y >= rect.y
+                && x < rect.x.saturating_add(rect.width)
+                && y < rect.y.saturating_add(rect.height)
+        }
+
+        fn find_run(buf: &Buffer, area: Rect, needle: &str) -> Option<(u16, u16)> {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return None;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched {
+                        return Some((xs[i], y));
+                    }
+                }
+            }
+            None
+        }
+
+        fn run_outside(buf: &Buffer, area: Rect, input: Rect, needle: &str) -> bool {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return false;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched && !covers(input, xs[i], y) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        fn assert_body(
+            buf: &Buffer,
+            x: u16,
+            y: u16,
+            needle: &str,
+            body: ratatui::style::Color,
+            where_: &str,
+        ) {
+            for (i, ch) in needle.chars().enumerate() {
+                let cell = buf
+                    .cell((x.saturating_add(i as u16), y))
+                    .unwrap_or_else(|| panic!("{where_}: missing {ch}"));
+                assert_eq!(
+                    cell.symbol(),
+                    ch.to_string(),
+                    "{where_}: glyph {ch} is missing from the planning input"
+                );
+                assert_eq!(
+                    cell.fg, body,
+                    "{where_}: glyph {ch} is the wrong color. Body color is text_primary, got {:?}",
+                    cell.fg
+                );
+            }
+        }
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+
+        let one_row = "BBBBB";
+        agent.prompt.set_text(one_row);
+        agent.prompt.set_cursor(one_row.len());
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: {owed}. planning input must have a painted area; got {prompt:?}\n{text}"
+        );
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("prompt stroke");
+        assert_eq!(top_left.symbol(), "\u{250c}");
+        assert_eq!(
+            top_left.fg, theme.prompt_border_active,
+            "the planning prompt stroke stays white"
+        );
+        let box_in = interior(prompt);
+        let Some((x, y)) = find_run(&buf, box_in, one_row) else {
+            panic!(
+                "owed: {owed}. first row glyphs are missing from the planning input at the caret:\n{text}"
+            );
+        };
+        assert_body(&buf, x, y, one_row, body, "first row");
+        let caret_x = x.saturating_add(one_row.chars().count() as u16);
+        assert!(
+            covers(box_in, caret_x, y),
+            "owed: {owed}. the caret cell after {one_row} is outside the planning input ({caret_x}, {y}) prompt {prompt:?}"
+        );
+        let screen = Rect::new(0, 0, 100, 40);
+        assert!(
+            !run_outside(&buf, screen, prompt, one_row),
+            "owed: {owed}. {one_row} painted outside the planning input:\n{text}"
+        );
+
+        let marker = "SECONDROW";
+        let wrapped = format!("{}\n{marker}", "B".repeat(130));
+        agent.prompt.set_text(&wrapped);
+        agent.prompt.set_cursor(wrapped.len());
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        let box_in = interior(prompt);
+        let Some((first_x, first_y)) = find_run(&buf, box_in, "BBBBB") else {
+            panic!(
+                "owed: {owed}. first row glyphs are missing, the wrong color, or outside that input:\n{text}"
+            );
+        };
+        assert_body(&buf, first_x, first_y, "BBBBB", body, "wrapped first row");
+        let second_y = first_y.saturating_add(1);
+        assert!(
+            covers(box_in, first_x, second_y),
+            "owed: {owed}. the second row is outside the planning input"
+        );
+        let second_white = (box_in.x..box_in.x.saturating_add(box_in.width)).any(|x| {
+            buf.cell((x, second_y)).is_some_and(|cell| {
+                (cell.symbol() == "B" || cell.symbol() == "S") && cell.fg == body
+            })
+        });
+        assert!(
+            second_white,
+            "owed: {owed}. the second row must stay text_primary inside the planning input:\n{text}"
+        );
+        let Some((mark_x, mark_y)) = find_run(&buf, box_in, marker) else {
+            panic!(
+                "owed: {owed}. the second row must stay text_primary inside the planning input. {marker} is missing:\n{text}"
+            );
+        };
+        assert!(
+            mark_y > first_y,
+            "owed: {owed}. {marker} must wrap onto a later row inside the planning input. first row y={first_y}, marker y={mark_y}"
+        );
+        assert_body(&buf, mark_x, mark_y, marker, body, "second row");
+        let second_caret_x = mark_x.saturating_add(marker.chars().count() as u16);
+        assert!(
+            covers(box_in, second_caret_x, mark_y),
+            "owed: {owed}. the caret on the second row is outside the planning input"
+        );
+        assert!(
+            !run_outside(&buf, screen, prompt, "BBBBB"),
+            "owed: {owed}. first row glyphs painted outside the planning input:\n{text}"
+        );
+        assert!(
+            !run_outside(&buf, screen, prompt, marker),
+            "owed: {owed}. second row glyphs painted outside the planning input:\n{text}"
         );
     }
 
@@ -6359,10 +7917,11 @@ mod status_credits_meter_tests {
         );
     }
 
-    /// Included used percent is 28. The status row paints `limits 28%` and
-    /// arms a hit rectangle. Hover on that rectangle shows `72% left`.
-    /// The row and the hover do not paint the 15-minute window, the 24-hour
-    /// window, business, personal, SuperGrok period, or behind linear burn.
+    /// Included used percent is 28. The status row paints percent remaining
+    /// as `limits 72%` and arms a hit rectangle. It does not paint `limits 28%`.
+    /// Hover on that rectangle shows `72% left`. The row and the hover do not
+    /// paint the 15-minute window, the 24-hour window, business, personal,
+    /// SuperGrok period, or behind linear burn.
     #[test]
     fn status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining() {
         use crate::views::credit_bar::SamplingIdentityKind;
@@ -6385,8 +7944,8 @@ mod status_credits_meter_tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            row.contains("limits 28%"),
-            "status row must paint `limits 28%` when included used percent is 28:\n{row}\nfull:\n{text}"
+            row.contains("limits 72%") && !row.contains("limits 28%"),
+            "status row must paint percent remaining `limits 72%` when included used percent is 28, not `limits 28%`:\n{row}\nfull:\n{text}"
         );
         let hit = agent
             .hit_credits
@@ -6443,6 +8002,1036 @@ mod status_credits_meter_tests {
         );
         forbid(&row, "status row");
         forbid(&hover, "hover");
+    }
+
+    /// Included used percent is 8. The status row paints `limits 92%`.
+    /// That chip is cyan. Operator green stays on the rail and the caret.
+    #[test]
+    #[serial_test::serial]
+    fn green_accent_is_only_on_words_the_operator_said() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        use ratatui::style::Color;
+
+        let _theme_guard = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin");
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 8.0,
+            effective_usage_pct: 8.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+
+        let label = "limits 92%";
+        let owed = "Operator green is not painted on a line the Operator did not write";
+        let start = find_limits_span(&buf, label);
+        assert!(
+            start.is_some(),
+            "{owed}: the status row must paint `{label}` when included used percent is 8"
+        );
+        let (x0, y) = start.expect("limits 92%");
+        for (i, ch) in label.chars().enumerate() {
+            let x = x0 + u16::try_from(i).expect("span index");
+            let cell = buf.cell((x, y)).expect("limits 92% cell");
+            assert_eq!(
+                cell.symbol(),
+                ch.to_string(),
+                "{owed}: `{label}` must be contiguous cells"
+            );
+            assert_ne!(cell.fg, theme.accent_user, "{owed}");
+            assert_ne!(cell.fg, Color::Rgb(0, 255, 0), "{owed}");
+            assert_eq!(cell.fg, theme.accent_system, "{owed}");
+        }
+    }
+
+    fn find_limits_span(buf: &Buffer, label: &str) -> Option<(u16, u16)> {
+        let needle: Vec<char> = label.chars().collect();
+        for y in 0..buf.area.height {
+            let mut chars: Vec<(u16, char)> = Vec::new();
+            for x in 0..buf.area.width {
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                for ch in cell.symbol().chars() {
+                    chars.push((x, ch));
+                }
+            }
+            let flat: Vec<char> = chars.iter().map(|(_, ch)| *ch).collect();
+            if let Some(index) = flat
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+            {
+                return Some((chars[index].0, y));
+            }
+        }
+        None
+    }
+
+    /// Included used percent is 10. The status row paints percent remaining
+    /// as `limits 90%`. It does not paint `limits 10%`. Hover on that
+    /// rectangle shows `90% left`.
+    #[test]
+    fn status_row_paints_limits_90_percent_remaining_when_included_usage_is_10_percent() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 10.0,
+            effective_usage_pct: 10.0,
+            included_usage_known: true,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..CreditBalance::default()
+        });
+
+        let text = draw(&mut agent);
+        let row = text
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            row.contains("limits 90%") && !row.contains("limits 10%"),
+            "status row must paint percent remaining `limits 90%` when included used percent is 10, not `limits 10%`:\n{row}\nfull:\n{text}"
+        );
+        let hit = agent
+            .hit_credits
+            .rect
+            .expect("status row must arm a hit rectangle for the limits chip");
+        let forbid = |painted: &str, which: &str| {
+            let forbidden = [
+                "behind linear burn",
+                "15m",
+                "24h",
+                "business",
+                "personal",
+                "SuperGrok period",
+            ];
+            let found: Vec<&str> = forbidden
+                .into_iter()
+                .filter(|token| painted.contains(token))
+                .collect();
+            assert!(
+                found.is_empty(),
+                "{which} must not paint {found:?}:\n{painted}"
+            );
+        };
+        forbid(&row, "status row");
+
+        let _ = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            agent.hit_credits.hovered,
+            "moving onto the limits chip must hover that hit rectangle"
+        );
+        let hovered = draw(&mut agent);
+        let hover_row = hovered
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        let hover = if hover_row.contains("90% left") {
+            hover_row.clone()
+        } else {
+            hovered
+                .lines()
+                .find(|line| line.contains("90% left"))
+                .unwrap_or(hover_row.as_str())
+                .to_string()
+        };
+        assert!(
+            hover.contains("90% left"),
+            "hover must show `90% left` when included used percent is 10:\n{hover}\nrow:\n{hover_row}"
+        );
+        forbid(&row, "status row");
+        forbid(&hover, "hover");
+    }
+
+    /// The header paints percent remaining for the sending session's stored
+    /// included used percent. 37 used is `limits 63%`. 10 used is `limits 90%`.
+    /// A missing percent stays `Limits and Credits`. It does not invent
+    /// `limits 0%`, `$0`, or the dollar-credits figure.
+    #[test]
+    #[serial_test::serial]
+    fn header_paints_limits_remaining_for_each_included_used_percent() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-remaining";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header.personal.session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-header-personal".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: "u-header-personal".into(),
+                usage_pct: Some(37.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: Some(7841),
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "limits 63%");
+        assert!(!label.contains("limits 37%"));
+        assert!(!label.contains("$78.41"));
+        assert!(!label.contains("limits 0%"));
+        assert!(!label.contains("$0"));
+
+        doc.identities[0].usage_pct = Some(10.0);
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot 10");
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "limits 90%");
+        assert!(!label.contains("limits 10%"));
+        assert!(!label.contains("$78.41"));
+
+        doc.identities[0].usage_pct = None;
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("snapshot unread");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "Limits and Credits");
+        assert!(!label.contains("limits 0%"));
+        assert!(!label.contains("$0"));
+        assert!(!label.contains("$78.41"));
+    }
+
+    /// When the personal row's pollOutcome is `reauth`, the header chip
+    /// contains `grok-oss login`. A usage_pct of 10, while the next request
+    /// draws that included period, paints `limits 90%` and does not contain
+    /// `grok-oss login`. pollOutcome `network` does not contain `grok-oss login`.
+    #[test]
+    #[serial_test::serial]
+    fn header_says_grok_oss_login_when_the_personal_refresh_token_is_rejected() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-reauth";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-personal-reauth-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-reauth".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-header-reauth".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: "u-header-reauth".into(),
+                usage_pct: Some(10.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: "reauth".to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let chip = || {
+            super::l1_credits_chip_label(
+                crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+                None,
+                false,
+            )
+        };
+        let reauth = chip();
+        assert!(
+            reauth.contains("grok-oss login"),
+            "when pollOutcome is reauth the header chip must contain `grok-oss login`:\n{reauth}"
+        );
+
+        doc.identities[0].poll_outcome = xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned();
+        doc.identities[0].usage_pct = Some(10.0);
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot 10");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "the usage_pct 10 fixture draws included SuperGrok period limits"
+        );
+        let remaining = chip();
+        assert_eq!(remaining, "limits 90%");
+        assert!(
+            !remaining.contains("grok-oss login"),
+            "usage_pct 10 must paint `limits 90%` and must not contain `grok-oss login`:\n{remaining}"
+        );
+
+        doc.identities[0].poll_outcome = xai_grok_shell::auth::POLL_OUTCOME_NETWORK.to_owned();
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("snapshot network");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let network = chip();
+        assert!(
+            !network.contains("grok-oss login"),
+            "pollOutcome network must not contain `grok-oss login`:\n{network}"
+        );
+    }
+
+    /// A hard-expired personal access token whose poll outcome is reauth
+    /// makes the header chip contain `grok-oss login`. A live business row
+    /// at 100 percent used must not paint `limits 0%`. Personal usage of
+    /// 10 percent must not paint `limits 90%`.
+    #[test]
+    #[serial_test::serial]
+    fn header_chip_says_grok_oss_login_when_the_personal_access_token_is_hard_expired_and_poll_is_reauth()
+     {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-reauth-expired";
+        let personal_id = "u-header-reauth-expired";
+        let business_id = "team-header-reauth-expired";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-personal-reauth-expired-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(expired),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-business-reauth-expired-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-reauth-expired-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: personal_id.into(),
+                usage_pct: Some(10.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: "reauth".to_owned(),
+            });
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: business_id.into(),
+                usage_pct: Some(100.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let chip = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert!(
+            chip.contains("grok-oss login"),
+            "when the personal access token is hard-expired and poll outcome is reauth the header chip must contain `grok-oss login`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 0%"),
+            "the chip must not contain `limits 0%`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 90%"),
+            "the chip must not contain `limits 90%`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 100%"),
+            "the chip must not contain `limits 100%`:\n{chip}"
+        );
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+    }
+
+    const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
+    const CELL_TEAM_TOKEN: &str = "tok-team-cell";
+    const CELL_PERSONAL_ID: &str = "u-personal-cell";
+    const CELL_BUSINESS_ID: &str = "team-cell";
+    const CELL_PERSONAL_PCT: f64 = 28.0;
+    const CELL_BUSINESS_PCT: f64 = 41.0;
+    const CELL_PERSONAL_CENTS: i64 = 8_765;
+    const CELL_BUSINESS_CENTS: i64 = 2_199;
+    const CELL_CONSOLE_CENTS: i64 = 15_420;
+    const CELL_POSTPAID_CENTS: i64 = 4_703;
+    const CELL_POSTPAID_CACHE_CENTS: i64 = 44_297;
+
+    /// Process caches are crate-global. Drop clears the decoys these tests
+    /// seed so a later serial test does not read them as a live meter.
+    struct FourMeterCellCacheGuard;
+
+    impl Drop for FourMeterCellCacheGuard {
+        fn drop(&mut self) {
+            xai_grok_shell::auth::clear_included_billing_cache();
+            xai_grok_shell::auth::clear_console_team_prepaid_cache();
+            xai_grok_shell::auth::clear_console_team_postpaid_cache();
+        }
+    }
+
+    fn seed_four_meter_cells(home: &std::path::Path) -> FourMeterCellCacheGuard {
+        xai_grok_shell::auth::clear_included_billing_cache();
+        xai_grok_shell::auth::clear_console_team_prepaid_cache();
+        xai_grok_shell::auth::clear_console_team_postpaid_cache();
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::four-meter-chip";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: CELL_PERSONAL_TOKEN.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: CELL_PERSONAL_ID.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(CELL_PERSONAL_ID.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: CELL_TEAM_TOKEN.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-team-cell".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(CELL_BUSINESS_ID.into()),
+                team_id: Some(CELL_BUSINESS_ID.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let identity = |identity_id: &str, usage_pct: f64, cents: i64| {
+            xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: identity_id.to_owned(),
+                usage_pct: Some(usage_pct),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: Some(cents),
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            }
+        };
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities.push(identity(
+            CELL_PERSONAL_ID,
+            CELL_PERSONAL_PCT,
+            CELL_PERSONAL_CENTS,
+        ));
+        doc.identities.push(identity(
+            CELL_BUSINESS_ID,
+            CELL_BUSINESS_PCT,
+            CELL_BUSINESS_CENTS,
+        ));
+        doc.management = Some(xai_grok_shell::auth::LimitsSnapshotManagement {
+            team_id: Some("mgmt-cell-decoy".into()),
+            prepaid_cents: Some(CELL_CONSOLE_CENTS),
+            billing_credits_cents: Some(CELL_POSTPAID_CENTS),
+            ..Default::default()
+        });
+        xai_grok_shell::auth::write_limits_snapshot_file(home, &doc).expect("snapshot");
+        xai_grok_shell::auth::remember_supergrok_dollar_credits(
+            CELL_BUSINESS_ID,
+            CELL_CONSOLE_CENTS,
+        );
+        xai_grok_shell::auth::seed_console_team_prepaid_cache(
+            "mgmt-cell-decoy",
+            CELL_CONSOLE_CENTS,
+        );
+        FourMeterCellCacheGuard
+    }
+
+    fn assert_four_snapshot_values_still_stored(home: &std::path::Path) {
+        let doc = xai_grok_shell::auth::read_limits_snapshot_file(home).expect("snapshot stored");
+        let personal = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_PERSONAL_ID)
+            .expect("personal row");
+        let business = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_BUSINESS_ID)
+            .expect("business row");
+        assert_eq!(personal.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_eq!(personal.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_eq!(business.usage_pct, Some(CELL_BUSINESS_PCT));
+        assert_eq!(business.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        let management = doc.management.expect("management meters stay stored");
+        assert_eq!(management.prepaid_cents, Some(CELL_CONSOLE_CENTS));
+        assert_eq!(management.billing_credits_cents, Some(CELL_POSTPAID_CENTS));
+    }
+
+    fn chip_label(balance_pct: f64) -> String {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        let balance = CreditBalance {
+            usage_pct: balance_pct,
+            effective_usage_pct: balance_pct,
+            included_usage_known: true,
+            prepaid_balance_cents: Some(1_250),
+            ..CreditBalance::default()
+        };
+        super::l1_credits_chip_label(
+            SamplingIdentityKind::SuperGrokSession,
+            Some(&balance),
+            false,
+        )
+    }
+
+    /// Personal limits paint that row's percent, not the other balance.
+    #[test]
+    #[serial_test::serial]
+    fn personal_limits_chip_paints_that_rows_percent() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalLimits,
+        )
+        .expect("personal limits");
+        let label = chip_label(99.0);
+        assert_eq!(label, "limits 72%");
+        assert!(!label.contains("limits 28%"));
+        assert!(!label.contains("limits 99%"));
+        assert!(!label.contains("limits 41%"));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Personal credits paint that row's dollar cents and leave `use_console` false.
+    #[test]
+    #[serial_test::serial]
+    fn personal_credits_chip_paints_that_rows_dollar_cents_and_leaves_use_console_false() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalCredits,
+        )
+        .expect("personal credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$87.65");
+        assert!(!label.contains("$21.99"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+        );
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Personal credits of 7841 cents paint `$78.41` through the chip label.
+    /// `use_console` stays false. This is not the 8765-cent fixture.
+    #[test]
+    #[serial_test::serial]
+    fn personal_credits_chip_paints_7841_cents_as_78_dollars_and_41_cents() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        let mut doc =
+            xai_grok_shell::auth::read_limits_snapshot_file(home.path()).expect("snapshot");
+        {
+            let personal = doc
+                .identities
+                .iter_mut()
+                .find(|row| row.identity_id == CELL_PERSONAL_ID)
+                .expect("personal row");
+            personal.dollar_credits_cents = Some(7_841);
+        }
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("7841 cents");
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalCredits,
+        )
+        .expect("personal credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$78.41");
+        assert!(!label.contains("$87.65"));
+        assert!(!label.contains("$21.99"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+        );
+    }
+
+    /// Business limits paint that row's percent when a live personal session exists.
+    #[test]
+    #[serial_test::serial]
+    fn business_limits_chip_paints_that_rows_percent_when_a_live_personal_session_exists() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::BusinessLimits,
+        )
+        .expect("business limits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "limits 59%");
+        assert!(!label.contains("limits 41%"));
+        assert!(!label.contains("limits 28%"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "Included plus Business still draws included SuperGrok period limits"
+        );
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business included usage at 100 percent and personal included usage at
+    /// 18 percent: the header paints `limits 82%` with no click. The next
+    /// request uses the personal session and included SuperGrok period
+    /// limits. Stock `preferred_method = "api_key"` stays and does not
+    /// select the console key. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn when_business_included_is_fully_used_the_next_request_uses_personal_included_limits() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _xai = xai_grok_test_support::EnvGuard::unset("XAI_API_KEY");
+        let _legacy = xai_grok_test_support::EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let config_text = "[auth]\npreferred_method = \"api_key\"\n";
+        std::fs::write(home.path().join("config.toml"), config_text).expect("stock preferred");
+
+        let personal_token = "personal-session-token-still-included";
+        let business_token = "business-session-token-fully-used";
+        let console_key = "console-key-not-this-switch";
+        let personal_id = "u-fully-used-personal";
+        let business_id = "team-fully-used-business";
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::fully-used-business-switch";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: personal_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: business_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-fully-used-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: personal_id.into(),
+                usage_pct: Some(18.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: business_id.into(),
+                usage_pct: Some(100.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("usage percents");
+
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: Some(xai_grok_shell::auth::SupergrokIdentityPin::Business),
+            },
+        )
+        .expect("business included pin");
+
+        let mut config = xai_grok_shell::sampling::SamplerConfig {
+            api_key: Some(business_token.into()),
+            failover_api_keys: vec![console_key.into()],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(business_token.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        let balance = CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        };
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            Some(&balance),
+            false,
+        );
+        assert_eq!(label, "limits 82%");
+
+        xai_grok_shell::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(personal_token));
+        assert_eq!(config.session_identity_key.as_deref(), Some(personal_token));
+        assert_ne!(config.api_key.as_deref(), Some(business_token));
+        assert_ne!(config.api_key.as_deref(), Some(console_key));
+        assert_ne!(config.session_identity_key.as_deref(), Some(business_token));
+        assert_ne!(config.session_identity_key.as_deref(), Some(console_key));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::Included)
+        );
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(xai_grok_shell::auth::SupergrokIdentityPin::Personal)
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "the switch stays on the SuperGrok session host: {}",
+            config.base_url
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).expect("config stays"),
+            config_text
+        );
+    }
+
+    /// Billing `creditUsagePercent` 100 on business and 18 on personal, with
+    /// no snapshot `usage_pct`: the header paints `limits 82%`. The next
+    /// request uses the personal session and included SuperGrok period
+    /// limits. Stock `preferred_method = "api_key"` does not select the
+    /// console key. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn when_billing_credit_usage_percent_is_100_and_18_the_chip_shows_limits_82_percent() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _xai = xai_grok_test_support::EnvGuard::unset("XAI_API_KEY");
+        let _legacy = xai_grok_test_support::EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        xai_grok_shell::auth::clear_included_poll_history();
+        let config_text = "[auth]\npreferred_method = \"api_key\"\n";
+        std::fs::write(home.path().join("config.toml"), config_text).expect("stock preferred");
+
+        let personal_token = "personal-session-token-billing-poll";
+        let business_token = "business-session-token-billing-poll";
+        let console_key = "console-key-not-this-billing-poll";
+        let personal_id = "u-billing-poll-personal";
+        let business_id = "team-billing-poll-business";
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::billing-poll-included-switch";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: personal_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: business_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-billing-poll-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let business_billing: xai_grok_shell::extensions::billing::BillingConfigResponse =
+            serde_json::from_str(r#"{"config":{"creditUsagePercent":100.0}}"#)
+                .expect("business billing");
+        let personal_billing: xai_grok_shell::extensions::billing::BillingConfigResponse =
+            serde_json::from_str(r#"{"config":{"creditUsagePercent":18.0}}"#)
+                .expect("personal billing");
+        let (business_pct, _) = xai_grok_shell::extensions::billing::included_usage_and_period_end(
+            business_billing.config.as_ref().expect("business config"),
+        );
+        let (personal_pct, _) = xai_grok_shell::extensions::billing::included_usage_and_period_end(
+            personal_billing.config.as_ref().expect("personal config"),
+        );
+        let business_pct = business_pct.expect("business creditUsagePercent");
+        let personal_pct = personal_pct.expect("personal creditUsagePercent");
+        assert_eq!(business_pct, 100.0);
+        assert_eq!(personal_pct, 18.0);
+        xai_grok_shell::auth::record_included_poll_now(business_id, business_pct, None, None);
+        xai_grok_shell::auth::record_included_poll_now(personal_id, personal_pct, None, None);
+        xai_grok_shell::auth::clear_included_billing_cache();
+
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: Some(xai_grok_shell::auth::SupergrokIdentityPin::Business),
+            },
+        )
+        .expect("business included pin");
+
+        let mut config = xai_grok_shell::sampling::SamplerConfig {
+            api_key: Some(business_token.into()),
+            failover_api_keys: vec![console_key.into()],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(business_token.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        let balance = CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        };
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            Some(&balance),
+            false,
+        );
+        assert_eq!(label, "limits 82%");
+        assert!(!label.contains("$78.41"));
+
+        xai_grok_shell::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(personal_token));
+        assert_eq!(config.session_identity_key.as_deref(), Some(personal_token));
+        assert_ne!(config.api_key.as_deref(), Some(business_token));
+        assert_ne!(config.api_key.as_deref(), Some(console_key));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::Included)
+        );
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(xai_grok_shell::auth::SupergrokIdentityPin::Personal)
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "the switch stays on the SuperGrok session host: {}",
+            config.base_url
+        );
+        xai_grok_shell::auth::clear_included_poll_history();
+    }
+
+    /// Business credits paint that row's dollar cents, not team postpaid or console prepaid.
+    #[test]
+    #[serial_test::serial]
+    fn business_credits_chip_paints_that_rows_dollar_cents_not_team_postpaid_or_console_prepaid() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::seed_console_team_postpaid_cache(
+            xai_grok_shell::auth::ConsoleTeamPostpaidPreview {
+                team_id: "mgmt-cell-decoy".into(),
+                period_total_cents: 82_371,
+                oauth_class_cents: 0,
+                api_class_cents: 0,
+                other_class_cents: 0,
+                default_credits_cents: None,
+                default_credits_issued_cents: None,
+                billing_cycle_year: None,
+                billing_cycle_month: None,
+                billing_credits_remaining_cents: Some(CELL_POSTPAID_CACHE_CENTS),
+            },
+        );
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::BusinessCredits,
+        )
+        .expect("business credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$21.99");
+        assert!(!label.contains("$87.65"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert_four_snapshot_values_still_stored(home.path());
     }
 }
 
@@ -6687,6 +9276,39 @@ mod header_omits_uptime_and_supergrok_period_chip {
             "task count stays when it is a separate widget:\n{header}"
         );
     }
+
+    /// When the sampling window and the catalog window differ, the header
+    /// names both. AUTO compact gates on the sampling window. Catalog size
+    /// is not implied as that gate.
+    #[test]
+    fn header_names_sampling_and_catalog_windows_when_they_differ() {
+        let mut agent = make_agent();
+        agent.session.models.override_context_window(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 400_000,
+            total: 128_000,
+            ..ContextInfo::default()
+        });
+        agent.session_sampling_window = Some(200_000);
+
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.contains("400K"))
+            .unwrap_or(text.as_str());
+        assert!(
+            header.contains("400K / 200K sampling · 500K catalog"),
+            "header must name the sampling window and the catalog window when they differ:\n{header}"
+        );
+        assert!(
+            !header.contains("400K / 500K"),
+            "header must not paint unlabeled catalog 500K as the only window:\n{header}"
+        );
+        assert!(
+            !header.contains("128K"),
+            "header must not use context_state.total as the only window when the model catalog window is set:\n{header}"
+        );
+    }
 }
 
 /// Forked-session upper-left header chrome. The 11:10 screenshot painted
@@ -6747,7 +9369,7 @@ mod forked_session_status_header_tests {
             .find(|line| line.chars().any(|c| !c.is_whitespace()))
             .unwrap_or("");
         assert!(
-            header.contains("[Dashboard]"),
+            header.contains("[L0]"),
             "forked-session status header must paint the dashboard control; \
              the 11:10 screenshot only had git plus cwd:\n{header}\nfull:\n{text}"
         );
@@ -6819,7 +9441,7 @@ mod forked_session_status_header_tests {
         );
     }
 
-    /// A lone fork (parent gone, no siblings) still paints `[Dashboard]`
+    /// A lone fork (parent gone, no siblings) still paints `[L0]`
     /// on the upper-left status header. Cycle chips are only for a family
     /// of more than one.
     #[test]
@@ -6833,7 +9455,7 @@ mod forked_session_status_header_tests {
             .find(|line| line.chars().any(|c| !c.is_whitespace()))
             .unwrap_or("");
         assert!(
-            header.contains("[Dashboard]"),
+            header.contains("[L0]"),
             "a lone fork must still paint the dashboard control on the status header:\n{header}\nfull:\n{text}"
         );
         assert!(
@@ -7612,6 +10234,165 @@ mod plan_turn_row_revising_copy_tests {
             .join("\n")
     }
 
+    fn draw_agent_like_draw_screen(agent: &mut AgentView, area: Rect, buf: &mut Buffer) {
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+    }
+
+    fn plan_wrap_row_symbols(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> Vec<String> {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn plan_wrap_word_starts(symbols: &[String], word: &str) -> Vec<u16> {
+        let parts: Vec<String> = word.chars().map(|ch| ch.to_string()).collect();
+        if symbols.len() < parts.len() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for start in 0..=symbols.len() - parts.len() {
+            if symbols[start..start + parts.len()] != parts[..] {
+                continue;
+            }
+            let before_ok = start == 0
+                || symbols[start - 1]
+                    .chars()
+                    .all(|ch| !ch.is_ascii_alphanumeric());
+            let end = start + parts.len();
+            let after_ok =
+                end == symbols.len() || symbols[end].chars().all(|ch| !ch.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                hits.push(start as u16);
+            }
+        }
+        hits
+    }
+
+    fn plan_wrap_ends_with_token_fragment(left: &str, token: &str) -> bool {
+        let trimmed = left.trim_end();
+        (4..token.len()).any(|n| trimmed.ends_with(&token[..n]))
+    }
+
+    #[test]
+    fn plan_text_wraps_inside_the_pane_and_is_not_sliced_by_a_second_copy() {
+        let mut agent = make_agent();
+        let plan_line = "AlphabetWrapToken is a whole word that must stay inside the soft plan pane and must not be sliced at the pane edge by a full width session layout.";
+        assert!(
+            plan_line.len() > 80,
+            "plan body line must be longer than 80 characters"
+        );
+        present_new_exit_plan_mode(&mut agent, plan_line);
+        let sentence = "The session queue empty the words must wrap before the plan pane and must not end mid-word under the pane.";
+        let mut session = String::new();
+        while session.chars().count() <= 120 {
+            if !session.is_empty() {
+                session.push(' ');
+            }
+            session.push_str(sentence);
+        }
+        assert!(session.chars().count() > 120);
+        agent
+            .scrollback
+            .push_block(crate::scrollback::RenderBlock::agent_message(session));
+        let revise = "Revise sentence QueEmpTh stays once.";
+        agent.prompt.set_text(revise);
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        draw_agent_like_draw_screen(&mut agent, area, &mut buf);
+        let pane_w =
+            crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(120);
+        let pane_x = 120u16.saturating_sub(pane_w);
+        assert!(pane_w > 0 && pane_x > 0, "soft plan pane should be open");
+        let mut token_in_pane = false;
+        let mut revise_in_pane = false;
+        let mut revise_left = false;
+        let mut left_blob = String::new();
+        let mut painted = String::new();
+        for y in 0..area.height {
+            let symbols = plan_wrap_row_symbols(&buf, y, area.width);
+            let row = symbols.concat();
+            painted.push_str(&row);
+            painted.push('\n');
+            let left = symbols[..pane_x as usize].concat();
+            left_blob.push_str(&left);
+            left_blob.push('\n');
+            for x in plan_wrap_word_starts(&symbols, "AlphabetWrapToken") {
+                if x < pane_x {
+                    panic!("AlphabetWrapToken at x {x} < pane_x {pane_x} on row {y}: {row:?}");
+                }
+                token_in_pane = true;
+            }
+            if plan_wrap_ends_with_token_fragment(&left, "AlphabetWrapToken") {
+                panic!("AlphabetWrapToken cut at the pane edge on row {y}: {left:?}");
+            }
+            if let Some(last) = left.split_whitespace().last() {
+                assert!(
+                    last != "que" && last != "emp" && last != "th",
+                    "row {y} left of the pane ends with mid-word fragment {last}: {left:?}"
+                );
+            }
+            let pane_has = plan_wrap_word_starts(&symbols[pane_x as usize..], "QueEmpTh")
+                .is_empty()
+                .eq(&false);
+            if pane_has {
+                revise_in_pane = true;
+            }
+            if plan_wrap_word_starts(&symbols[..pane_x as usize], "QueEmpTh")
+                .is_empty()
+                .eq(&false)
+            {
+                revise_left = true;
+            }
+        }
+        assert!(
+            token_in_pane,
+            "AlphabetWrapToken must appear at x >= {pane_x} as a whole word"
+        );
+        assert!(
+            left_blob.contains("session")
+                || left_blob.contains("queue")
+                || left_blob.contains("wrap"),
+            "session line should paint left of the pane"
+        );
+        assert!(
+            !(revise_in_pane && revise_left),
+            "Revise sentence QueEmpTh stays once. painted in both the plan box and the bottom composer"
+        );
+        assert!(
+            revise_in_pane || painted.contains("Type a revision"),
+            "approval screen should show a prompt input"
+        );
+        assert!(
+            painted.contains("approve | comment | revise | exit"),
+            "footer approve | comment | revise | exit missing:\n{painted}"
+        );
+        let _ = agent.approve_plan();
+        let mut after = ratatui::buffer::Buffer::empty(area);
+        draw_agent_like_draw_screen(&mut agent, area, &mut after);
+        let mut revise_copies = 0usize;
+        for y in 0..area.height {
+            let symbols = plan_wrap_row_symbols(&after, y, area.width);
+            revise_copies += plan_wrap_word_starts(&symbols, "QueEmpTh").len();
+        }
+        assert!(
+            revise_copies <= 1,
+            "approve put the revise sentence in the transcript twice ({revise_copies})"
+        );
+    }
+
     /// After decisive Revise, idle turn-status paints Revising plan..., not
     /// the parked wait or idle Plan written re-arm.
     #[test]
@@ -7678,6 +10459,18 @@ mod plan_turn_row_revising_copy_tests {
         agent.session.state = AgentState::Idle;
 
         let text = draw_screen(&mut agent);
+        assert!(
+            agent.line_viewer.is_none(),
+            "Approve must close the plan side panel:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "Approve must drop Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains("approve | comment | revise | exit"),
+            "Approve must drop the plan footer CTAs:\n{text}"
+        );
         assert!(
             !text.contains(PLAN_IDLE_REVIEW_STATUS),
             "must not re-arm idle Plan written after Approve:\n{text}"
@@ -8100,6 +10893,11 @@ mod nested_l2_overlay_wait_chrome_tests {
 
     #[test]
     fn nested_l2_overlay_wait_names_specialist_elapsed_and_progress() {
+        let _guard = crate::terminal::image::set_protocol_for_test(
+            crate::terminal::image::GraphicsProtocol::Kitty,
+        );
+        crate::terminal::overlay::reset_owner();
+        seed_static_owner(41);
         let mut parent = make_agent();
         parent.insert_test_child("child".into(), Box::new(make_agent()));
         parent.active_subagent = Some("child".into());
@@ -8325,7 +11123,7 @@ mod status_line_draw_tests {
             "a fifth row could only come out of the prompt\n{screen}"
         );
         assert!(
-            find(&buf, "\u{2570}").is_some(),
+            find(&buf, "\u{2514}").is_some(),
             "the prompt keeps its bottom rule\n{screen}"
         );
         assert!(
@@ -8410,5 +11208,661 @@ mod prompt_box_height_tests {
     fn prompt_taller_than_the_window_scrolls_and_does_not_grow_past_the_window() {
         assert_eq!(laid_out_prompt_height(true, 40, 20), 20);
         assert_eq!(laid_out_prompt_height(false, 40, 20), 20);
+    }
+}
+
+/// Red contracts for the status-row credits chip and the prompt corners.
+/// These asserts describe the owed paint. They are red on today's draw.
+#[cfg(test)]
+mod red_status_corners_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use agent_client_protocol as acp;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::session::ContextInfo;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn draw_buf(agent: &mut super::AgentView) -> (Buffer, String) {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (buf, text)
+    }
+
+    fn arm_credits(agent: &mut super::AgentView) {
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+    }
+
+    fn row_symbols(buf: &Buffer, y: u16) -> Vec<String> {
+        (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+            .collect()
+    }
+
+    fn find_on_row(symbols: &[String], label: &str) -> Option<u16> {
+        let needle: Vec<char> = label.chars().collect();
+        let flat: Vec<char> = symbols.iter().flat_map(|symbol| symbol.chars()).collect();
+        flat.windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .map(|index| index as u16)
+    }
+
+    fn has_limits_percent(text: &str) -> bool {
+        text.match_indices("limits ").any(|(index, _)| {
+            let rest = &text[index + "limits ".len()..];
+            let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+            digits > 0 && rest[digits..].starts_with('%')
+        })
+    }
+
+    fn has_header_dollar_figure(text: &str) -> bool {
+        text.lines().any(|line| {
+            line.as_bytes()
+                .windows(2)
+                .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit())
+        })
+    }
+
+    fn paints_credits_chip(text: &str) -> bool {
+        text.contains("Limits and Credits")
+            || has_limits_percent(text)
+            || has_header_dollar_figure(text)
+    }
+
+    /// AgentStatusBar draws left to right in push order. The credits rect
+    /// must start immediately to the right of the context rect, and the
+    /// tasks rect must start immediately to the right of credits. The only
+    /// gap is the three-column status separator. Today the push order is
+    /// context, then tasks, then the switcher, then `[Dashboard]`, then credits.
+    #[test]
+    fn l1_status_row_puts_the_credits_chip_between_the_context_figure_and_tasks() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let sep = crate::views::agent_status::separator(&theme).width() as u16;
+        let mut agent = make_agent();
+        arm_credits(&mut agent);
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        agent.todo.update_todos(vec![TodoItem {
+            content: "one task".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent
+            .hit_context
+            .rect
+            .expect("owed: the L1 status row paints the context figure before the credits chip");
+        let credits = agent
+            .hit_credits
+            .rect
+            .expect("owed: the L1 status row paints the credits chip");
+        let symbols = row_symbols(&buf, context.y);
+        let tasks_label = "tasks 0/1";
+        let tasks_x = find_on_row(&symbols, tasks_label).unwrap_or_else(|| {
+            panic!("owed: the tasks rect is on the status row. row missing {tasks_label:?}\n{text}")
+        });
+        assert_eq!(
+            credits.y, context.y,
+            "owed: the credits chip sits on the same status row as the context figure"
+        );
+        assert_eq!(
+            credits.x,
+            context.x + context.width + sep,
+            "owed: the credits rect starts immediately to the right of the context rect, \
+             with only the three-column status separator between them. \
+             Today the push order is context, then tasks, then the switcher, \
+             then [Dashboard], then credits. \
+             context.x={} context.width={} credits.x={} tasks_x={tasks_x} sep={sep}",
+            context.x,
+            context.width,
+            credits.x
+        );
+        assert_eq!(
+            tasks_x,
+            credits.x + credits.width + sep,
+            "owed: the tasks rect starts immediately to the right of credits, \
+             with only the three-column status separator between them. \
+             credits.x={} credits.width={} tasks_x={tasks_x} sep={sep}",
+            credits.x,
+            credits.width
+        );
+    }
+
+    /// The older order test arms a known included reading (`limits 28%`).
+    /// This fixture does not. The main session is `AgentRole::Root`, a task
+    /// is on the row, the next request draws included SuperGrok period
+    /// limits, and `credit_balance` is still unset. The owed outcome: the
+    /// main session keeps the credits chip between the context figure and
+    /// tasks even when a task is present and the included usage reading is
+    /// missing. The chip text is `Limits and Credits`, not `limits 0%` and
+    /// not `$0`. `use_console` stays false.
+    #[test]
+    #[serial_test::serial]
+    fn l1_with_a_task_and_a_missing_included_reading_still_paints_the_credits_chip_between_context_and_tasks()
+     {
+        let home = tempfile::tempdir().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin");
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(
+            !pins.use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "owed: this fixture's next request draws included SuperGrok period limits"
+        );
+
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let sep = crate::views::agent_status::separator(&theme).width() as u16;
+        let mut agent = make_agent();
+        assert!(
+            agent.child_link().is_none(),
+            "owed: the main session is AgentRole::Root"
+        );
+        assert!(
+            agent.credit_balance.is_none(),
+            "owed: the included usage reading is missing on this main session"
+        );
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        agent.todo.update_todos(vec![TodoItem {
+            content: "one task".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect(
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing",
+        );
+        let credits = agent.hit_credits.rect.expect(
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing. \
+             The chip text is `Limits and Credits`, not `limits 0%` and not `$0`.",
+        );
+        let symbols = row_symbols(&buf, context.y);
+        let row = symbols.concat();
+        let credits_label = "Limits and Credits";
+        let credits_x = find_on_row(&symbols, credits_label).unwrap_or_else(|| {
+            panic!(
+                "owed: the main session keeps the credits chip between the context figure and \
+                 tasks even when a task is present and the included usage reading is missing. \
+                 The chip text is `Limits and Credits`, not `limits 0%` and not `$0`.\n{row}\n{text}"
+            )
+        });
+        let tasks_label = "tasks 0/1";
+        let tasks_x = find_on_row(&symbols, tasks_label).unwrap_or_else(|| {
+            panic!(
+                "owed: a task is present on the main-session status row. row missing \
+                 {tasks_label:?}\n{row}"
+            )
+        });
+        assert!(
+            !row.contains("limits 0%") && !row.contains("$0") && !has_limits_percent(&row),
+            "owed: a missing included reading is the words `Limits and Credits`, \
+             not `limits 0%` and not `$0`.\n{row}"
+        );
+        assert_eq!(
+            credits_x, credits.x,
+            "owed: the painted words `Limits and Credits` are the credits chip"
+        );
+        assert_eq!(
+            credits.y, context.y,
+            "owed: the credits chip sits on the same status row as the context figure"
+        );
+        assert_eq!(
+            credits.x,
+            context.x + context.width + sep,
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing. \
+             context.x={} context.width={} credits.x={} tasks_x={tasks_x} sep={sep}",
+            context.x,
+            context.width,
+            credits.x
+        );
+        assert_eq!(
+            tasks_x,
+            credits.x + credits.width + sep,
+            "owed: the tasks rect starts immediately to the right of the credits chip. \
+             A task on the main session is not a reason to hide the chip. \
+             credits.x={} credits.width={} tasks_x={tasks_x} sep={sep}",
+            credits.x,
+            credits.width
+        );
+    }
+
+    /// A wide L1 status row, with room between the path and the context
+    /// figure, paints `~/Projects/surmount/grok-build`. It does not paint
+    /// `~/P/surmount/grok-build`. The helper that turns `Documents` into `D`
+    /// does not draw this row.
+    #[test]
+    #[serial_test::serial]
+    fn wide_status_row_keeps_the_projects_folder_when_columns_remain() {
+        let home = tempfile::tempdir().expect("temp HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("HOME", home.path());
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.session.cwd = home
+            .path()
+            .join("Projects")
+            .join("surmount")
+            .join("grok-build");
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        assert!(
+            agent.child_link().is_none(),
+            "owed: this is the L1 status row"
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect(
+            "owed: a wide L1 status row paints the context figure to the right of the path",
+        );
+        let symbols = row_symbols(&buf, context.y);
+        let row = symbols.concat();
+        let full = "~/Projects/surmount/grok-build";
+        let shortened = "~/P/surmount/grok-build";
+        let path_x = find_on_row(&symbols, full).unwrap_or_else(|| {
+            panic!(
+                "owed: a wide L1 status row, with room between the path and the context figure, \
+                 paints `{full}`. It does not paint `{shortened}`.\n{row}\n{text}"
+            )
+        });
+        assert!(
+            !row.contains(shortened),
+            "owed: a wide row with columns remaining does not paint `{shortened}`.\n{row}"
+        );
+        let context_label = "120K / 500K";
+        let context_label_x = find_on_row(&symbols, context_label).unwrap_or_else(|| {
+            panic!(
+                "owed: the context figure is on the status row, with room after the path. \
+                 row missing {context_label:?}\n{row}"
+            )
+        });
+        let path_end = path_x + full.chars().count() as u16;
+        assert!(
+            path_end < context_label_x,
+            "owed: columns remain between `{full}` and the context figure. \
+             path_end={path_end} context_x={context_label_x}\n{row}"
+        );
+        assert!(
+            context.x > path_end,
+            "owed: the context figure sits to the right of the full path. \
+             path_end={path_end} context.x={}",
+            context.x
+        );
+    }
+
+    /// An Included pin with no identity, a Team session as the bearer the
+    /// next request sends, and a stored business `usage_pct` of 41, paints
+    /// percent remaining `limits 59%` on the L1 header. The words `Limits
+    /// and Credits` are absent. The personal used percent is not substituted.
+    /// The row does not paint `limits 41%` or `limits 28%`. This draws the
+    /// status row.
+    #[test]
+    #[serial_test::serial]
+    fn header_paints_the_business_percent_when_the_identity_pin_is_unset_and_the_team_session_sends()
+     {
+        let home = tempfile::tempdir().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        xai_grok_shell::auth::clear_process_included_poll_history_only();
+
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-team-bearer";
+        let personal_id = "u-personal-header-decoy";
+        let business_id = "team-header-bearer";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "tok-personal-header-decoy".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "tok-team-header-bearer".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-team-header-bearer".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(header_identity(personal_id, 28.0, 8_765));
+        doc.identities
+            .push(header_identity(business_id, 41.0, 2_199));
+        doc.management = Some(xai_grok_shell::auth::LimitsSnapshotManagement {
+            team_id: Some("mgmt-header-decoy".into()),
+            prepaid_cents: Some(15_420),
+            billing_credits_cents: Some(4_703),
+            ..Default::default()
+        });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("write business percent");
+
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: true,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin with no identity");
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(pins.supergrok_identity.is_none());
+        assert!(
+            !pins.use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "owed: an Included pin draws included SuperGrok period limits"
+        );
+        assert_eq!(
+            xai_grok_shell::auth::active_supergrok_identity_id(home.path()).as_deref(),
+            Some(business_id),
+            "owed: the Team session is the bearer the next request sends"
+        );
+
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        assert!(agent.child_link().is_none());
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect("owed: the L1 status row");
+        let credits = agent
+            .hit_credits
+            .rect
+            .expect("owed: the L1 header paints the included percent");
+        let symbols = row_symbols(&buf, credits.y);
+        let row = symbols.concat();
+        assert_eq!(credits.y, context.y);
+        let label = "limits 59%";
+        let label_x = find_on_row(&symbols, label).unwrap_or_else(|| {
+            panic!(
+                "owed: an Included pin with no identity, a Team session as the bearer, \
+                 and a stored business usage percent of 41, paints percent remaining \
+                 `{label}` on the L1 header. The words `Limits and Credits` are absent. \
+                 The personal used percent is not substituted.\n{row}\n{text}"
+            )
+        });
+        assert_eq!(label_x, credits.x, "owed: `limits 59%` is the credits chip");
+        assert!(
+            !row.contains("Limits and Credits"),
+            "owed: a known business percent remaining is `limits 59%`, not the words `Limits and Credits`.\n{row}"
+        );
+        assert!(
+            !row.contains("limits 28%") && !row.contains("limits 41%"),
+            "owed: the personal used percent is not substituted, and the chip is not the used percent `limits 41%`.\n{row}"
+        );
+        assert!(
+            !row.contains("limits 0%") && !row.contains("$0"),
+            "owed: a stored percent does not become `limits 0%` or `$0`.\n{row}"
+        );
+        for decoy in ["$87.65", "$154.20", "$47.03", "$442.97"] {
+            assert!(
+                !row.contains(decoy),
+                "owed: the included slot does not paint {decoy}. \
+                 That figure is another meter.\n{row}"
+            );
+        }
+        assert!(
+            !xai_grok_shell::auth::limits_pins::load_limits_pins().use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+    }
+
+    fn header_identity(
+        identity_id: &str,
+        usage_pct: f64,
+        dollar_credits_cents: i64,
+    ) -> xai_grok_shell::auth::LimitsSnapshotIdentity {
+        xai_grok_shell::auth::LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: Some(usage_pct),
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: Some(dollar_credits_cents),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+        }
+    }
+
+    /// An L2 draw and an L3 draw, with child_link set, must not contain
+    /// `Limits and Credits`, `limits N%`, or a header dollar figure.
+    /// The main session still paints the chip.
+    #[test]
+    fn nested_l2_and_l3_views_omit_the_header_credits_chip() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut l3 = make_agent();
+        arm_credits(&mut l3);
+        l3.session.cwd = std::path::PathBuf::from("/grok-l3-header");
+        let mut l2 = make_agent();
+        arm_credits(&mut l2);
+        l2.session.cwd = std::path::PathBuf::from("/grok-l2-header");
+        l2.session.session_id = Some(acp::SessionId::new("sess-l2"));
+        l2.insert_test_child("l3".into(), Box::new(l3));
+        let mut main = make_agent();
+        arm_credits(&mut main);
+        main.session.cwd = std::path::PathBuf::from("/grok-l1-header");
+        main.session.session_id = Some(acp::SessionId::new("sess-l1"));
+        main.insert_test_child("l2".into(), Box::new(l2));
+        assert!(
+            main.child_link().is_none(),
+            "the main session is L1 and has no child_link"
+        );
+
+        let (_, main_text) = draw_buf(&mut main);
+        assert!(
+            main.hit_credits.rect.is_some() && paints_credits_chip(&main_text),
+            "owed: the main session still paints the credits chip \
+             (`Limits and Credits`, `limits N%`, or a header dollar figure).\n{main_text}"
+        );
+
+        {
+            let l2 = main.subagent_view_mut("l2").expect("L2 view");
+            assert!(
+                l2.child_link().is_some(),
+                "owed: the L2 draw has child_link set"
+            );
+            let (_, l2_text) = draw_buf(l2);
+            assert!(
+                l2.hit_credits.rect.is_none() && !paints_credits_chip(&l2_text),
+                "owed: an L2 draw with child_link set must not contain \
+                 `Limits and Credits`, `limits N%`, or a header dollar figure. \
+                 Today draw pushes credits for nested views too.\n{l2_text}"
+            );
+        }
+        {
+            let l2 = main.subagent_view_mut("l2").expect("L2 view");
+            let l3 = l2.subagent_view_mut("l3").expect("L3 view");
+            assert!(
+                l3.child_link().is_some(),
+                "owed: the L3 draw has child_link set"
+            );
+            let (_, l3_text) = draw_buf(l3);
+            assert!(
+                l3.hit_credits.rect.is_none() && !paints_credits_chip(&l3_text),
+                "owed: an L3 draw with child_link set must not contain \
+                 `Limits and Credits`, `limits N%`, or a header dollar figure. \
+                 Today draw pushes credits for nested views too.\n{l3_text}"
+            );
+        }
+    }
+
+    /// After the character Y, the prompt's lower-left cell is `└` and the
+    /// row is intact. The prompt does not paint `╭`, `╮`, `╰`, or `╯`.
+    /// Scope is the prompt input, not the view-plan pane.
+    #[test]
+    fn typing_capital_y_keeps_a_straight_lower_left_prompt_corner() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.line_viewer = None;
+        let _ = agent
+            .prompt
+            .handle_key(&KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert_eq!(
+            agent.prompt.text(),
+            "Y",
+            "owed: the character Y is in the prompt input"
+        );
+
+        let (buf, _text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            agent.line_viewer.is_none(),
+            "owed: scope is the prompt input, not the view-plan pane"
+        );
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: the prompt input is open; got {prompt:?}"
+        );
+
+        let rounded = ["\u{256d}", "\u{256e}", "\u{2570}", "\u{256f}"];
+        let mut painted_rounded = Vec::new();
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if let Some(cell) = buf.cell((x, y))
+                    && rounded.contains(&cell.symbol())
+                {
+                    painted_rounded.push(cell.symbol().to_string());
+                }
+            }
+        }
+        assert!(
+            painted_rounded.is_empty(),
+            "owed: after the character Y, the prompt input does not paint \
+             ╭, ╮, ╰, or ╯. The lower-left cell is └ and the row is intact. \
+             Scope is the prompt input, not the view-plan pane. \
+             This draw still paints rounded corners {painted_rounded:?} \
+             because BorderType::Rounded still paints ╭."
+        );
+
+        let bottom = prompt.y.saturating_add(prompt.height).saturating_sub(1);
+        let lower_left = buf
+            .cell((prompt.x, bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            lower_left, "\u{2514}",
+            "owed: after the character Y, the prompt's lower-left cell is └"
+        );
+        let bottom_row: Vec<String> = (prompt.x..prompt.x.saturating_add(prompt.width))
+            .filter_map(|x| buf.cell((x, bottom)).map(|cell| cell.symbol().to_string()))
+            .collect();
+        assert_eq!(
+            bottom_row.len(),
+            prompt.width as usize,
+            "owed: the prompt's lower border row is intact after Y"
+        );
+        assert_eq!(
+            bottom_row.get(1).map(String::as_str),
+            Some("\u{2500}"),
+            "owed: the lower border row stays intact after Y, got {bottom_row:?}"
+        );
+        assert!(
+            !bottom_row.iter().any(|symbol| symbol == "Y"),
+            "owed: Y stays in the prompt text and does not break the lower border row, \
+             got {bottom_row:?}"
+        );
     }
 }

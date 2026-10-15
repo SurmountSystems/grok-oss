@@ -345,7 +345,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+.` (alt: `Ctrl+X`) | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** While a **subagent fullscreen view** is open, the composer is hidden. Root-only chords (`Ctrl+P`, `Ctrl+M`, `Ctrl+R`, `Ctrl+O`, `Ctrl+B`, settings, extensions, Shift+Tab) do nothing. `Ctrl+C` cancels the **child's** turn. `q` / `Esc` closes the view. `Ctrl+Q` still quits (`Ctrl+D` on VS Code family). See [Viewing Subagents in the TUI](16-subagents.md#fullscreen-framed-view-the-child-transcript).
+**Note:** While a **subagent fullscreen view** is open, the L2 floor prompt sends to that L2. The L3 view has no prompt. `q` or `Esc` from the L3 returns to the L2. `q` or `Esc` from the L2 returns to L1. Root-only chords (`Ctrl+P`, `Ctrl+M`, `Ctrl+R`, `Ctrl+O`, `Ctrl+B`, settings, extensions, Shift+Tab) do nothing. `Ctrl+C` cancels the **child's** turn. `Ctrl+Q` still quits (`Ctrl+D` on VS Code family). See [Viewing Subagents in the TUI](16-subagents.md#fullscreen-framed-view-the-child-transcript).
 
 **Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker.
 
@@ -405,6 +405,8 @@ Isolated Preview has a magnifying-glass search control on the title bar, immedia
 
 GNOME All Markup Copy is an image, not the dialog title. Clipboard image paste is an image chip in the Operator box. Isolated Preview must not put that paste into line-viewer search. Paste-chip Enter still sends ([GitHub #114](https://github.com/SurmountSystems/grok-oss/issues/114)).
 
+A collapsed paste chip paints `[Pasted: N lines]`. Enter sends or interjects that body. It does not only expand the chip. Expanding the chip is paste-again or double-click.
+
 - **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. By default (`[ui].follow_up_behavior = "queue"`) those follow-ups run after the current turn ends — and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold and how to send one now). With `"steer"`, the same Enter still shows the row in the queue, then the shell injects it mid-turn at the next tool or model safe gap (see [Configuration](05-configuration.md)).
 - **`Enter` again on the emptied composer** (double-Enter) sends the **top** queued follow-up now.
 - The **send now** chord is **cancel-and-send**: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
@@ -422,6 +424,8 @@ GNOME All Markup Copy is an image, not the dialog title. Clipboard image paste i
 | VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | queue **[Send now]** | Soft interject / send-now (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
 `Ctrl+Enter` interjects when interjection is appropriate, and otherwise inserts a newline (the `Shift+Enter` analog). Interjection is appropriate when a sampler turn is running, the Operator box has text or images, and the target can take `x.ai/interject` (this session, or an open L2 overlay). It is not appropriate when idle, when the composer is empty, or when an L3 specialist overlay is open (specialists stay unbothered). Cancel-and-send is not this chord. Empty `Ctrl+Enter` does not send. Soft interject remaining chords are still `Ctrl+I`, Apple Terminal `Ctrl+O`, VS Code family `Ctrl+L`, the queue **[Send now]** control (plain prompt rows), and empty-composer mid-turn `Enter` on a queued row. A queued `/goal` row is a goal action after **[Send now]**, not an interjected string.
+
+While a turn is running, Enter with text in the L1 Operator box is a soft interject into that turn. Empty Enter does not approve a plan. Enter in the L2 floor prompt sends to that L2.
 
 In session Multiline (`Ctrl+M` / `/multiline`), `Shift+Enter` (or `Alt+Enter`) still sends. Plain `Enter` at the end of the last composer line sends immediately (or interjects if a turn is running). It does not insert a silent extra newline. Plain `Enter` in the middle of a multiline draft still inserts a newline. Empty composer mid-turn with a queued follow-up still force-sends the top row. When `[ui] composer_multiline = false`, Enter and Shift+Enter send or interject and never insert a newline. `Ctrl+Enter` still inserts a newline when interjection is not appropriate, and still interjects when it is. When `[ui] allow_session_multiline = false`, you cannot turn session Multiline on. Plan Preview still inserts a newline on session-Multiline Enter even at the end of the last line; the main Operator box submits there.
 

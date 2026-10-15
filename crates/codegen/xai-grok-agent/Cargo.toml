@@ -17,7 +17,7 @@ minijinja = { version = "2", features = ["custom_syntax"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 regex = { workspace = true }
 serde = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 tracing = { workspace = true }

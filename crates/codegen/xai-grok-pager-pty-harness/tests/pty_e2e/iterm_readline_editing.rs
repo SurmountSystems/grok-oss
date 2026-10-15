@@ -105,12 +105,12 @@ async fn iterm_raw_readline_sequences_edit_picker_and_dashboard_rename() {
         .expect("dashboard open");
     click_visible_text(&mut harness, ROW_TITLE);
     harness
-        .wait_for_text("[Dashboard]", Duration::from_secs(10))
+        .wait_for_text("[L0]", Duration::from_secs(10))
         .expect("row click attached the dashboard overlay");
     harness
         .inject_keys(keys::ESC)
         .expect("close attached dashboard row");
-    wait_for_labels_absent(&mut harness, &["[Dashboard]"], Duration::from_secs(10));
+    wait_for_labels_absent(&mut harness, &["[L0]"], Duration::from_secs(10));
     harness
         .inject_keys(b"\x12")
         .expect("dashboard Ctrl+R rename");

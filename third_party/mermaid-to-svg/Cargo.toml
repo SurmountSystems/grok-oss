@@ -143,8 +143,8 @@
 #    in `iter_mut`/`values_mut` (documented + re-audited in its own Cargo.toml);
 #    `dagre_rust` and `graphlib_rust` contain no `unsafe` (dagre's upstream
 #    `static mut` counter was replaced with an `AtomicUsize` — see its Cargo.toml).
-#  - YAML frontmatter parsing (`src/config.rs`, `src/kanban_diagram.rs`) uses the
-#    workspace `serde_yaml`; it parses in-memory source only (no file/URL refs).
+#  - YAML frontmatter parsing (`src/config.rs`, `src/kanban_diagram.rs`) uses
+#    `serde-saphyr` 1.1.0 and `serde_json::Value`; it parses in-memory source only (no file/URL refs).
 [package]
 name = "mermaid-to-svg"
 version = "0.1.0"
@@ -165,7 +165,8 @@ dagre_rust = { path = "../dagre_rust" }
 graphlib_rust = { path = "../graphlib_rust" }
 unicode-segmentation = "1"
 unicode-width = "0.2"
-serde_yaml = "0.9"
+serde-saphyr = "1.1.0"
+serde_json = "1"
 
 # Clippy lints local/path crates (this vendored crate is one) under the
 # workspace's `-D warnings`. We do not restyle upstream third-party code, so

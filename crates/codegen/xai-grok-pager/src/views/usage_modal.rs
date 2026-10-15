@@ -54,9 +54,13 @@ impl UsageInfoTab {
     }
 
     pub fn from_index(i: usize) -> Self {
-        match Self::ALL.get(i) {
-            Some(&tab) => tab,
-            None => UsageInfoTab::ContextUsage,
+        match i {
+            0 => UsageInfoTab::ContextUsage,
+            1 | 2 => UsageInfoTab::SessionInfo,
+            _ => Self::ALL
+                .get(i)
+                .copied()
+                .unwrap_or(UsageInfoTab::ContextUsage),
         }
     }
 }
@@ -798,10 +802,15 @@ fn allowance_lines(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // "Weekly limit", "Monthly limit", or "Usage", plus the plan name
+    // Unknown period paints "Usage limit". Weekly and monthly keep their labels.
+    let usage_name = if bal.usage_label() == "Usage" {
+        "Usage limit"
+    } else {
+        bal.usage_label()
+    };
     let header = match &state.ctx.subscription_tier {
-        Some(tier) => format!("{} ({tier})", bal.usage_label()),
-        None => bal.usage_label().to_string(),
+        Some(tier) => format!("{usage_name} ({tier})"),
+        None => usage_name.to_string(),
     };
     lines.push(Line::styled(header, header_style(theme)));
     lines.push(Line::default());
@@ -1173,6 +1182,15 @@ mod tests {
             handle_usage_modal_mouse(
                 &mut state,
                 MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                hash_hit.rect.x,
+                hash_hit.rect.y,
+            ),
+            UsageModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(crossterm::event::MouseButton::Left),
                 hash_hit.rect.x,
                 hash_hit.rect.y,
             ),

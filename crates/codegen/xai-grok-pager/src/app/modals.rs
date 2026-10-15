@@ -435,8 +435,9 @@ impl AgentView {
         }
 
         // ResetSettingsConfirm: y/n routing
-        // Handled before the generic char-match so Esc/F2/Ctrl+, route to Cancel (not modal close)
-        if let Some(ActiveModal::ResetSettingsConfirm { modal, .. }) = self.active_modal.as_ref() {
+        // Handled before the generic char-match so Esc/F2/Ctrl+, route to Cancel (not modal close).
+        // Match the modal already borrowed above. A second borrow of `active_modal` overlaps the Limits arm.
+        if let ActiveModal::ResetSettingsConfirm { modal, .. } = &*modal {
             let resolved = match key.code {
                 KeyCode::Esc => Some(crate::views::modal::ResetSettingsResult::Cancel),
                 KeyCode::F(2) => Some(crate::views::modal::ResetSettingsResult::Cancel),
@@ -453,6 +454,20 @@ impl AgentView {
             return match resolved {
                 Some(choice) => InputOutcome::Action(Action::ConfirmResetSetting { choice }),
                 None => InputOutcome::Changed,
+            };
+        }
+
+        // Limits: Esc/q close, j/k scroll. Route before the generic char take()
+        // so a character key does not move the modal into unreachable!().
+        if let ActiveModal::Limits { state } = modal {
+            use crate::views::limits_modal::LimitsModalOutcome;
+            return match crate::views::limits_modal::handle_limits_key(state, key) {
+                LimitsModalOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                LimitsModalOutcome::Changed => InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => InputOutcome::Unchanged,
             };
         }
 

@@ -76,6 +76,7 @@ pub(super) fn prompt_style(
         show_accent_line: false,
         show_borders: false,
         title: None,
+        title_reserve_right: 0,
         image_preview: true,
     }
 }

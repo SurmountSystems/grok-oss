@@ -21,7 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{StatefulWidget, Widget};
 use syntect::easy::HighlightLines;
 
-use crate::render::scrollbar::SCROLLBAR_TOTAL_COLS;
+use crate::render::scrollbar::{SCROLLBAR_TOTAL_COLS, render_scrollbar_styled};
 use crate::render::wrapping::word_wrap_line;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::scrollback::blocks::mermaid_content::{MermaidDisplay, mermaid_display};
@@ -204,6 +204,12 @@ impl ListItem for SourceLine {
             let wrapped = word_wrap_line(line, text_w);
             total += (wrapped.len() as u16).max(1);
         }
+        // Height follows the source sentence, including when the rendered row was clipped.
+        let plain = visible_plan_line(&self.plain_text);
+        if !plain.is_empty() {
+            let plain_rows = word_wrap_line(&Line::from(plain), text_w).len() as u16;
+            total = total.max(plain_rows);
+        }
         total.max(1)
     }
 
@@ -238,16 +244,55 @@ impl ListItem for SourceLine {
 
         let mut y = area.y;
         let mut is_first_visual = true;
-        for (i, line) in self.rendered_lines.iter().enumerate() {
-            let bg = self.rendered_bgs.get(i).copied().flatten();
+        // Paint the source sentence when the rendered row dropped its tail,
+        // or when that sentence wraps onto more rows than the rendered lines.
+        let plain_sentence = visible_plan_line(&self.plain_text);
+        let plain_rows = if plain_sentence.is_empty() || text_w == 0 {
+            0
+        } else {
+            word_wrap_line(&Line::from(plain_sentence.as_str()), text_w as usize).len()
+        };
+        let rendered_rows: usize = if text_w == 0 {
+            0
+        } else {
+            self.rendered_lines
+                .iter()
+                .map(|line| word_wrap_line(line, text_w as usize).len())
+                .sum()
+        };
+        let plain_paint = markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text)
+            || plain_rows > rendered_rows;
+        let plain_line = if plain_paint {
+            let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            Some(Line::from(Span::styled(plain_sentence, style)))
+        } else {
+            None
+        };
+        let paint_lines: &[Line<'_>] = if let Some(line) = plain_line.as_ref() {
+            std::slice::from_ref(line)
+        } else {
+            self.rendered_lines.as_slice()
+        };
+        for (i, line) in paint_lines.iter().enumerate() {
+            let bg = if plain_paint {
+                None
+            } else {
+                self.rendered_bgs.get(i).copied().flatten()
+            };
             let wrapped = word_wrap_line(line, text_w as usize);
             let visual_lines = if wrapped.is_empty() {
                 vec![Line::default()]
             } else {
                 wrapped
             };
+            let wrap_count = visual_lines.len() as u16;
+            let row_limit = if wrap_count > 1 {
+                area.height.max(wrap_count)
+            } else {
+                area.height
+            };
             for wline in &visual_lines {
-                if y >= area.y + area.height {
+                if y >= area.y + row_limit {
                     break;
                 }
                 if let Some(bg) = bg {
@@ -720,6 +765,11 @@ pub struct PlanViewerExtras {
     pub comment_close_areas: Vec<(u64, Rect)>,
     pub hovered_comment_id: Option<u64>,
     pub close_button_hovered: bool,
+    /// Draft shown in the revision prompt above the approval footer.
+    /// Empty paints the placeholder. The footer word `revise` is not this.
+    pub revision_prompt_text: String,
+    /// Hit target for that prompt input. None when the footer is not up.
+    pub revision_prompt_area: Option<Rect>,
 }
 
 /// Double-click detection threshold in milliseconds.
@@ -1063,13 +1113,23 @@ impl LineViewerState {
         self.kind == LineViewerKind::PlanPreview && !self.fullscreen
     }
 
-    /// Width reserved on the right for a soft plan pane.
+    /// Width of the right-side soft plan pane.
+    ///
+    /// Half the draw, at least 24 columns, leaving 16 columns on the left.
+    /// A 100-column draw keeps 50. An 80-column draw keeps 40. The
+    /// 49-column sentence wraps inside that content column.
     pub fn soft_plan_pane_width(full_width: u16) -> u16 {
         let half = full_width / 2;
         let min = 24.min(full_width);
         let leave_left = 16.min(full_width.saturating_sub(min));
         half.max(min).min(full_width.saturating_sub(leave_left))
     }
+
+    /// Column pad between the soft-plan frame and the text.
+    ///
+    /// Padding only. It must not slice the heading or the body.
+    /// `Proposed plan.` stays `Proposed plan.`; the first five characters stay.
+    const SOFT_PLAN_TEXT_INSET: u16 = 5;
 
     /// Whether the plan modal should render the action-button footer.
     /// True for plan-approval and casual plan preview (not plain file preview).
@@ -1540,6 +1600,453 @@ fn build_shortcut_button<'a>(
     ]
 }
 
+/// One empty cell between plan-header bracket controls.
+const PLAN_HEADER_CONTROL_GAP: u16 = 1;
+
+/// View-plan side-pane frame: `prompt_border_active` (white on DOGE).
+///
+/// Not the black canvas (`bg_base`) and not neon `gray_dim`. The modal
+/// plan frame stays `gray_dim` on the non-side-pane path.
+pub(crate) fn soft_plan_frame_fg(theme: &Theme) -> Color {
+    theme.prompt_border_active
+}
+
+fn is_soft_plan_frame_glyph(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => ('\u{2500}'..='\u{257F}').contains(&ch) || ch == '-' || ch == '|',
+        _ => false,
+    }
+}
+
+fn force_soft_plan_frame(buf: &mut Buffer, area: Rect, fg: Color, bg: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = Style::default().fg(fg).bg(bg);
+    let right = area.x + area.width - 1;
+    let bottom = area.y + area.height - 1;
+    let mut paint = |x: u16, y: u16| {
+        let glyph = buf
+            .cell((x, y))
+            .is_some_and(|cell| is_soft_plan_frame_glyph(cell.symbol()));
+        if glyph && let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_style(style);
+        }
+    };
+    for x in area.x..area.x + area.width {
+        paint(x, area.y);
+        if bottom != area.y {
+            paint(x, bottom);
+        }
+    }
+    for y in area.y..area.y + area.height {
+        paint(area.x, y);
+        if right != area.x {
+            paint(right, y);
+        }
+    }
+}
+
+fn plan_header_control_style(theme: &Theme, hovered: bool) -> Style {
+    if hovered {
+        Style::default()
+            .fg(theme.text_primary)
+            .bg(theme.bg_base)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.gray).bg(theme.bg_base)
+    }
+}
+
+/// Plan title bar, right to left: `[✗]` `[↗]` `[⧉]` `[⌕]`.
+///
+/// Each label is 3 columns. One cell sits between them. Close stays on
+/// file-backed approval, including when `feedback_active()` is true and
+/// the footer is `approve | comment | revise | exit`.
+fn paint_plan_header_controls(
+    buf: &mut Buffer,
+    popup_area: Rect,
+    viewer: &mut LineViewerState,
+    theme: &Theme,
+) {
+    viewer.close_button_area = None;
+    viewer.fullscreen_button_area = None;
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.copy_button_area = None;
+        plan.search_button_area = None;
+    }
+
+    let mut end = popup_area
+        .x
+        .saturating_add(popup_area.width)
+        .saturating_sub(2);
+    let left_limit = popup_area.x.saturating_add(1);
+    let y = popup_area.y;
+
+    let mut place = |label: &'static str, hovered: bool| -> Option<Rect> {
+        const W: u16 = 3;
+        if end < left_limit.saturating_add(W - 1) {
+            return None;
+        }
+        let x = end.saturating_sub(W - 1);
+        if x < left_limit {
+            return None;
+        }
+        buf.set_span(
+            x,
+            y,
+            &Span::styled(label, plan_header_control_style(theme, hovered)),
+            W,
+        );
+        // The cell between bracket controls was a leftover top-rule `─`, so
+        // copy read as flat text mushed into search, enlarge, and close.
+        if PLAN_HEADER_CONTROL_GAP > 0 {
+            let gap_x = x.saturating_sub(PLAN_HEADER_CONTROL_GAP);
+            if gap_x >= left_limit && gap_x < x {
+                for col in gap_x..x {
+                    if let Some(cell) = buf.cell_mut((col, y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(theme.bg_base).fg(theme.bg_base));
+                    }
+                }
+            }
+        }
+        end = x.saturating_sub(1).saturating_sub(PLAN_HEADER_CONTROL_GAP);
+        Some(Rect::new(x, y, W, 1))
+    };
+
+    let hovered = viewer.close_hovered;
+    viewer.close_button_area = place(crate::glyphs::ballot_x_button(), hovered);
+    let fs_hovered = viewer.fullscreen_hovered;
+    viewer.fullscreen_button_area = place(crate::glyphs::enlarge_button(), fs_hovered);
+    let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+    let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
+    let copy_area = place(crate::glyphs::copy_button(), copy_hovered);
+    let search_area = place(crate::glyphs::search_button(), search_hovered);
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.copy_button_area = copy_area;
+        plan.search_button_area = search_area;
+    }
+}
+
+fn visible_plan_line(plain: &str) -> String {
+    let trimmed = plain.trim();
+    if let Some(rest) = trimmed.strip_prefix('#') {
+        rest.trim_start().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn squash_plan_text(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// True when joined markdown spans dropped part of the source line.
+/// Wrapped rows still count. A missing tail does not.
+fn markdown_plain_needs_full_paint(lines: &[Line<'_>], plain_text: &str) -> bool {
+    let expected = squash_plan_text(&visible_plan_line(plain_text));
+    if expected.is_empty() {
+        return false;
+    }
+    let mut rendered = String::new();
+    for line in lines {
+        for span in &line.spans {
+            rendered.push_str(span.content.as_ref());
+        }
+        rendered.push(' ');
+    }
+    !squash_plan_text(&rendered).contains(&expected)
+}
+
+fn clear_soft_plan_text_row(buf: &mut Buffer, x: u16, y: u16, width: u16, bg: Color) {
+    for col in 0..width {
+        if let Some(cell) = buf.cell_mut((x.saturating_add(col), y)) {
+            cell.set_char(' ');
+            cell.set_style(Style::default().bg(bg));
+        }
+    }
+}
+
+fn row_symbols(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
+    let mut out = String::new();
+    for col in 0..width {
+        if let Some(cell) = buf.cell((x.saturating_add(col), y)) {
+            out.push_str(cell.symbol());
+        }
+    }
+    out
+}
+
+/// True when `painted` shows the tail of `expected` and not its start.
+/// `Proposed plan.` covered on the left reads `sed plan.`
+fn dropped_left_edge(painted: &str, expected: &str, clip: usize) -> bool {
+    if expected.is_empty() || painted.contains(expected) {
+        return false;
+    }
+    let head: String = expected.chars().take(clip).collect();
+    if head.is_empty() || painted.contains(&head) {
+        return false;
+    }
+    let tail: String = expected.chars().skip(clip).take(12).collect();
+    !tail.is_empty() && painted.contains(&tail)
+}
+
+/// Wrapped rows of the item at `screen_y` that sit above the viewport.
+///
+/// Zero when that row is the item's first wrapped row. A scroll of one row
+/// into a wrapped sentence returns 1.
+fn wrapped_rows_above_viewport(
+    viewer: &LineViewerState,
+    content_area: Rect,
+    screen_y: u16,
+) -> usize {
+    if screen_y < content_area.y || screen_y >= content_area.y.saturating_add(content_area.height) {
+        return 0;
+    }
+    let ry = (screen_y - content_area.y) as usize;
+    let vy = viewer.list_state.scroll_offset().saturating_add(ry);
+    let Some(vi) = viewer.list_state.layout().item_at_y(vy) else {
+        return 0;
+    };
+    vy.saturating_sub(viewer.list_state.layout().virtual_y(vi))
+}
+
+/// Text width used when the layout measured this item, capped so the
+/// rewrite still stops before the scrollbar.
+fn scrolled_wrap_width(viewer: &LineViewerState, prefix_w: u16, text_w: u16) -> u16 {
+    viewer
+        .list_state
+        .layout()
+        .cached_width()
+        .map(|width| width.saturating_sub(prefix_w).max(1))
+        .unwrap_or(text_w)
+        .min(text_w)
+}
+
+/// Repaint a soft-plan source item whose left edge or tail was sliced.
+///
+/// The replacement is the full source line, word-wrapped into the text
+/// column after the line-number gutter. Every wrapped row is painted, so
+/// `tokens.` stays inside the content area. Rows already above the viewport
+/// stay there: the rewrite continues at the wrapped row on screen and does
+/// not paint the head back onto the first visible row.
+fn repair_soft_plan_dropped_left_edge(
+    buf: &mut Buffer,
+    content_area: Rect,
+    viewer: &LineViewerState,
+    theme: &Theme,
+) {
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let clip = LineViewerState::SOFT_PLAN_TEXT_INSET as usize;
+    let mut row = 0u16;
+    while row < content_area.height {
+        let y = content_area.y.saturating_add(row);
+        let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content_area)
+        else {
+            row = row.saturating_add(1);
+            continue;
+        };
+        let id = source.stable_id();
+        let mut rows = 1u16;
+        let mut next = row.saturating_add(1);
+        while next < content_area.height {
+            let ny = content_area.y.saturating_add(next);
+            match viewer.item_at_screen_row(ny, content_area) {
+                Some(PlanViewerItem::Source(other)) if other.stable_id() == id => {
+                    rows = rows.saturating_add(1);
+                    next = next.saturating_add(1);
+                }
+                _ => break,
+            }
+        }
+        let expected = visible_plan_line(&source.plain_text);
+        if expected.chars().count() > clip {
+            let mut painted = String::new();
+            for i in 0..rows {
+                let py = content_area.y.saturating_add(row.saturating_add(i));
+                painted.push_str(&row_symbols(buf, content_area.x, py, content_area.width));
+            }
+            let missing_tail = !squash_plan_text(&painted).contains(&squash_plan_text(&expected));
+            if dropped_left_edge(&painted, &expected, clip) || missing_tail {
+                let prefix_w = source
+                    .prefix()
+                    .map(|p| crate::views::list_pane::line_display_width(&p))
+                    .unwrap_or(0) as u16;
+                let text_x = content_area.x.saturating_add(prefix_w);
+                // `content_area` is the unsplit list area. When a scrollbar is
+                // showing, its gap and track are the last two columns. Stop
+                // this rewrite before them. `room` still paints the continuation,
+                // so `tokens.` stays in the text columns.
+                let bar_cols = if viewer.list_state.scrollbar_area().is_some() {
+                    SCROLLBAR_TOTAL_COLS
+                } else {
+                    0
+                };
+                let text_w = content_area
+                    .width
+                    .saturating_sub(prefix_w)
+                    .saturating_sub(bar_cols)
+                    .max(1);
+                // A scroll into this line leaves the head above the viewport.
+                // Wrapping at the layout width keeps that same row boundary.
+                // Painting from wrap 0 would put the head back on the first
+                // visible row, on the right-hand side of the pane.
+                let skip = wrapped_rows_above_viewport(viewer, content_area, y);
+                let paint_w = if skip == 0 {
+                    text_w
+                } else {
+                    scrolled_wrap_width(viewer, prefix_w, text_w)
+                };
+                let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+                let line = Line::from(Span::styled(expected, style));
+                let wrapped = word_wrap_line(&line, paint_w as usize);
+                let count = if wrapped.is_empty() { 1 } else { wrapped.len() };
+                if skip == 0 {
+                    // `rows` already includes later rows that still resolve to this
+                    // source line. A one-row clip must not drop the continuation.
+                    let room = (rows as usize).max(count).min(content_area.height as usize);
+                    for i in 0..count.min(room) {
+                        let py = content_area.y.saturating_add(row.saturating_add(i as u16));
+                        if py >= content_area.y.saturating_add(content_area.height) {
+                            break;
+                        }
+                        clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
+                        if wrapped.is_empty() {
+                            buf.set_line(text_x, py, &line, text_w);
+                        } else if let Some(wline) = wrapped.get(i) {
+                            buf.set_line(text_x, py, wline, text_w);
+                        }
+                    }
+                } else if skip < count {
+                    // Only the rows that still belong to this source line.
+                    // `skip` is the wrapped row already on screen.
+                    for i in 0..rows as usize {
+                        let py = content_area.y.saturating_add(row.saturating_add(i as u16));
+                        if py >= content_area.y.saturating_add(content_area.height) {
+                            break;
+                        }
+                        clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
+                        if let Some(wline) = wrapped.get(skip.saturating_add(i)) {
+                            buf.set_line(text_x, py, wline, text_w);
+                        }
+                    }
+                }
+            }
+        }
+        row = row.saturating_add(rows);
+    }
+}
+
+/// Paint the soft-plan scrollbar again after repair and the footer rule.
+///
+/// The list paints one track, then a repaired row can clear through that
+/// column. This restores one space-or-block column. The footer divider is
+/// the row after `content_area`, and this does not cover it.
+fn repaint_soft_plan_scrollbar(buf: &mut Buffer, viewer: &LineViewerState, content_area: Rect) {
+    let Some(mut track) = viewer.list_state.scrollbar_area() else {
+        return;
+    };
+    let stop = content_area.y.saturating_add(content_area.height);
+    if track.y >= stop {
+        return;
+    }
+    track.height = track.height.min(stop.saturating_sub(track.y));
+    if track.width == 0 || track.height == 0 {
+        return;
+    }
+    let pane_style = LineViewerState::list_pane_style();
+    let total_height = viewer.list_state.total_height();
+    let scale = if total_height > u16::MAX as usize {
+        (total_height / u16::MAX as usize) + 1
+    } else {
+        1
+    };
+    let scaled_total = (total_height / scale) as u16;
+    let scaled_offset = (viewer.list_state.scroll_offset() / scale) as u16;
+    let track_style = Style::default().bg(pane_style.scrollbar_bg);
+    let thumb_style = Style::default()
+        .fg(pane_style.scrollbar_fg)
+        .bg(pane_style.scrollbar_bg);
+    render_scrollbar_styled(
+        buf,
+        Some(track),
+        scaled_total,
+        content_area.height,
+        scaled_offset,
+        track_style,
+        thumb_style,
+    );
+}
+
+/// Prompt input above the approval footer. The footer word `revise` is not
+/// this row. An empty draft paints the placeholder.
+fn paint_plan_revision_prompt(buf: &mut Buffer, area: Rect, draft: &str, theme: &Theme) {
+    if area.width < 6 || area.height < 3 {
+        return;
+    }
+    let border = Style::default()
+        .fg(theme.prompt_border_active)
+        .bg(theme.bg_base);
+    let text_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    let placeholder_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+    let left = area.x;
+    let right = area.x + area.width - 1;
+    let top = area.y;
+    let bottom = area.y + area.height - 1;
+    let mid = top + 1;
+    let put = |buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style| {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(symbol);
+            cell.set_style(style);
+        }
+    };
+    for x in left..=right {
+        let top_symbol = if x == left {
+            "\u{250c}"
+        } else if x == right {
+            "\u{2510}"
+        } else {
+            "\u{2500}"
+        };
+        let bottom_symbol = if x == left {
+            "\u{2514}"
+        } else if x == right {
+            "\u{2518}"
+        } else {
+            "\u{2500}"
+        };
+        put(buf, x, top, top_symbol, border);
+        put(buf, x, bottom, bottom_symbol, border);
+    }
+    put(buf, left, mid, "\u{2502}", border);
+    put(buf, right, mid, "\u{2502}", border);
+    for x in left.saturating_add(1)..right {
+        put(buf, x, mid, " ", text_style);
+    }
+    let arrow = crate::glyphs::prompt_arrow();
+    let arrow_w = crate::glyphs::PROMPT_ARROW_WIDTH;
+    let text_x = left.saturating_add(1);
+    if text_x.saturating_add(arrow_w) < right {
+        buf.set_span(text_x, mid, &Span::styled(arrow, text_style), arrow_w);
+    }
+    let body_x = text_x.saturating_add(arrow_w);
+    let body_w = right.saturating_sub(body_x);
+    let trimmed = draft.trim();
+    let (shown, style) = if trimmed.is_empty() {
+        ("Type a revision...", placeholder_style)
+    } else {
+        (trimmed, text_style)
+    };
+    let shown: String = shown.chars().take(body_w as usize).collect();
+    if body_w > 0 && !shown.is_empty() {
+        buf.set_string(body_x, mid, &shown, style);
+    }
+}
+
 /// Render the line viewer popup. In normal mode, draws a 75% centered panel with dimmed background
 /// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills the entire overlay area
 /// without dimming. Renders the ListPane inside the panel with syntax-highlighted lines.
@@ -1582,6 +2089,9 @@ pub fn render_line_viewer(
     // They therefore need a slightly taller minimum than ordinary file previews
     let min_height: u16 = if viewer.show_footer() { 7 } else { 5 };
     if popup_area.width < 10 || popup_area.height < min_height {
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.revision_prompt_area = None;
+        }
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
         return;
@@ -1599,27 +2109,66 @@ pub fn render_line_viewer(
         Style::default().fg(theme.text_primary).bg(theme.bg_base),
     );
 
-    // 3. Draw border.
+    // 3. Draw border. The view-plan side pane uses `prompt_border_active`
+    // (white on DOGE). Modal and other viewers stay `gray_dim`.
+    let frame_fg = if viewer.is_soft_plan_side_pane() {
+        soft_plan_frame_fg(theme)
+    } else {
+        theme.gray_dim
+    };
     let border = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.gray_dim))
+        .border_style(Style::default().fg(frame_fg))
         .style(Style::default().bg(theme.bg_base));
     let inner = border.inner(popup_area);
     border.render(popup_area, buf);
+    if viewer.is_soft_plan_side_pane() {
+        // Block style merge can leave another fg on the stroke. Force the
+        // side-pane frame color onto the glyphs. The cell background stays
+        // the canvas.
+        force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
+    }
 
     // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row
-    // (rendered in step 8 below).
-    let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
-    let content_area = Rect {
+    // (rendered in step 8 below). The approval screen also reserves a prompt
+    // input above that footer. The footer word `revise` is not the prompt.
+    // A short pane keeps the footer and skips the prompt.
+    let revision_prompt_rows: u16 = if viewer.kind == LineViewerKind::PlanPreview
+        && viewer.show_footer()
+        && inner.height >= 9
+    {
+        3
+    } else {
+        0
+    };
+    let footer_rows: u16 = if viewer.show_footer() {
+        2 + revision_prompt_rows
+    } else {
+        0
+    };
+    let mut content_area = Rect {
         x: inner.x,
         y: inner.y,
         width: inner.width,
         height: inner.height.saturating_sub(footer_rows),
     };
+    // Soft plan text sits inside the frame so the left border cannot cover
+    // the first characters, and the body wraps in the width that remains.
+    if viewer.is_soft_plan_side_pane() {
+        let inset = LineViewerState::SOFT_PLAN_TEXT_INSET.min(content_area.width.saturating_sub(8));
+        content_area.x = content_area.x.saturating_add(inset);
+        content_area.width = content_area.width.saturating_sub(inset);
+    }
 
     // 4. Prepare layout (resolves selection index for title + rendering).
-    viewer.prepare_layout(content_area.width, content_area.height);
+    // Subtract the scrollbar before measuring so a long plan line wraps and
+    // scrolls instead of being clipped on one row.
+    let layout_width = content_area
+        .width
+        .saturating_sub(SCROLLBAR_TOTAL_COLS)
+        .max(1);
+    viewer.prepare_layout(layout_width, content_area.height);
 
     // 5. Title bar: styled file path and line range.
     //    Only show the line range when visual selection is active
@@ -1652,13 +2201,37 @@ pub fn render_line_viewer(
         }
 
         // Wrap with `─ ... ─` decorations to match other modals (see modal_window.rs:341-346) and left-align flush with the top-left corner.
-        let deco = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        // Soft plan uses the same frame color so the top rule is not a cyan stroke.
+        let deco = Style::default().fg(frame_fg).bg(theme.bg_base);
         title.spans.insert(0, Span::styled("\u{2500} ", deco));
         title.spans.push(Span::styled(" \u{2500}", deco));
 
         let title_width = title.width() as u16;
-        let title_x = popup_area.x + 1;
-        let max_title_width = popup_area.width.saturating_sub(2);
+        let title_inset = if viewer.is_soft_plan_side_pane() {
+            LineViewerState::SOFT_PLAN_TEXT_INSET
+        } else {
+            0
+        };
+        // Stop the top rule before search. Otherwise it runs through the
+        // gap cells and the bracket controls read as one flat string.
+        let header_reserve = if viewer.kind == LineViewerKind::PlanPreview {
+            // Search, copy, enlarge, and close. Close stays while feedback
+            // is active, so the title must stop before all four.
+            let controls: u16 = 4;
+            let gaps = controls.saturating_sub(1);
+            controls
+                .saturating_mul(3)
+                .saturating_add(gaps)
+                .saturating_add(2)
+        } else {
+            0
+        };
+        let title_x = popup_area.x.saturating_add(1).saturating_add(title_inset);
+        let max_title_width = popup_area
+            .width
+            .saturating_sub(2)
+            .saturating_sub(title_inset)
+            .saturating_sub(header_reserve);
         buf.set_line(
             title_x,
             popup_area.y,
@@ -1667,91 +2240,29 @@ pub fn render_line_viewer(
         );
     }
 
-    // Action buttons on the top border, right-aligned. The close [✗] is omitted in plan-review
-    // (feedback) mode because the modal is not user-closeable in that state.
-    let mut right_edge = popup_area.x + popup_area.width - 1;
-
-    if !viewer.feedback_active() {
-        let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space)
-        // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
-        // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
-        let close_w: u16 = 4; // "[✗] "
-        if popup_area.width > close_w + 2 {
-            let close_x = right_edge - close_w;
-            let close_style = if viewer.close_hovered {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray).bg(theme.bg_base)
-            };
-            let close_span = Span::styled(format!("[{close_text}] "), close_style);
-            buf.set_span(close_x, popup_area.y, &close_span, close_w);
-            viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
-            right_edge = close_x;
-        } else {
-            viewer.close_button_area = None;
+    // Action buttons on the top border, right-aligned. Plan preview uses
+    // four equal bracket controls with a one-cell gap, including while
+    // file-backed approval shows `approve | comment | revise | exit`.
+    // Other viewers keep the close and enlarge pair and omit close while
+    // feedback is active.
+    if viewer.kind == LineViewerKind::PlanPreview {
+        paint_plan_header_controls(buf, popup_area, viewer, theme);
+    } else {
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.copy_button_area = None;
+            plan.search_button_area = None;
         }
-    } else {
-        viewer.close_button_area = None;
-    }
+        let mut right_edge = popup_area.x + popup_area.width - 1;
 
-    // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a
-    // toggle, not a status indicator. When the close is hidden (plan-review mode) the fullscreen keeps
-    // its trailing space so it doesn't crowd the corner `╮`.
-    let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
-    let close_visible = viewer.close_button_area.is_some();
-    let (fs_label, fs_w): (String, u16) = if close_visible {
-        (format!(" [{fs_icon}]"), 4)
-    } else {
-        (format!(" [{fs_icon}] "), 5)
-    };
-    if right_edge > popup_area.x + fs_w + 2 {
-        let fs_x = right_edge - fs_w;
-        let fs_style = if viewer.fullscreen_hovered {
-            Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.gray).bg(theme.bg_base)
-        };
-        let fs_span = Span::styled(fs_label, fs_style);
-        buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
-        viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
-    } else {
-        viewer.fullscreen_button_area = None;
-    }
-
-    // Plan preview: copy glyph in the fullscreen label's leading pad, glass
-    // one cell to its left. Both sit on the title bar, not the CTA row.
-    if viewer.kind == LineViewerKind::PlanPreview
-        && let Some(fs) = viewer.fullscreen_button_area
-    {
-        let copy_x = fs.x;
-        if copy_x > popup_area.x {
-            let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
-            let copy_style = if copy_hovered {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray).bg(theme.bg_base)
-            };
-            buf.set_span(
-                copy_x,
-                popup_area.y,
-                &Span::styled(crate::glyphs::copy_icon(), copy_style),
-                1,
-            );
-            let search_x = copy_x.saturating_sub(1);
-            let search_inside = search_x > popup_area.x;
-            if search_inside {
-                let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
-                let search_style = if search_hovered {
+        if !viewer.feedback_active() {
+            let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
+            // Label is `[✗] ` (trailing space, no leading space)
+            // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
+            // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
+            let close_w: u16 = 4; // "[✗] "
+            if popup_area.width > close_w + 2 {
+                let close_x = right_edge - close_w;
+                let close_style = if viewer.close_hovered {
                     Style::default()
                         .fg(theme.text_primary)
                         .bg(theme.bg_base)
@@ -1759,31 +2270,42 @@ pub fn render_line_viewer(
                 } else {
                     Style::default().fg(theme.gray).bg(theme.bg_base)
                 };
-                let search_glyph = if crate::glyphs::is_legacy_windows_console() {
-                    "s"
-                } else {
-                    "\u{2315}"
-                };
-                buf.set_span(
-                    search_x,
-                    popup_area.y,
-                    &Span::styled(search_glyph, search_style),
-                    1,
-                );
-            }
-            let plan = viewer.plan_mut();
-            plan.copy_button_area = Some(Rect::new(copy_x, popup_area.y, 1, 1));
-            plan.search_button_area = if search_inside {
-                Some(Rect::new(search_x, popup_area.y, 1, 1))
+                let close_span = Span::styled(format!("[{close_text}] "), close_style);
+                buf.set_span(close_x, popup_area.y, &close_span, close_w);
+                viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
+                right_edge = close_x;
             } else {
-                None
+                viewer.close_button_area = None;
+            }
+        } else {
+            viewer.close_button_area = None;
+        }
+
+        // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a
+        // toggle, not a status indicator. When the close is hidden (plan-review mode) the fullscreen keeps
+        // its trailing space so it doesn't crowd the corner `╮`.
+        let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
+        let close_visible = viewer.close_button_area.is_some();
+        let (fs_label, fs_w): (String, u16) = if close_visible {
+            (format!(" [{fs_icon}]"), 4)
+        } else {
+            (format!(" [{fs_icon}] "), 5)
+        };
+        if right_edge > popup_area.x + fs_w + 2 {
+            let fs_x = right_edge - fs_w;
+            let fs_style = if viewer.fullscreen_hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.gray).bg(theme.bg_base)
             };
-            viewer.fullscreen_button_area = Some(Rect::new(
-                copy_x.saturating_add(1),
-                fs.y,
-                fs.width.saturating_sub(1),
-                fs.height,
-            ));
+            let fs_span = Span::styled(fs_label, fs_style);
+            buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
+            viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
+        } else {
+            viewer.fullscreen_button_area = None;
         }
     }
 
@@ -1846,11 +2368,25 @@ pub fn render_line_viewer(
         }
     }
 
+    if viewer.is_soft_plan_side_pane() {
+        // Repaint a source line whose tail was width-clipped (`tokens.`).
+        // Wrapped rows stay inside the content area.
+        repair_soft_plan_dropped_left_edge(buf, content_area, viewer, theme);
+    }
+
     // Action buttons inside the modal footer (centered), for both plan-approval and casual
     // plan-preview modes.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
-        let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        // Outer box glyphs stay `prompt_border_active` (white on DOGE).
+        // This interior footer rule is the muted canvas hairline
+        // (`bg_base`, black on DOGE). Other viewers keep `gray_dim`.
+        let div_fg = if viewer.is_soft_plan_side_pane() {
+            theme.bg_base
+        } else {
+            theme.gray_dim
+        };
+        let div_style = Style::default().fg(div_fg).bg(theme.bg_base);
         let line: String = std::iter::repeat_n('\u{2500}', inner.width as usize).collect();
         buf.set_string(inner.x, div_y, &line, div_style);
 
@@ -1879,9 +2415,15 @@ pub fn render_line_viewer(
                 viewer.plan_ref().is_some_and(|p| p.abandon_hovered),
             ];
             let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
-            let pad = PLAN_APPROVAL_ACTION_PAD;
+            // The soft side pane footer is `approve | comment | revise | exit`.
+            // Fullscreen review keeps the wider pad. That wider row is
+            // ` approve  |  comment  |  revise  |  exit `.
+            let (pad, mut between): (&str, &str) = if viewer.is_soft_plan_side_pane() {
+                ("", " | ")
+            } else {
+                (PLAN_APPROVAL_ACTION_PAD, PLAN_APPROVAL_ACTION_BETWEEN)
+            };
             let pad_w = pad.width() as u16;
-            let mut between = PLAN_APPROVAL_ACTION_BETWEEN;
             let mut between_w = between.width() as u16;
             let word_widths = [
                 labels[0].width() as u16,
@@ -1998,6 +2540,45 @@ pub fn render_line_viewer(
             plan.abandon_button_area = None;
             plan.approve_notes_button_area = None;
         }
+    }
+
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.revision_prompt_area = None;
+    }
+    if revision_prompt_rows >= 3 && inner.height >= 2 {
+        let div_y = inner.y + inner.height - 2;
+        // The side pane's track is the last inner column, and the gap is
+        // the column before it. A full-width prompt box paints ┐ on that
+        // track. Stop the box before both columns.
+        let prompt_width = if viewer.is_soft_plan_side_pane() {
+            inner.width.saturating_sub(SCROLLBAR_TOTAL_COLS)
+        } else {
+            inner.width
+        };
+        let prompt_area = Rect {
+            x: inner.x,
+            y: div_y.saturating_sub(revision_prompt_rows),
+            width: prompt_width,
+            height: revision_prompt_rows,
+        };
+        let draft = viewer
+            .plan_ref()
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default();
+        paint_plan_revision_prompt(buf, prompt_area, &draft, theme);
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.revision_prompt_area = Some(prompt_area);
+        }
+    }
+
+    if viewer.is_soft_plan_side_pane() {
+        // Content paint can replace the perimeter. Restore the side-pane
+        // frame, then the bracket controls. Brackets stay `theme.gray`.
+        // Copy stays a bordered control with a one-cell gap. Search,
+        // enlarge, and close stay.
+        force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
+        paint_plan_header_controls(buf, popup_area, viewer, theme);
+        repaint_soft_plan_scrollbar(buf, viewer, content_area);
     }
 }
 
@@ -2213,7 +2794,7 @@ mod tests {
         row
     }
 
-    /// Copy is the title-bar glyph immediately left of `[↗]`, not a footer CTA.
+    /// Copy is a 3-column `[⧉]` one cell left of `[↗]`, not a footer CTA.
     fn assert_title_bar_copy_left_of_enlarge(buf: &Buffer, plan: &PlanViewerExtras, footer_y: u16) {
         let area = plan
             .copy_button_area
@@ -2222,26 +2803,48 @@ mod tests {
             area.y, footer_y,
             "copy glyph must not sit on the Approve CTA row"
         );
+        assert_eq!(area.width, 3, "copy is the same 3 columns as [↗] and [✗]");
+        assert_eq!(area.height, 1, "copy stays one row on the title bar");
         let icon = crate::glyphs::copy_icon();
         assert_eq!(
             buf[(area.x, area.y)].symbol(),
+            "[",
+            "copy control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(area.x.saturating_add(1), area.y)].symbol(),
             icon,
             "copy_button_area must cover the title-bar copy glyph"
         );
-        let bracket_x = area.x.saturating_add(area.width);
+        assert_eq!(
+            buf[(area.x.saturating_add(2), area.y)].symbol(),
+            "]",
+            "copy control closes with a square bracket"
+        );
+        let gap_x = area.x.saturating_add(area.width);
+        let gap = buf[(gap_x, area.y)].symbol();
+        assert_ne!(
+            gap, "[",
+            "one-cell gap between copy and [↗]; they must not glue together"
+        );
+        assert_ne!(
+            gap, "]",
+            "one-cell gap between copy and [↗]; they must not glue together"
+        );
+        let bracket_x = gap_x.saturating_add(1);
         assert_eq!(
             buf[(bracket_x, area.y)].symbol(),
             "[",
-            "copy glyph must sit immediately left of [↗]"
+            "copy sits one cell left of [↗]"
         );
         assert_eq!(
             buf[(bracket_x.saturating_add(1), area.y)].symbol(),
             crate::glyphs::enlarge(),
-            "copy glyph must sit immediately left of [↗]"
+            "copy sits one cell left of [↗]"
         );
     }
 
-    /// Glass is immediately left of copy. Copy stays immediately left of `[↗]`.
+    /// Glass is a 3-column `[⌕]` one cell left of the bordered copy control.
     fn assert_title_bar_search_left_of_copy(buf: &Buffer, plan: &PlanViewerExtras) {
         let search = plan
             .search_button_area
@@ -2249,16 +2852,32 @@ mod tests {
         let copy = plan
             .copy_button_area
             .expect("copy must stay next to enlarge");
+        assert_eq!(search.width, 3, "search is the same 3 columns as copy");
+        assert_eq!(copy.width, 3, "copy is the same 3 columns as search");
         assert_eq!(
-            search.x + search.width,
+            search.width, copy.width,
+            "search and copy are the same size"
+        );
+        assert_eq!(
+            search.x + search.width + 1,
             copy.x,
-            "glass must sit immediately left of copy"
+            "one-cell gap between the bracketed glass and the bracketed copy"
         );
         assert_eq!(search.y, copy.y, "glass shares the title-bar row with copy");
         assert_eq!(
             buf[(search.x, search.y)].symbol(),
+            "[",
+            "search control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(search.x.saturating_add(1), search.y)].symbol(),
             crate::glyphs::search_icon(),
             "search_button_area must cover the title-bar glass glyph"
+        );
+        assert_eq!(
+            buf[(search.x.saturating_add(2), search.y)].symbol(),
+            "]",
+            "search control closes with a square bracket"
         );
     }
 
@@ -3060,8 +3679,8 @@ mod tests {
         assert_eq!(viewer.line_range_suffix(), Some(":1-3".to_owned()));
     }
 
-    /// Glass sits immediately left of copy; copy stays immediately left of
-    /// `[↗]`. Do not steal `assert_title_bar_copy_left_of_enlarge`.
+    /// Glass is a bracketed control one cell left of copy. Copy stays one
+    /// cell left of `[↗]`. Do not steal `assert_title_bar_copy_left_of_enlarge`.
     #[test]
     fn plan_preview_title_bar_search_glass_immediately_left_of_copy() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -3085,6 +3704,1095 @@ mod tests {
         let plan = viewer.plan_ref().expect("plan extras");
         assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
         assert_title_bar_search_left_of_copy(&buf, plan);
+    }
+
+    /// The plan side panel keeps its frame glyphs. This test does not
+    /// require the black canvas and does not forbid `Rgb(255, 255, 255)`.
+    /// Copy is a bordered control. Search and copy use the same bracket
+    /// size and the same one-cell gap as enlarge and close.
+    #[test]
+    fn soft_plan_side_panel_uses_muted_frame_and_bracketed_header_controls() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Proposed plan.\n\nKeep the inset and the wrapping body.\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let edge = &buf[(pane_x, 4)];
+        let fg = edge.style().fg;
+        assert!(
+            edge.symbol() == "│" || edge.symbol() == "┃",
+            "the side panel keeps a frame glyph; got {:?}",
+            edge.symbol()
+        );
+        assert_ne!(
+            fg,
+            Some(theme.gray_dim),
+            "plan frame is not the neon cyan gray_dim stroke"
+        );
+
+        let right = &buf[(pane_x + pane_w - 1, 4)];
+        assert!(
+            right.symbol() == "│" || right.symbol() == "┃",
+            "the right edge keeps a frame glyph; got {:?}",
+            right.symbol()
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        let search = plan
+            .search_button_area
+            .expect("search stays a clickable header control");
+        let copy = plan
+            .copy_button_area
+            .expect("copy stays a clickable header control");
+        let enlarge = viewer
+            .fullscreen_button_area
+            .expect("enlarge stays on the title bar");
+        let close = viewer
+            .close_button_area
+            .expect("close stays on the title bar");
+        for area in [search, copy, enlarge, close] {
+            assert_eq!(area.width, 3, "each header control is 3 columns");
+            assert_eq!(area.height, 1, "each header control is one row");
+            assert_eq!(
+                buf[(area.x, area.y)].symbol(),
+                "[",
+                "header control opens with a square bracket"
+            );
+            assert_eq!(
+                buf[(area.x + 2, area.y)].symbol(),
+                "]",
+                "header control closes with a square bracket"
+            );
+        }
+        assert_eq!(
+            buf[(copy.x + 1, copy.y)].symbol(),
+            crate::glyphs::copy_icon(),
+            "copy control has a border around the glyph"
+        );
+        assert_ne!(
+            crate::glyphs::copy_button(),
+            crate::glyphs::copy_icon(),
+            "the bordered copy control is not the bare glyph"
+        );
+        assert!(
+            crate::glyphs::copy_button().starts_with('[')
+                && crate::glyphs::copy_button().ends_with(']'),
+            "tool-card and plan-header copy is a bordered control, not flat text"
+        );
+        assert_eq!(
+            buf[(search.x + 1, search.y)].symbol(),
+            crate::glyphs::search_icon()
+        );
+        assert_eq!(
+            buf[(enlarge.x + 1, enlarge.y)].symbol(),
+            crate::glyphs::enlarge()
+        );
+        assert_eq!(
+            buf[(close.x + 1, close.y)].symbol(),
+            crate::glyphs::ballot_x()
+        );
+        assert_eq!(
+            search.x + search.width + 1,
+            copy.x,
+            "one-cell gap between search and copy"
+        );
+        assert_eq!(
+            copy.x + copy.width + 1,
+            enlarge.x,
+            "one-cell gap between copy and enlarge"
+        );
+        assert_eq!(
+            enlarge.x + enlarge.width + 1,
+            close.x,
+            "one-cell gap between enlarge and close"
+        );
+        assert!(search.x + search.width < copy.x);
+        assert!(copy.x + copy.width < enlarge.x);
+        assert!(enlarge.x + enlarge.width < close.x);
+
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "footer CTAs stay; missing {needle} in {footer:?}"
+            );
+        }
+        assert_ne!(
+            copy.y, footer_y,
+            "copy stays on the title bar, not the CTA row"
+        );
+        assert_eq!(
+            LineViewerState::SOFT_PLAN_TEXT_INSET,
+            5,
+            "plan text stays inset from the left frame"
+        );
+    }
+
+    /// `/view-plan` draws the right-side plan pane (`PlanPreview`, fullscreen
+    /// off) through `render_line_viewer`. Every side of that rounded frame
+    /// is white `Rgb(255, 255, 255)`: top, bottom, left, and right box
+    /// glyphs. Header brackets stay out of this color check. They are
+    /// `theme.gray` on DOGE (yellow), and this test does not recolor them.
+    /// This is not the plan-mode prompt and not the plan-approval prompt.
+    #[test]
+    fn view_plan_screen_outline_is_white_on_every_side() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.bg_base,
+            Color::Rgb(0, 0, 0),
+            "DOGE canvas is black, so a frame painted with theme.bg_base is not white"
+        );
+        assert_ne!(theme.bg_base, white);
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Proposed plan.\n\nKeep the inset and the wrapping body.\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        assert!(
+            pane_w > 4 && full.height > 4,
+            "view-plan side pane must have a rounded frame"
+        );
+        assert_eq!(
+            buf[(pane_x, top_y)].symbol(),
+            "\u{256d}",
+            "top-left of the view-plan frame is ╭"
+        );
+        assert_eq!(
+            buf[(right_x, top_y)].symbol(),
+            "\u{256e}",
+            "top-right of the view-plan frame is ╮"
+        );
+        assert_eq!(
+            buf[(pane_x, bottom_y)].symbol(),
+            "\u{2570}",
+            "bottom-left of the view-plan frame is ╰"
+        );
+        assert_eq!(
+            buf[(right_x, bottom_y)].symbol(),
+            "\u{256f}",
+            "bottom-right of the view-plan frame is ╯"
+        );
+
+        fn is_box_glyph(symbol: &str) -> bool {
+            let mut chars = symbol.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some(ch), None) if ('\u{2500}'..='\u{257F}').contains(&ch)
+            )
+        }
+
+        // `[` and `]` on the title bar are not box glyphs. This loop does
+        // not read their color.
+        fn assert_side_white(buf: &Buffer, cells: &[(u16, u16)], straight: &str, side: &str) {
+            let white = Color::Rgb(255, 255, 255);
+            let mut box_glyphs = 0u32;
+            let mut straights = 0u32;
+            for &(x, y) in cells {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                if !is_box_glyph(symbol) {
+                    continue;
+                }
+                box_glyphs += 1;
+                if symbol == straight {
+                    straights += 1;
+                }
+                let fg = cell.style().fg;
+                assert_eq!(
+                    fg,
+                    Some(white),
+                    "{side} box glyph {symbol:?} at ({x},{y}) must be white Rgb(255, 255, 255); got {fg:?}"
+                );
+            }
+            assert!(
+                box_glyphs > 0 && straights > 0,
+                "{side} side of the view-plan rounded frame must paint {straight:?}; box glyphs {box_glyphs}, straights {straights}"
+            );
+        }
+
+        let top: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, top_y)).collect();
+        let bottom: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, bottom_y)).collect();
+        let left: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (pane_x, y)).collect();
+        let right: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (right_x, y)).collect();
+        assert_side_white(&buf, &top, "\u{2500}", "top");
+        assert_side_white(&buf, &bottom, "\u{2500}", "bottom");
+        assert_side_white(&buf, &left, "\u{2502}", "left");
+        assert_side_white(&buf, &right, "\u{2502}", "right");
+    }
+
+    /// The view-plan side pane (`PlanPreview`, fullscreen off) paints one
+    /// scrollbar column in the cell just inside the white frame. That column
+    /// is only spaces and one `█` run. A wrapped row must not clear a hole
+    /// through the thumb, and the gap must not grow a second bar. The frame
+    /// stays white on every side the outline test already checks. The footer
+    /// divider stays the muted canvas hairline.
+    #[test]
+    fn view_plan_scrollbar_is_one_continuous_column_inside_the_white_frame() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        let owed = "The user wants the status row to show two tokens.";
+        let mut body = format!("# Proposed plan.\n\nalpha\n{owed}\nbeta\n");
+        body.push_str("| Job | Estimate wall | Estimate nested tokens | Note |\n");
+        body.push_str("| --- | --- | --- | --- |\n");
+        body.push_str("| view-plan scrollbar | 25 minutes | 100.0k | one continuous column inside the white frame |\n");
+        body.push_str("gamma\n");
+        for n in 1..=28 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        let track_x = right_x.saturating_sub(1);
+        let gap_x = track_x.saturating_sub(1);
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let div_y = modal.y + modal.height.saturating_sub(2);
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("enough lines to paint a scrollbar");
+        assert_eq!(
+            track.x, track_x,
+            "the track is the column just inside the white frame"
+        );
+        assert_eq!(track.width, 1);
+        assert!(
+            track.y + track.height <= div_y,
+            "the track stops before the footer divider"
+        );
+
+        fn is_box_glyph(symbol: &str) -> bool {
+            let mut chars = symbol.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some(ch), None) if ('\u{2500}'..='\u{257F}').contains(&ch)
+            )
+        }
+        fn assert_side_white(buf: &Buffer, cells: &[(u16, u16)], straight: &str, side: &str) {
+            let white = Color::Rgb(255, 255, 255);
+            let mut box_glyphs = 0u32;
+            let mut straights = 0u32;
+            for &(x, y) in cells {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                if !is_box_glyph(symbol) {
+                    continue;
+                }
+                box_glyphs += 1;
+                if symbol == straight {
+                    straights += 1;
+                }
+                assert_eq!(
+                    cell.style().fg,
+                    Some(white),
+                    "{side} box glyph {symbol:?} at ({x},{y}) must stay white"
+                );
+            }
+            assert!(
+                box_glyphs > 0 && straights > 0,
+                "{side} side stays a white frame"
+            );
+        }
+        let top: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, top_y)).collect();
+        let bottom: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, bottom_y)).collect();
+        let left: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (pane_x, y)).collect();
+        let right: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (right_x, y)).collect();
+        assert_side_white(&buf, &top, "\u{2500}", "top");
+        assert_side_white(&buf, &bottom, "\u{2500}", "bottom");
+        assert_side_white(&buf, &left, "\u{2502}", "left");
+        assert_side_white(&buf, &right, "\u{2502}", "right");
+
+        let mut runs = 0u32;
+        let mut in_run = false;
+        let mut thumb_cells = 0u32;
+        for y in modal.y..div_y {
+            let symbol = buf[(track_x, y)].symbol().to_string();
+            assert!(
+                symbol == " " || symbol == "\u{2588}",
+                "track cell at ({track_x},{y}) is {symbol:?}; a frame stroke or a text cell punched the scrollbar"
+            );
+            let frame = buf[(right_x, y)].symbol().to_string();
+            let frame_fg = buf[(right_x, y)].style().fg;
+            assert_eq!(
+                frame, "\u{2502}",
+                "right frame at ({right_x},{y}) stays │ beside the track"
+            );
+            assert_eq!(frame_fg, Some(white));
+            let gap = buf[(gap_x, y)].symbol().to_string();
+            assert!(
+                gap != "\u{2502}" && gap != "|" && gap != "\u{2588}",
+                "gap cell at ({gap_x},{y}) is {gap:?}; that is a second bar beside the track"
+            );
+            if symbol == "\u{2588}" {
+                thumb_cells += 1;
+                if !in_run {
+                    runs += 1;
+                    in_run = true;
+                }
+            } else {
+                in_run = false;
+            }
+        }
+        assert!(thumb_cells > 0, "the scrollbar thumb is painted");
+        assert_eq!(
+            runs, 1,
+            "the thumb is one continuous run; separated segments mean a row cleared a track cell"
+        );
+
+        let divider = &buf[(track_x, div_y)];
+        assert_eq!(
+            divider.symbol(),
+            "\u{2500}",
+            "the footer divider still crosses the track column"
+        );
+        assert_eq!(
+            divider.style().fg,
+            Some(theme.bg_base),
+            "the footer divider stays the muted canvas hairline"
+        );
+        assert_ne!(divider.symbol(), "\u{2588}");
+
+        let copy = viewer
+            .plan_ref()
+            .expect("plan extras")
+            .copy_button_area
+            .expect("copy stays a header control");
+        assert_eq!(buf[(copy.x, copy.y)].symbol(), "[");
+        assert_eq!(
+            buf[(copy.x, copy.y)].style().fg,
+            Some(theme.gray),
+            "header brackets stay theme.gray"
+        );
+
+        let mut squashed = String::new();
+        for y in 0..full.height {
+            for x in 0..full.width {
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                for ch in cell.symbol().chars() {
+                    if ch.is_whitespace()
+                        || ('\u{2500}'..='\u{257F}').contains(&ch)
+                        || ('\u{2580}'..='\u{259F}').contains(&ch)
+                    {
+                        continue;
+                    }
+                    squashed.push(ch);
+                }
+            }
+        }
+        assert!(
+            squashed.contains("Theuserwantsthestatusrowtoshowtwotokens."),
+            "the owed sentence stays in the text columns"
+        );
+    }
+
+    /// Owed outcome: "A source line longer than the pane wraps. After a
+    /// scroll, the right-hand cells of that sentence are still that
+    /// sentence, in order, and they are not the scrollbar glyph."
+    #[test]
+    fn plan_pane_scroll_keeps_each_wrapped_sentence_in_order() {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        // One source line, longer than the plan pane, so it wraps. The
+        // first word sits on the first wrapped row. The last word sits on
+        // a later wrapped row.
+        let owed_words = [
+            "AlphaOne",
+            "BravoTwo",
+            "CharlieThree",
+            "DeltaFour",
+            "EchoFive",
+            "FoxtrotSix",
+            "GolfSeven",
+            "HotelEight",
+            "IndiaNine",
+            "JulietTen",
+            "KiloEleven",
+            "LimaTwelve",
+            "MikeThirteen",
+            "NovemberFourteen",
+            "OscarFifteen",
+            "PapaSixteen",
+            "QuebecSeventeen",
+            "RomeoEighteen",
+            "SierraNineteen",
+            "TangoTwenty",
+        ];
+        let sentence = format!("{}.", owed_words.join(" "));
+        let mut body = format!("# Proposed plan.\n\n{sentence}\n");
+        for n in 1..=40 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let sentence_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains("AlphaOne")
+                )
+            })
+            .expect("the long sentence is one source line");
+        let sentence_y = viewer.list_state.layout().virtual_y(sentence_idx);
+        let sentence_h = viewer.list_state.layout().item_height(sentence_idx);
+        assert!(
+            sentence_h >= 2,
+            "the source line is longer than the pane and must wrap; height was {sentence_h}"
+        );
+        viewer
+            .list_state
+            .set_scroll_offset(sentence_y.saturating_add(1));
+
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        assert_eq!(
+            viewer.list_state.scroll_offset(),
+            sentence_y + 1,
+            "the scroll stays one row into the wrapped sentence"
+        );
+        assert_eq!(
+            viewer.list_state.first_item_skip_rows(),
+            1,
+            "the first visible row is the continuation of the wrapped sentence"
+        );
+
+        let content = viewer.last_popup_area.expect("plan text area");
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("scrolled plan paints a scrollbar");
+        let prefix_w = viewer
+            .lines
+            .get(sentence_idx)
+            .and_then(|item| item.prefix())
+            .map(|prefix| line_display_width(&prefix) as u16)
+            .unwrap_or(0);
+        let text_x = content.x.saturating_add(prefix_w);
+        assert!(
+            track.x > text_x,
+            "the sentence text sits left of the scrollbar"
+        );
+
+        // Owed outcome: a source line longer than the pane wraps. After a
+        // scroll, the right-hand cells of that sentence are still that
+        // sentence, in order, and they are not the scrollbar glyph.
+        let mut visible = String::new();
+        let mut sentence_rows = 0u16;
+        for y in content.y..content.y.saturating_add(content.height) {
+            let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content) else {
+                continue;
+            };
+            if !source.plain_text.contains("AlphaOne") {
+                continue;
+            }
+            sentence_rows = sentence_rows.saturating_add(1);
+            for x in text_x..track.x {
+                let symbol = buf[(x, y)].symbol();
+                assert_ne!(
+                    symbol, "\u{2588}",
+                    "right-hand cell at ({x},{y}) is the scrollbar glyph, not the sentence"
+                );
+                visible.push_str(symbol);
+            }
+        }
+        assert!(
+            sentence_rows > 0,
+            "the wrapped sentence stays on screen after the scroll"
+        );
+        let sentence_flat: String = sentence.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let flat: String = visible.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            !flat.contains("AlphaOne"),
+            "after the scroll the head is painted on the visible rows, so the right-hand cells are not that sentence in order; visible={flat:?}"
+        );
+        assert!(
+            flat.contains("TangoTwenty"),
+            "the tail of the wrapped sentence is missing after the scroll; visible={flat:?}"
+        );
+        assert!(
+            sentence_flat.contains(&flat),
+            "the right-hand cells are not that sentence in order; visible={flat:?}"
+        );
+    }
+
+    /// A sentence longer than the approval pane wraps onto a second row of
+    /// the same sentence. The first row ends on a word boundary. The next
+    /// row is not a different fragment.
+    #[test]
+    fn plan_approval_second_row_continues_the_same_sentence() {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let words = [
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+            "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo",
+            "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu",
+        ];
+        let mut sentence_words = Vec::new();
+        for _ in 0..12 {
+            sentence_words.extend_from_slice(&words);
+        }
+        let sentence = format!("{}.", sentence_words.join(" "));
+        let body = format!("# Proposed plan.\n\n{sentence}\nNEXTFRAGMENT\n");
+
+        for fullscreen in [false, true] {
+            let mut viewer = LineViewerState::open_markdown_content("plan.md", body.clone(), None)
+                .expect("open plan");
+            viewer.kind = LineViewerKind::PlanPreview;
+            viewer.fullscreen = fullscreen;
+            viewer.plan_mut().feedback_active = false;
+            viewer.plan_mut().show_action_buttons = true;
+
+            let full = Rect::new(0, 0, 100, 30);
+            let mut buf = Buffer::empty(full);
+            render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+            let sentence_idx = viewer
+                .lines
+                .iter()
+                .position(|item| {
+                    matches!(
+                        item,
+                        PlanViewerItem::Source(source) if source.plain_text.contains("Alpha Bravo")
+                    )
+                })
+                .expect("the long sentence is one source line");
+            let sentence_h = viewer.list_state.layout().item_height(sentence_idx);
+            assert!(
+                sentence_h >= 2,
+                "fullscreen={fullscreen} item height was {sentence_h}, want at least 2"
+            );
+
+            let content = viewer.last_popup_area.expect("plan text area");
+            let prefix_w = viewer
+                .lines
+                .get(sentence_idx)
+                .and_then(|item| item.prefix())
+                .map(|prefix| line_display_width(&prefix) as u16)
+                .unwrap_or(0);
+            let text_x = content.x.saturating_add(prefix_w);
+            let text_end = viewer
+                .list_state
+                .scrollbar_area()
+                .map(|track| track.x)
+                .unwrap_or(content.x.saturating_add(content.width));
+            assert!(text_end > text_x, "fullscreen={fullscreen} content column");
+
+            let row_string = |buffer: &Buffer, y: u16| -> String {
+                let mut out = String::new();
+                for x in text_x..text_end {
+                    if let Some(cell) = buffer.cell((x, y)) {
+                        out.push_str(cell.symbol());
+                    }
+                }
+                out.trim().to_string()
+            };
+
+            let sentence_y = viewer.list_state.layout().virtual_y(sentence_idx);
+            let scroll = viewer.list_state.scroll_offset();
+            let y0 = content
+                .y
+                .saturating_add(sentence_y.saturating_sub(scroll) as u16);
+            let y1 = y0.saturating_add(1);
+            let row0 = row_string(&buf, y0);
+            let row1 = row_string(&buf, y1);
+
+            assert!(
+                !row0.contains("NEXTFRAGMENT"),
+                "fullscreen={fullscreen} row 0 is a different fragment: {row0:?}"
+            );
+            assert!(
+                !row1.contains("NEXTFRAGMENT"),
+                "fullscreen={fullscreen} row 1 is a different fragment: {row1:?}"
+            );
+            let sentence_words_owned: Vec<&str> = sentence.split_whitespace().collect();
+            let row0_words: Vec<&str> = row0.split_whitespace().collect();
+            let row1_words: Vec<&str> = row1.split_whitespace().collect();
+            assert!(
+                !row0_words.is_empty() && !row1_words.is_empty(),
+                "fullscreen={fullscreen} blank wrap row row0={row0:?} row1={row1:?}"
+            );
+            assert!(
+                sentence_words_owned.starts_with(row0_words.as_slice()),
+                "fullscreen={fullscreen} first row is not a word-boundary prefix: {row0:?}"
+            );
+            let rest = &sentence_words_owned[row0_words.len()..];
+            assert!(
+                rest.starts_with(row1_words.as_slice()),
+                "fullscreen={fullscreen} second row does not continue the same sentence: {row1:?}"
+            );
+        }
+    }
+
+    /// Half-width plan pane (`PlanPreview`, fullscreen off). The title and
+    /// the body phrase wrap inside the visible content column. The
+    /// line-number gutter, `SOFT_PLAN_TEXT_INSET` (5), and the scrollbar
+    /// stay inside the frame and leave every letter of those strings in
+    /// that column.
+    #[test]
+    fn half_width_plan_pane_wraps_the_title_and_the_bottom_right_phrase_inside_the_content_column()
+    {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        let title =
+            "Move the copy control, fix the wide status row, and choose one of the four cells";
+        let phrase = "from that bottom-right corner";
+        let sentence = format!("The copy control moves away from that {phrase}.");
+        let mut body = format!("# {title}\n\nProposed plan.\n\n{sentence}\n");
+        for n in 1..=40 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        assert_eq!(pane_w, 50, "a 100-column draw keeps a half-width plan pane");
+        assert_eq!(LineViewerState::SOFT_PLAN_TEXT_INSET, 5);
+
+        for (x, y, glyph) in [
+            (pane_x, top_y, "\u{256d}"),
+            (right_x, top_y, "\u{256e}"),
+            (pane_x, bottom_y, "\u{2570}"),
+            (right_x, bottom_y, "\u{256f}"),
+        ] {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.symbol(), glyph, "view-plan frame corner at ({x},{y})");
+            assert_eq!(
+                cell.style().fg,
+                Some(white),
+                "view-plan frame corner at ({x},{y}) stays white"
+            );
+        }
+
+        let header = row_text(&buf, top_y);
+        assert!(
+            header.contains("plan.md"),
+            "the header stays plan.md; row={header:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        for area in [
+            plan.search_button_area
+                .expect("search stays a header control"),
+            plan.copy_button_area.expect("copy stays a header control"),
+            viewer
+                .fullscreen_button_area
+                .expect("enlarge stays a header control"),
+            viewer
+                .close_button_area
+                .expect("close stays a header control"),
+        ] {
+            assert_eq!(buf[(area.x, area.y)].symbol(), "[");
+            assert_eq!(buf[(area.x + 2, area.y)].symbol(), "]");
+        }
+
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y).to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                footer.contains(needle),
+                "footer stays approve | comment | revise | exit; missing {needle} in {footer:?}"
+            );
+        }
+
+        let content = viewer.last_popup_area.expect("plan text area");
+        assert_eq!(
+            content.x,
+            pane_x + 1 + LineViewerState::SOFT_PLAN_TEXT_INSET,
+            "the 5-column inset sits inside the frame"
+        );
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("enough lines to paint a scrollbar");
+        assert_eq!(track.width, 1, "the scrollbar is one column");
+        assert!(
+            track.x + track.width <= right_x,
+            "the scrollbar stays inside the white frame"
+        );
+        let text_end = track.x.saturating_sub(SCROLLBAR_TOTAL_COLS - track.width);
+        assert!(
+            text_end < track.x,
+            "the gap column sits between the words and the scrollbar"
+        );
+
+        let title_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains(title)
+                )
+            })
+            .expect("the title is one source line");
+        let prefix_w = viewer
+            .lines
+            .get(title_idx)
+            .and_then(|item| item.prefix())
+            .map(|prefix| line_display_width(&prefix) as u16)
+            .unwrap_or(0);
+        assert!(prefix_w >= 2, "the line-number gutter is inside the frame");
+        let text_x = content.x.saturating_add(prefix_w);
+        assert!(text_x > content.x, "the gutter sits left of the words");
+        assert!(
+            text_end > text_x,
+            "the gutter, the inset, and the scrollbar leave a content column"
+        );
+        let column_w = text_end - text_x;
+        assert!(
+            (column_w as usize) < title.chars().count(),
+            "the title is longer than the {column_w}-column content width, so it wraps"
+        );
+        assert!(
+            (column_w as usize) < sentence.chars().count(),
+            "the body line is longer than the {column_w}-column content width, so it wraps"
+        );
+        assert!(
+            viewer.list_state.layout().item_height(title_idx) >= 2,
+            "the title wraps onto a second row inside the content column"
+        );
+        let sentence_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains(phrase)
+                )
+            })
+            .expect("the body phrase is one source line");
+        assert!(
+            viewer.list_state.layout().item_height(sentence_idx) >= 2,
+            "the body line wraps onto a second row inside the content column"
+        );
+
+        let squash_source = |needle: &str| -> String {
+            let mut visible = String::new();
+            for y in content.y..content.y.saturating_add(content.height) {
+                let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content)
+                else {
+                    continue;
+                };
+                if !source.plain_text.contains(needle) {
+                    continue;
+                }
+                for x in text_x..text_end {
+                    visible.push_str(buf[(x, y)].symbol());
+                }
+            }
+            visible.chars().filter(|ch| !ch.is_whitespace()).collect()
+        };
+        let title_flat = squash_source(title);
+        let title_owed: String = title.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            title_flat.contains(&title_owed),
+            "the content column must contain the whole title, with every letter left of the scrollbar; visible={title_flat:?}"
+        );
+        let phrase_flat = squash_source(phrase);
+        let phrase_owed: String = phrase.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            phrase_flat.contains(&phrase_owed),
+            "the content column must contain the whole phrase `from that bottom-right corner`, with every letter left of the scrollbar; visible={phrase_flat:?}"
+        );
+        let proposed_flat = squash_source("Proposed plan.");
+        assert!(
+            proposed_flat.contains("Proposedplan."),
+            "SOFT_PLAN_TEXT_INSET stays padding and keeps Proposed plan.; visible={proposed_flat:?}"
+        );
+
+        for y in content.y..content.y.saturating_add(content.height) {
+            for x in text_end..track.x.saturating_add(track.width) {
+                let symbol = buf[(x, y)].symbol();
+                let covers_a_letter = symbol.chars().any(|ch| ch.is_alphanumeric() || ch == '-');
+                assert!(
+                    !covers_a_letter,
+                    "column {x} at row {y} holds {symbol:?}; the scrollbar and its gap must leave that letter in the content column"
+                );
+            }
+        }
+    }
+
+    /// File-backed plan approval sets `feedback_active()` true on the side
+    /// panel whose footer is `approve | comment | revise | exit`. That footer
+    /// is not the feedback composer. The header must still include `[✗]`.
+    /// Search, copy, and enlarge stay. This test does not remove `[build]`
+    /// or `[plan]`.
+    #[test]
+    fn plan_approval_header_shows_the_close_control() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nFile-backed approval\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().comment_flow_active = false;
+        assert!(
+            viewer.feedback_active(),
+            "file-backed plan approval sets feedback_active() true on this side panel"
+        );
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        assert!(
+            viewer.feedback_active(),
+            "drawing the approval screen must leave feedback_active() true"
+        );
+        let modal = viewer.last_modal_area.expect("approval side panel");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            footer.contains('|'),
+            "approval footer is approve | comment | revise | exit; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("clarify"),
+            "this approval footer is not the feedback composer; got {footer:?}"
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
+        assert_title_bar_search_left_of_copy(&buf, plan);
+        let search = plan
+            .search_button_area
+            .expect("search stays on the approval header");
+        let copy = plan
+            .copy_button_area
+            .expect("copy stays on the approval header");
+        let enlarge = viewer
+            .fullscreen_button_area
+            .expect("enlarge stays on the approval header");
+        for area in [search, copy, enlarge] {
+            assert_eq!(area.width, 3, "search, copy, and enlarge stay 3 columns");
+            assert_eq!(area.height, 1, "search, copy, and enlarge stay one row");
+        }
+        assert_eq!(
+            buf[(enlarge.x + 1, enlarge.y)].symbol(),
+            crate::glyphs::enlarge(),
+            "enlarge stays"
+        );
+
+        let header = row_text(&buf, search.y);
+        let close_label = crate::glyphs::ballot_x_button();
+        assert!(
+            header.contains(close_label),
+            "close is omitted on this screen; the header must include the three-column close control {close_label}; got {header:?}"
+        );
+        let close = viewer.close_button_area.expect(
+            "close is omitted on this screen; the hit target must cover the three-column close control",
+        );
+        assert_eq!(close.width, 3, "the close control is three columns");
+        assert_eq!(close.height, 1, "the close control is one row");
+        assert_eq!(close.y, search.y, "close stays on the header row");
+        assert_eq!(
+            buf[(close.x, close.y)].symbol(),
+            "[",
+            "close control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(close.x + 1, close.y)].symbol(),
+            crate::glyphs::ballot_x(),
+            "close control is [✗]"
+        );
+        assert_eq!(
+            buf[(close.x + 2, close.y)].symbol(),
+            "]",
+            "close control closes with a square bracket"
+        );
+        for dx in 0..3u16 {
+            let col = close.x.saturating_add(dx);
+            assert!(
+                close.contains((col, close.y).into()),
+                "the hit target must cover [✗]; close is omitted on this screen when the rect misses column {col}"
+            );
+        }
+        assert_eq!(
+            enlarge.x + enlarge.width + 1,
+            close.x,
+            "one-cell gap between enlarge and close"
+        );
+        assert!(search.x + search.width < copy.x);
+        assert!(copy.x + copy.width < enlarge.x);
+        assert!(enlarge.x + enlarge.width < close.x);
+    }
+
+    /// Approval screen: plan text is visible and the footer is
+    /// `approve | comment | revise | exit`. The footer word `revise` is
+    /// not a prompt. A prompt input is on this screen so the Operator can
+    /// type a revision. This is not the drafting screen, and it is not the
+    /// pane after Approve has started implement.
+    #[test]
+    fn plan_approval_screen_shows_a_prompt_input_while_the_revise_footer_is_up() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nFile-backed approval\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().comment_flow_active = false;
+        assert!(
+            viewer.feedback_active(),
+            "this is the approval screen, not the drafting screen"
+        );
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let screen = (0..full.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("File-backed approval"),
+            "the approval screen shows the plan text:\n{screen}"
+        );
+        let footer_y = (0..full.height).find(|&y| {
+            let lower = row_text(&buf, y).to_ascii_lowercase();
+            ["approve", "comment", "revise", "exit"]
+                .iter()
+                .all(|word| lower.contains(word))
+        });
+        let footer_y = footer_y.unwrap_or_else(|| {
+            panic!("approval footer approve | comment | revise | exit is missing:\n{screen}")
+        });
+        let footer = row_text(&buf, footer_y);
+        assert!(
+            footer.contains('|'),
+            "approval footer is approve | comment | revise | exit; got {footer:?}"
+        );
+
+        let arrow = crate::glyphs::prompt_arrow().trim();
+        let prompt_y =
+            (0..full.height).find(|&y| y != footer_y && row_text(&buf, y).contains(arrow));
+        let prompt_row = prompt_y.map(|y| row_text(&buf, y)).unwrap_or_default();
+        assert!(
+            prompt_y.is_some(),
+            "the approval screen has the footer word revise and no prompt input; footer={footer:?}\n{screen}"
+        );
+        let prompt_lower = prompt_row.to_ascii_lowercase();
+        assert!(
+            !prompt_lower.contains("approve") && !prompt_lower.contains("exit"),
+            "the footer word revise is not the prompt; prompt row={prompt_row:?}"
+        );
+        assert!(
+            prompt_row.contains("Type a revision"),
+            "the prompt input is where the Operator types a revision; got {prompt_row:?}"
+        );
+        assert!(
+            viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.revision_prompt_area.is_some()),
+            "the prompt input is a hit target on the approval screen"
+        );
     }
 
     /// Query `plan` matches `Plan` and `PLAN`. Reuse LineViewerState search.

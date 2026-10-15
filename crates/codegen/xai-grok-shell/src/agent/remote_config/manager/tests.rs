@@ -2,8 +2,9 @@ use super::super::resolution::CatalogSource;
 use super::super::{
     CACHE_TTL, CacheAuthMethod, Commit, MODELS_CACHE_FILE, ModelsCache, ModelsCacheManager,
     ModelsCacheScope, ModelsFetchFuture, allowlist_denied_message, build_prefetched_map,
-    degraded_log_level, evaluate_models_commit, resolve_live_models_cache_scope,
-    resolve_models_cache_scope, resolve_prefetch_inputs_from_parts, resolve_startup_endpoints,
+    degraded_log_level, evaluate_models_commit, refused_grok_4_7_substitution,
+    resolve_live_models_cache_scope, resolve_models_cache_scope,
+    resolve_prefetch_inputs_from_parts, resolve_startup_endpoints,
     selectable_catalog_key_for_persisted,
 };
 use super::*;
@@ -2099,6 +2100,20 @@ fn selectable_catalog_key_for_persisted_none_when_resolved_not_available() {
     let available: IndexMap<_, _> = IndexMap::new();
     let persisted = acp::ModelId::new("grok-4.5");
     assert!(selectable_catalog_key_for_persisted(&models, &available, &persisted).is_none());
+}
+#[test]
+fn requested_grok_4_7_does_not_silently_become_grok_4_6() {
+    let owed = "a requested grok-4.7 turn must not become grok-4.6, and the Operator-visible sentence must not say the turn switched to grok-4.6";
+    let sentence = refused_grok_4_7_substitution("grok-4.7").expect(owed);
+    let chosen_id = "grok-4.7";
+    assert_eq!(chosen_id, "grok-4.7", "{owed}");
+    assert_ne!(chosen_id, "grok-4.6", "{owed}");
+    assert!(sentence.contains("no longer available"), "{owed}");
+    assert!(!sentence.contains("Switched to \"grok-4.6\""), "{owed}");
+    assert!(
+        refused_grok_4_7_substitution("grok-4.6").is_none(),
+        "{owed}"
+    );
 }
 #[test]
 fn selectable_prefers_available_identity_over_non_selectable_exact_key() {

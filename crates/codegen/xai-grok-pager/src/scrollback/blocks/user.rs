@@ -208,8 +208,11 @@ impl UserPromptBlock {
         }
     }
 
-    /// Prefix/body/skill styles. Bold only when `terminal_native` (minimal mode). Minimal keeps a Cyan pointer when
-    /// `accent_user` is Reset (its prompt rows have no band, so the pointer is the turn cue).
+    /// Prefix uses `accent_user` (Operator green on DOGE). The message
+    /// body stays `text_primary`. Skill tokens stay `accent_skill`.
+    /// Bold only when `terminal_native` (minimal mode). Minimal keeps a
+    /// Cyan pointer when `accent_user` is Reset (its prompt rows have no
+    /// band, so the pointer is the turn cue).
     fn prompt_styles(theme: &Theme, terminal_native: bool) -> (Style, Style, Style) {
         let prefix_color = match theme.accent_user {
             ratatui::style::Color::Reset if terminal_native => ratatui::style::Color::Cyan,
@@ -1416,5 +1419,110 @@ mod tests {
         );
         assert_ne!(rail.fg, theme.accent_running);
         assert_ne!(rail.fg, Color::Rgb(255, 255, 255));
+    }
+
+    /// The Operator's message body stays white (`text_primary`). The left
+    /// `┃` rail is Operator green (`accent_user`), including when the
+    /// prompt is collapsed and the body is still on screen.
+    #[test]
+    fn operator_message_text_stays_white_and_the_left_accent_is_green() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let green = Color::Rgb(0, 255, 0);
+        let white = theme.text_primary;
+        assert_eq!(theme.accent_user, green, "DOGE Operator green");
+        assert_ne!(white, green, "the message body is not the green accent");
+
+        let block = UserPromptBlock::new("hello from the operator\nstill the operator");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert!(
+            lines.len() >= 2,
+            "the operator message keeps both lines on the left"
+        );
+
+        let first = &line_at(&lines, 0).content;
+        let first_text = line_text(first);
+        assert!(
+            first_text.starts_with(crate::glyphs::prompt_arrow()),
+            "the operator message sits on the left, got {first_text:?}"
+        );
+        let body = first
+            .spans
+            .iter()
+            .find(|span| span.content.contains("hello from the operator"))
+            .expect("operator message text");
+        assert_ne!(
+            first.spans.first().map(|span| span.content.as_ref()),
+            Some(body.content.as_ref()),
+            "the white body is the message text, not the left arrow"
+        );
+        assert_eq!(body.style.fg, Some(white));
+        assert_eq!(body.style.fg, Some(theme.text_primary));
+        assert_ne!(body.style.fg, Some(theme.accent_user));
+
+        let second = &line_at(&lines, 1).content;
+        let continued = second
+            .spans
+            .iter()
+            .find(|span| span.content.contains("still the operator"))
+            .expect("continued operator message text");
+        assert_eq!(continued.style.fg, Some(white));
+        assert_eq!(continued.style.fg, Some(theme.text_primary));
+        assert_ne!(continued.style.fg, Some(theme.accent_user));
+
+        // A long prompt collapses, and collapsed rows used to drop the rail.
+        // The body is still on screen, so the left accent must stay.
+        let long = "hello from the operator ".repeat(12);
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(long));
+        assert_eq!(
+            entry.display_mode,
+            DisplayMode::Collapsed,
+            "this fixture is the collapsed prompt that was missing its rail"
+        );
+        let accent = entry
+            .block
+            .accent(&accent_test_ctx())
+            .expect("the operator prompt keeps a left accent");
+        assert_eq!(accent.color, green);
+
+        let renderer = EntryRenderer::new(&entry, &theme);
+        let width = 40u16;
+        let height = renderer.desired_height(width).max(4);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let cell = buf.cell((0, y))?;
+                (cell.symbol() == bar).then_some(cell.clone())
+            })
+            .expect("a collapsed operator prompt must still paint the left ┃ rail");
+        assert_eq!(rail.fg, green, "the left accent is Operator green");
+        assert_ne!(rail.fg, white);
+
+        let letter = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let cell = buf.cell((x, y))?;
+                (cell.symbol() == "h").then_some(cell.clone())
+            })
+            .expect("the operator message body is painted");
+        assert_eq!(letter.fg, white, "the message body stays white");
+        assert_ne!(letter.fg, green);
     }
 }

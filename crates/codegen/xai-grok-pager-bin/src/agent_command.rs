@@ -35,20 +35,28 @@ pub(crate) fn spawn_signal_flush() -> AgentSignals {
     let mut streams = SignalStreams::install();
     // Signal observation must remain independent of synchronous agent startup
     let listener = AbortOnDropHandle::new(tokio::spawn(async move {
-        let code = tokio::select! {
-            () = cancelled.cancelled() => return,
-            code = streams.next_code() => code,
-        };
-        if !defer_exit_for_listener.load(Ordering::Acquire) || sender.send(code).is_err() {
+        loop {
+            let code = tokio::select! {
+                () = cancelled.cancelled() => return,
+                code = streams.next_code() => code,
+            };
+            if xai_grok_pager::signal_streams::peer_rebuild_code_arms_reexec(code) {
+                // Peer `/rebuild`: re-exec onto the installed binary. Do not flush-and-exit.
+                // A missing or stale request keeps this process. SIGINT (130) still shuts down below.
+                let _ = xai_grok_update::rebuild::exec_installed_binary_for_peer_rebuild();
+                continue;
+            }
+            if !defer_exit_for_listener.load(Ordering::Acquire) || sender.send(code).is_err() {
+                shutdown_and_flush_telemetry(code);
+            }
+            // A graceful teardown gets one timer; a second signal ends it now
+            let code = tokio::select! {
+                () = cancelled.cancelled() => return,
+                () = tokio::time::sleep(STDIO_SHUTDOWN_TIMEOUT) => code,
+                again = streams.next_code() => again,
+            };
             shutdown_and_flush_telemetry(code);
         }
-        // A graceful teardown gets one timer; a second signal ends it now
-        let code = tokio::select! {
-            () = cancelled.cancelled() => return,
-            () = tokio::time::sleep(STDIO_SHUTDOWN_TIMEOUT) => code,
-            again = streams.next_code() => again,
-        };
-        shutdown_and_flush_telemetry(code);
     }));
     AgentSignals {
         defer_exit,

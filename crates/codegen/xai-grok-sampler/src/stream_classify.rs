@@ -85,6 +85,8 @@ fn responses_event_has_content(event: &rs::ResponseStreamEvent) -> bool {
         | Event::ResponseCodeInterpreterCallCompleted(_)
         | Event::ResponseOutputTextAnnotationAdded(_)
         | Event::ResponseError(_) => false,
+        // Not one of the content-bearing events above.
+        _ => false,
     }
 }
 
@@ -109,6 +111,8 @@ fn output_item_is_tool_call(item: &rs::OutputItem) -> bool {
         | OutputItem::McpApprovalRequest(_)
         | OutputItem::ShellCallOutput(_)
         | OutputItem::ApplyPatchCallOutput(_) => false,
+        // Not one of the tool-call kinds this classifier already treats as content.
+        _ => false,
     }
 }
 

@@ -718,6 +718,9 @@ impl AgentView {
                 if self.question_view.as_ref().is_some_and(|q| {
                     q.focus == crate::views::question_view::QuestionFocus::InputMode
                 }) {
+                    if self.left_click_on_composer_copy_button(mouse) {
+                        return InputOutcome::Changed;
+                    }
                     if self
                         .prompt
                         .textarea_area()

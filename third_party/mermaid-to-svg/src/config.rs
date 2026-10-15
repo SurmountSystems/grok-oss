@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use serde_yaml::Value;
+use serde_json::Value;
 
 use crate::theme::{MermaidTheme, MermaidThemePreset, MermaidThemeVariables};
 
@@ -98,7 +98,7 @@ fn parse_yaml_value(yaml: &str) -> Option<Value> {
         return Some(Value::Null);
     }
 
-    serde_yaml::from_str::<Value>(yaml).ok()
+    serde_saphyr::from_str::<Value>(yaml).ok()
 }
 
 fn parse_frontmatter_metadata(value: &Value) -> MermaidFrontmatter {
@@ -128,14 +128,11 @@ fn parse_render_config(value: &Value) -> RenderConfig {
 
 fn parse_theme_variables(value: Option<&Value>) -> MermaidThemeVariables {
     let mut variables = MermaidThemeVariables::default();
-    let Some(Value::Mapping(mapping)) = value else {
+    let Some(Value::Object(mapping)) = value else {
         return variables;
     };
 
     for (key, value) in mapping {
-        let Some(key) = key.as_str() else {
-            continue;
-        };
         let Some(value) = value_to_string(value) else {
             continue;
         };
@@ -164,11 +161,11 @@ fn parse_flowchart_config(value: Option<&Value>) -> FlowchartConfig {
 }
 
 fn mapping_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    let Value::Mapping(mapping) = value else {
+    let Value::Object(mapping) = value else {
         return None;
     };
 
-    mapping.get(&Value::String(key.to_string()))
+    mapping.get(key)
 }
 
 fn value_to_string(value: &Value) -> Option<String> {

@@ -29,7 +29,7 @@ not this TUI. See [Authentication](02-authentication.md#machine-console-api-key-
 
 ## Opening the dashboard
 
-- **`grok dashboard`** — launch the TUI into the dashboard.
+- **`grok-oss dashboard`** — launch the TUI into the dashboard.
 - **`/dashboard`** (aliases **`/agents-dashboard`**, **`/sessions`**) — open
   from inside a session.
 - **`Ctrl+\`** — same view as the slash command.

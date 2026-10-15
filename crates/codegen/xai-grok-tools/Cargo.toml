@@ -42,7 +42,7 @@ globset = { workspace = true }
 grep = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 kamadak-exif = { workspace = true, optional = true }
-pdf_oxide = { workspace = true }
+hayro = { workspace = true }
 # Exact pin. pdf_oxide 0.3.78 does not fill DocumentIR::defined_names.
 office_oxide = { workspace = true }
 # PPTX text extraction (implementations/read_file/pptx.rs). Deliberately NOT
@@ -94,7 +94,7 @@ uuid = { workspace = true, features = ["v7"] }
 wildmatch = { workspace = true }
 xai-grok-env = { workspace = true }
 grok-rate-limit = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true }
 shellexpand = "3.1"
 tempfile = { workspace = true }
 tar = { workspace = true }

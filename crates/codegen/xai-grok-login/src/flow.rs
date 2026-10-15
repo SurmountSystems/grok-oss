@@ -464,7 +464,7 @@ pub(super) async fn run_auth_flow_steps(
         "auth: starting auth flow"
     );
     if reauth {
-        auth_manager.clear()?;
+        auth_manager.keep_other_identity_then_clear_active_base()?;
         let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
     }
     if !force_interactive && let Some(auth) = auth_manager.current() {

@@ -349,6 +349,9 @@ pub struct SupergrokPrincipalListing {
     /// Billing identity: team id, else user id, else the store scope.
     pub identity_id: String,
     pub fingerprint: String,
+    /// Stored account email. Absent when the login did not record one.
+    /// Not a token, and not inferred from `identity_id`.
+    pub email: Option<String>,
 }
 
 /// Personal multi-slot suffix. A personal session is also stored at `{base}::personal`.
@@ -388,15 +391,38 @@ pub fn multi_slot_scope_for_auth(base: &str, auth: &GrokAuth) -> String {
 
 /// Last write wins at `base`. A personal session is also stored at `{base}::personal`.
 /// A team principal is also stored at `{base}::team::{team_id}` and is left in place by a later personal write.
+/// A base row that has no slot yet is copied into its slot before a different account replaces `base`.
 pub fn upsert_supergrok_session(map: &mut AuthStore, base: &str, auth: GrokAuth) {
+    if let Some(previous) = map.get(base).cloned() {
+        keep_displaced_base_identity(map, base, &previous, &auth);
+    }
     if auth.is_team_principal() {
-        if let Some(team_id) = auth.team_id.as_deref() {
+        if let Some(team_id) = auth.team_id.as_deref().filter(|id| !id.is_empty()) {
             map.insert(format!("{base}::team::{team_id}"), auth.clone());
         }
     } else {
         map.insert(format!("{base}::personal"), auth.clone());
     }
     map.insert(base.to_owned(), auth);
+}
+
+/// The identity at `base` is one stored login. Replacing it with a different
+/// account must leave that login in its personal or team slot.
+fn keep_displaced_base_identity(
+    map: &mut AuthStore,
+    base: &str,
+    previous: &GrokAuth,
+    next: &GrokAuth,
+) {
+    if !is_supergrok_session_mode(previous.auth_mode) {
+        return;
+    }
+    let previous_slot = multi_slot_scope_for_auth(base, previous);
+    let next_slot = multi_slot_scope_for_auth(base, next);
+    if previous_slot == next_slot || map.contains_key(&previous_slot) {
+        return;
+    }
+    map.insert(previous_slot, previous.clone());
 }
 
 /// Personal and business slots only. The `base` mirror is not a third listing.
@@ -421,9 +447,20 @@ pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrinci
             mode_label,
             identity_id: supergrok_identity_id_from_auth(auth, key),
             fingerprint: fingerprint_session_token(&auth.key),
+            email: stored_account_email(auth),
         });
     }
     listings
+}
+
+/// Account email stored on the login. Empty and whitespace are absent.
+/// This does not treat `user_id` or `team_id` as an email.
+fn stored_account_email(auth: &GrokAuth) -> Option<String> {
+    auth.email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned)
 }
 
 /// SHA-256 hex of the session token. The digest does not contain the token text.

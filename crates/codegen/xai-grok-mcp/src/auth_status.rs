@@ -65,7 +65,10 @@ pub(crate) async fn decide_http_auth_from_disk(server_name: &str, url: &str) -> 
 
     match verdict {
         StoredAuthVerdict::StoredCredentials => {
-            match rmcp::transport::auth::AuthorizationManager::new(url).await {
+            // `AuthorizationManager::new` builds rmcp's default client and fails
+            // `Client::build` when the OS trust store is empty, which would drop a
+            // stored token into `NoOauthSupport` before any request.
+            match crate::mcp_http_client::authorization_manager(url).await {
                 Ok(mut manager) => {
                     let adapter =
                         McpCredentialStoreAdapter::new(server_name.to_string(), parsed_url);

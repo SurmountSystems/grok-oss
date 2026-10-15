@@ -49,6 +49,15 @@ impl Harness {
     }
 }
 
+/// Absolute `sleep`. The Nix sandbox has `/bin/sh` and coreutils on `PATH`, not `/bin/sleep`.
+fn sleep_program() -> String {
+    std::env::split_paths(&std::env::var("PATH").unwrap_or_default())
+        .map(|dir| dir.join("sleep"))
+        .find(|path| path.is_file())
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "/bin/sleep".to_owned())
+}
+
 /// Process death is not an event this process can await for a grandchild, so poll it under a generous bound.
 async fn is_gone_within(pid: u32, bound: Duration) -> bool {
     tokio::time::timeout(bound, async {
@@ -135,13 +144,14 @@ async fn exit_status_decides_ok_or_failed() {
 async fn handler_ignoring_sigterm_is_killed_with_its_group_by_the_deadline() {
     let harness = Harness::new().await;
     let pid_file = harness.path("grandchild.pid");
-    let script = r#"trap '' TERM; /bin/sleep 30 & echo $! > "$0"; wait"#;
+    let sleep = sleep_program();
+    let script = format!(r#"trap '' TERM; "{sleep}" 30 & echo $! > "$0"; wait"#);
     // Generous so that even a heavily loaded machine runs the `trap` before SIGTERM lands.
     let budget = Duration::from_secs(5);
 
     let started = Instant::now();
     let outcome = harness
-        .run(&["/bin/sh", "-c", script, &pid_file], None, budget)
+        .run(&["/bin/sh", "-c", &script, &pid_file], None, budget)
         .await;
     let elapsed = started.elapsed();
 
@@ -227,9 +237,10 @@ async fn background_child_of_a_handler_that_exited_is_killed() {
 #[tokio::test]
 async fn own_timeout_cuts_before_the_trigger_deadline() {
     let harness = Harness::new().await;
+    let sleep = sleep_program();
     let started = Instant::now();
     let outcome = harness
-        .run(&["/bin/sleep", "30"], Some(200), Duration::from_secs(10))
+        .run(&[&sleep, "30"], Some(200), Duration::from_secs(10))
         .await;
     let elapsed = started.elapsed();
 

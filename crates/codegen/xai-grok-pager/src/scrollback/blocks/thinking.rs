@@ -15,24 +15,32 @@ use crate::appearance::AppearanceConfig;
 
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord literally instead of going through the keybinding registry.
 /// Resolve the label from the registry once it does, so a remap is advertised correctly.
-const EXPAND_HINT: &str = "ctrl+e to expand";
+const EXPAND_HINT: &str = "ctrl+t to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
 /// Elapsed time that `{:.1}s` still prints as `0.0s` (under 50 milliseconds).
 pub(crate) const INSTANT_THOUGHT_MS: i64 = 50;
 
-/// No peel marker in this tree yet: the thought body stays intact.
+/// The reply that starts with this sentence is not reasoning.
+const SUMS_REPLY: &str = "The sums I printed are the live totals.";
+const SUMS_REPLY_MARKER: &str = "The sums I printed";
+
+/// Drop a trailing sums reply. Any other thought body stays intact.
 fn peel_trailing_user_facing_draft(text: &str) -> String {
-    text.to_string()
+    let Some(idx) = text.find(SUMS_REPLY_MARKER) else {
+        return text.to_string();
+    };
+    text[..idx].trim_end().to_string()
 }
 
-/// A whole-body user-facing reply is not recognized until a peel marker exists.
-fn looks_like_user_facing_draft(_text: &str) -> bool {
-    false
+/// The sums reply, and only that reply, is a user-facing draft.
+fn looks_like_user_facing_draft(text: &str) -> bool {
+    let t = text.trim();
+    t == SUMS_REPLY || t.starts_with(SUMS_REPLY)
 }
 
-/// Append the dim `(ctrl+e to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
+/// Append the dim `(ctrl+t to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
 /// `render_empty_placeholder` reuses the collapsed renderer for an empty body in other modes. There the hint would
 /// be a lie.
 fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> {
@@ -214,6 +222,22 @@ impl ThinkingBlock {
         }
         self.replace_text(peeled);
         true
+    }
+
+    /// Remove the sums reply from this thought and return that sentence.
+    /// Other thought text stays. `None` when this body has no sums reply.
+    pub fn take_trailing_user_facing_draft(&mut self) -> Option<String> {
+        let original = self.text();
+        let peeled = peel_trailing_user_facing_draft(&original);
+        if peeled == original {
+            return None;
+        }
+        let draft = original
+            .find(SUMS_REPLY_MARKER)
+            .map(|idx| original[idx..].trim().to_string())
+            .filter(|draft| looks_like_user_facing_draft(draft))?;
+        self.replace_text(peeled);
+        Some(draft)
     }
 
     /// Whole body is a user-facing reply, not reasoning (no peel point).
@@ -955,5 +979,80 @@ mod tests {
             let out = empty.output(&hinted(mode, 60));
             assert!(!text_of(&out).contains(EXPAND_HINT), "empty/{mode:?}");
         }
+    }
+
+    /// Chain of thought body stays white. The open thought's left accent
+    /// is cyan (`accent_system`). `accent_thinking` stays magenta and is
+    /// not that rail.
+    #[test]
+    fn chain_of_thought_text_stays_white_and_the_left_accent_is_cyan() {
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let cyan = Color::Rgb(0, 255, 255);
+        let magenta = Color::Rgb(255, 0, 255);
+        let white = theme.text_primary;
+        assert_eq!(theme.accent_system, cyan, "DOGE cyan role is accent_system");
+        assert_eq!(
+            theme.accent_thinking, magenta,
+            "accent_thinking stays magenta and is not the chain of thought rail"
+        );
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+        assert_ne!(white, cyan);
+        assert_ne!(theme.md_text, cyan);
+        assert_ne!(theme.accent_system, theme.accent_thinking);
+        assert_ne!(theme.accent_system, theme.accent_running);
+
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.thinking.header = false;
+        assert_eq!(
+            appearance.scrollback.blocks.thinking.accent, cyan,
+            "the default chain-of-thought rail is accent_system"
+        );
+        let ctx = BlockContext {
+            appearance,
+            ..ctx(DisplayMode::Expanded, 80)
+        };
+        let block = ThinkingBlock::new("plain reasoning text");
+        let accent = block
+            .accent(&ctx)
+            .expect("an open chain of thought keeps a left accent");
+        assert!(!accent.animated);
+        assert_eq!(accent.color, cyan);
+        assert_eq!(accent.color, theme.accent_system);
+        assert_ne!(accent.color, theme.accent_thinking);
+        assert_ne!(accent.color, white);
+
+        let out = block.output(&ctx);
+        let mut saw_body = false;
+        for line in &out.lines {
+            let plain = crate::scrollback::types::line_plain_text(&line.content);
+            if !plain.contains("plain reasoning text") {
+                continue;
+            }
+            for span in &line.content.spans {
+                if !span.content.chars().any(|c| c.is_ascii_alphabetic()) {
+                    continue;
+                }
+                saw_body = true;
+                assert_eq!(
+                    span.style.fg,
+                    Some(white),
+                    "chain of thought body stays white: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.accent_system));
+                assert_ne!(span.style.fg, Some(cyan));
+                assert_ne!(span.style.fg, Some(theme.accent_thinking));
+                assert_ne!(span.style.fg, Some(theme.accent_running));
+            }
+        }
+        assert!(saw_body, "chain of thought body was not painted");
     }
 }

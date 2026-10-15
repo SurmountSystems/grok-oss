@@ -453,6 +453,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     // Record it as self-originated so the ACP gate treats this turn's deltas as ours rather than adopting them as another client's turn
     // Ours means drive it, and drop a stale post-rewind chunk on a mismatch
     agent.note_self_originated_prompt(&prompt_id);
+    // Bind the live prompt_task to this prompt id at send time. The
+    // turn-start shim also binds, and that second call is a no-op.
+    agent.bind_or_start_live_prompt_task(&prompt_id, &queued.text);
 
     let drain = match queued.kind {
         QueueEntryKind::Prompt => {
@@ -463,7 +466,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             let multi = xai_prompt_queue::is_combined(&queued.combined_texts);
             let (prompt_idx, prompt_entry_id, combined_entries) = if multi {
                 let (first_idx, _, last_id, all_ids) =
-                    paint_or_reuse_combined_user_bubbles(agent, &queued.combined_texts);
+                    paint_or_reuse_combined_user_bubbles(agent, &prompt_id, &queued.combined_texts);
                 (first_idx, last_id, all_ids)
             } else {
                 let block = if is_skill {
@@ -474,9 +477,15 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                         queued.skill_token_ranges.clone(),
                     )
                 } else {
-                    RenderBlock::user_prompt(&queued.text)
+                    visible_prompt_block(Some(&prompt_id), &queued.text)
                 };
                 let id = agent.scrollback.push_block(block);
+                mark_agent_authored_running(
+                    &mut agent.scrollback,
+                    id,
+                    Some(&prompt_id),
+                    &queued.text,
+                );
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
             // Stash for cancel-with-restore
@@ -660,6 +669,27 @@ pub(crate) fn shim_renders_own_user_block(kind: &str, text: Option<&str>) -> boo
     }
 }
 
+/// Operator text stays a user prompt. Agent words, plan resume, and the
+/// inserted approve paraphrase do not.
+fn visible_prompt_block(prompt_id: Option<&str>, text: &str) -> RenderBlock {
+    if crate::acp::tracker::prompt_text_is_agent_authored(prompt_id, text) {
+        RenderBlock::agent_message(text.to_string())
+    } else {
+        RenderBlock::user_prompt(text.to_string())
+    }
+}
+
+fn mark_agent_authored_running(
+    scrollback: &mut ScrollbackState,
+    id: crate::scrollback::EntryId,
+    prompt_id: Option<&str>,
+    text: &str,
+) {
+    if crate::acp::tracker::prompt_text_is_agent_authored(prompt_id, text) {
+        scrollback.set_entry_running(id, true);
+    }
+}
+
 /// Trailing turn-starting `UserPrompt` matching `text`, scanning back past turn-boundary chrome.
 /// `claim_interjection` skips other interjections and keeps the oldest match.
 fn trailing_user_prompt_matching(
@@ -687,6 +717,9 @@ fn trailing_user_prompt_matching(
                 break;
             }
             RenderBlock::UserPrompt(ub) if claim_interjection && ub.is_interjection => continue,
+            RenderBlock::AgentMessage(am) if am.text() == text && !claim_interjection => {
+                return Some((idx, entry.id));
+            }
             RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
             _ => break,
         }
@@ -714,6 +747,13 @@ fn trailing_user_prompts(
                     return Some(out);
                 }
             }
+            RenderBlock::AgentMessage(am) => {
+                out.push((idx, entry.id, am.text()));
+                if out.len() == n {
+                    out.reverse();
+                    return Some(out);
+                }
+            }
             RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
             _ => return None,
         }
@@ -726,6 +766,7 @@ fn trailing_user_prompts(
 /// Returns `(first_idx, first_id, last_id, all_segment_ids)`, with segment ids oldest to newest.
 fn paint_or_reuse_combined_user_bubbles(
     agent: &mut AgentView,
+    prompt_id: &str,
     segments: &[String],
 ) -> (
     usize,
@@ -756,7 +797,8 @@ fn paint_or_reuse_combined_user_bubbles(
     for seg in segments {
         let id = agent
             .scrollback
-            .push_block(RenderBlock::user_prompt(seg.clone()));
+            .push_block(visible_prompt_block(Some(prompt_id), seg));
+        mark_agent_authored_running(&mut agent.scrollback, id, Some(prompt_id), seg);
         all_ids.push(id);
         if first_idx.is_none() {
             first_idx = Some(agent.scrollback.len().saturating_sub(1));
@@ -790,10 +832,11 @@ pub(super) fn push_send_now_user_block(
     if let Some((existing, _)) = agent.send_now_painted_blocks.get(prompt_id).copied()
         && let Some(idx) = agent.scrollback.index_of_id(existing)
     {
-        let same = matches!(
-            agent.scrollback.entry(idx).map(|e| &e.block),
-            Some(RenderBlock::UserPrompt(ub)) if ub.text == text
-        );
+        let same = match agent.scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::UserPrompt(ub)) => ub.text == text,
+            Some(RenderBlock::AgentMessage(am)) => am.text() == text,
+            _ => false,
+        };
         if same {
             return;
         }
@@ -803,9 +846,10 @@ pub(super) fn push_send_now_user_block(
     // Claiming it would leave the send-now with no new visible message
     let block = match kind {
         "cron" => RenderBlock::cron_prompt(text.to_string()),
-        _ => RenderBlock::user_prompt(text.to_string()),
+        _ => visible_prompt_block(Some(prompt_id), text),
     };
     let entry_id = agent.scrollback.push_block(block);
+    mark_agent_authored_running(&mut agent.scrollback, entry_id, Some(prompt_id), text);
     // Send-now keeps the viewport where it is (no entry-top jump).
     agent.scrollback.enable_follow_mode();
     agent
@@ -939,7 +983,11 @@ pub(crate) fn apply_turn_start_shim(
         }
         "cron" => (text.as_deref().map(RenderBlock::cron_prompt), false),
         _ if multi_segments.is_some() => (None, true),
-        _ => (text.as_deref().map(RenderBlock::user_prompt), true),
+        _ => (
+            text.as_deref()
+                .map(|t| visible_prompt_block(Some(&prompt_id), t)),
+            true,
+        ),
     };
 
     debug_assert!(
@@ -950,7 +998,7 @@ pub(crate) fn apply_turn_start_shim(
 
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
-            paint_or_reuse_combined_user_bubbles(agent, &segments);
+            paint_or_reuse_combined_user_bubbles(agent, &prompt_id, &segments);
         if rewindable {
             let restore = text.clone().unwrap_or_else(|| {
                 xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
@@ -984,10 +1032,12 @@ pub(crate) fn apply_turn_start_shim(
                 let idx = agent.scrollback.index_of_id(id)?;
                 // Text drift resolves by freshness: an `edited` paint is newer than the adoption's captured mirror text, so keep it
                 // Otherwise the adoption is fresher: swap the stale block
-                let RenderBlock::UserPrompt(ub) = &agent.scrollback.entry(idx)?.block else {
-                    return None;
+                let painted_text = match &agent.scrollback.entry(idx)?.block {
+                    RenderBlock::UserPrompt(ub) => ub.text.clone(),
+                    RenderBlock::AgentMessage(am) => am.text(),
+                    _ => return None,
                 };
-                if text.as_deref() != Some(ub.text.as_str()) && !edited {
+                if text.as_deref() != Some(painted_text.as_str()) && !edited {
                     agent.scrollback.remove_entry(id);
                     match text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                         Some(fresh) => {
@@ -1038,12 +1088,16 @@ pub(crate) fn apply_turn_start_shim(
             found
         } else {
             let id = agent.scrollback.push_block(block);
+            if let Some(t) = text.as_deref() {
+                mark_agent_authored_running(&mut agent.scrollback, id, Some(&prompt_id), t);
+            }
             (agent.scrollback.len().saturating_sub(1), id)
         };
         if rewindable && let Some(text) = text {
             // The rewind restore must match the on-screen (possibly edited) block text, not the adoption's stale mirror text
             let restore_text = match agent.scrollback.entry(prompt_idx).map(|e| &e.block) {
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
+                Some(RenderBlock::AgentMessage(am)) if am.text() != text => am.text(),
                 _ => text,
             };
             agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {

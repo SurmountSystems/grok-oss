@@ -199,11 +199,11 @@ impl SubagentSpawnRequest {
     /// channel adapters and deterministic test harnesses; production lifecycle replies are owned by
     /// `SubagentCoordinator`.
     pub fn respond_with(
-        self,
+        mut self,
         build: impl FnOnce(&SubagentRequest) -> SubagentResult,
     ) -> Result<(), SubagentResult> {
         let result = build(&self.request);
-        if let Some(admitted_tx) = self.admitted_tx {
+        if let Some(admitted_tx) = self.admitted_tx.take() {
             let admission = if result.success {
                 Ok(())
             } else {
@@ -213,6 +213,12 @@ impl SubagentSpawnRequest {
                     .unwrap_or_else(|| "spawn rejected".to_owned()))
             };
             let _ = admitted_tx.send(admission);
+        }
+        // A successful harness reply is a recorded child. Background spawn
+        // treats a dropped registration signal as a coordinator reject even
+        // when the terminal result succeeded.
+        if result.success {
+            self.notify_registered();
         }
         self.result_tx.send(result)
     }

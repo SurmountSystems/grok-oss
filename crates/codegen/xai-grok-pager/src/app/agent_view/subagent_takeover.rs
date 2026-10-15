@@ -6,6 +6,7 @@
 //! step 0 of `handle_input_inner`, before any parent routing, and the child's `pending_effects` are hoisted because
 //! `AppView` drains only the top-level view's queue. Ctrl+Q is never consumed here; it always bubbles to the global quit.
 use crate::actions::ActionRegistry;
+use crate::app::actions::Action;
 use crate::app::agent_view::child_action_filter::filter_child_outcome;
 use crate::app::agent_view::viewer::IdleEnterQuote;
 use crate::app::agent_view::{AgentView, AppRenderParams, OverlayHeader};
@@ -16,7 +17,7 @@ use crate::scrollback::render::ScratchBuffer;
 use crate::theme::Theme;
 use crate::views::agent;
 use crate::views::shortcuts_bar::PendingHint;
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -52,6 +53,13 @@ impl AgentView {
             ?replay_outcome,
             "opened subagent fullscreen"
         );
+        let open_l2_floor = self
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|child| child.composer_route() == super::ComposerRoute::L2Floor);
+        if open_l2_floor && let Some(child) = self.subagent_views.get_mut(&child_sid) {
+            let _ = child.set_active_pane(super::AgentPane::Prompt, true);
+        }
         self.active_subagent = Some(child_sid);
     }
     /// Open the takeover for the child the selected row links to (`RenderBlock::child_session_id`). `false`, so the
@@ -78,9 +86,125 @@ impl AgentView {
     /// See [`crate::app::subagent::evict_finished_child_view`] for rationale and guards.
     /// All close sites route through here.
     pub(crate) fn close_subagent_fullscreen(&mut self) {
+        if let Some(return_sid) = self.overlay_return_sid.clone()
+            && self.subagent_views.contains_key(&return_sid)
+            && self
+                .active_subagent
+                .as_deref()
+                .is_some_and(|active| active != return_sid.as_str())
+        {
+            if let Some(active_sid) = self.active_subagent.clone() {
+                let _ = crate::app::subagent::evict_finished_child_view(self, &active_sid);
+            }
+            self.overlay_return_sid = None;
+            self.active_subagent = Some(return_sid);
+            return;
+        }
+        self.overlay_return_sid = None;
         if let Some(child_sid) = self.active_subagent.take() {
             let _ = crate::app::subagent::evict_finished_child_view(self, &child_sid);
         }
+    }
+
+    /// Empty Enter on an L2 floor opens the L3 and remembers the L2.
+    /// A selected child row wins. Otherwise the single running specialist
+    /// whose parent session is this L2. Does not close or cancel the L2.
+    fn open_l3_from_l2(&mut self) -> bool {
+        let Some(l2_sid) = self.active_subagent.clone() else {
+            return false;
+        };
+        let is_floor = self
+            .subagent_views
+            .get(&l2_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+        if !is_floor {
+            return false;
+        }
+        let from_row = self.subagent_views.get(&l2_sid).and_then(|l2| {
+            l2.scrollback
+                .selected()
+                .and_then(|idx| l2.scrollback.entry(idx))
+                .and_then(|entry| entry.block.child_session_id())
+                .map(str::to_owned)
+        });
+        let target = from_row
+            .filter(|sid| sid != &l2_sid && self.subagent_views.contains_key(sid))
+            .or_else(|| {
+                let mut running: Vec<String> = self
+                    .subagent_sessions
+                    .iter()
+                    .filter(|(id, info)| {
+                        info.is_running()
+                            && info.attempt.parent_session_id.as_deref() == Some(l2_sid.as_str())
+                            && self.subagent_views.contains_key(id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if running.len() == 1 {
+                    running.pop()
+                } else {
+                    None
+                }
+            });
+        let Some(target) = target else {
+            return false;
+        };
+        self.overlay_return_sid = Some(l2_sid);
+        self.active_subagent = Some(target);
+        true
+    }
+
+    /// A painted specialist count on the L1 list opens that running L3.
+    /// Esc or q returns to the L2. This does not send KillSubagent.
+    pub(crate) fn open_running_l3_from_list(&mut self, l2_sid: &str) -> bool {
+        if !self.subagent_views.contains_key(l2_sid) {
+            return false;
+        }
+        let mut running: Vec<String> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(id, info)| {
+                info.is_running()
+                    && info.attempt.workflow_run_id.is_none()
+                    && info.attempt.parent_session_id.as_deref() == Some(l2_sid)
+                    && self.subagent_views.contains_key(id.as_str())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        running.sort();
+        let Some(target) = running.into_iter().next() else {
+            return false;
+        };
+        self.overlay_return_sid = Some(l2_sid.to_string());
+        self.active_subagent = Some(target);
+        true
+    }
+
+    /// Floor Enter sends to that L2. Missing session id does not target L1.
+    fn l2_floor_send_interject(&mut self, l2_sid: &str, text: String) -> bool {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let Some(session_id) = self
+            .subagent_views
+            .get(l2_sid)
+            .and_then(|view| view.session.session_id.clone())
+        else {
+            return false;
+        };
+        self.pending_effects
+            .push(crate::app::actions::Effect::SendInterject {
+                agent_id: self.session.id,
+                session_id,
+                text: trimmed,
+                interjection_id: uuid::Uuid::new_v4().to_string(),
+                blocks: None,
+            });
+        if let Some(child) = self.subagent_views.get_mut(l2_sid) {
+            child.prompt.set_text("");
+        }
+        true
     }
     /// Fetch a child view for applying a live update, hydrating a resumed child's inherited transcript first.
     /// The incoming block then never closes the replay window (see [`crate::app::subagent::replay_resumed_child_before_live_block`]).
@@ -92,6 +216,48 @@ impl AgentView {
         crate::app::subagent::replay_resumed_child_before_live_block(self, child_sid);
         self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
+    /// The open L3 frame paints that specialist's own context.
+    /// Both the used count and the window have to be present and above zero.
+    /// A missing figure stays off the frame. It is not printed as 0, and the
+    /// L1 sampling window is not copied onto the specialist.
+    fn paint_opened_l3_context(&mut self, child_sid: &str) {
+        let stamp = {
+            let Some(info) = self.subagent_sessions.get(child_sid) else {
+                return;
+            };
+            if info.attempt.depth != Some(2) {
+                return;
+            }
+            match (
+                info.attempt.tokens_used.filter(|&count| count > 0),
+                info.attempt
+                    .context_window_tokens
+                    .filter(|&count| count > 0),
+            ) {
+                (Some(used), Some(window)) => Some((used, window)),
+                _ => None,
+            }
+        };
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return;
+        };
+        if let Some((used, window)) = stamp {
+            child.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+                used, window,
+            ));
+            child.session_sampling_window = Some(window);
+            child.session.models.override_context_window(window);
+            return;
+        }
+        if child
+            .context_state
+            .as_ref()
+            .is_some_and(|ctx| ctx.used == 0)
+        {
+            child.context_state = None;
+        }
+    }
+
     /// Paint the takeover frame (title row with status, elapsed, and the `[\u{2717}]` close button) around the child view's own `draw`.
     /// Returns the child's cursor and post-flush so the parent frame forwards them unchanged.
     #[expect(clippy::too_many_arguments)]
@@ -112,6 +278,8 @@ impl AgentView {
         use crate::app::subagent::{format_context_badge, format_subagent_label};
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
+        self.hit_overlay_nested_status.clear();
+        self.overlay_nested_status_child_sid = None;
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let compact = appearance.prompt.compact;
@@ -145,58 +313,106 @@ impl AgentView {
         let _title_row = frame.title_row;
         let inner = frame.content;
         let _border_style = Style::default().fg(border_color);
-        let info = self.subagent_sessions.get(child_sid);
-        let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
-        let is_running = info.is_some_and(|s| s.is_running());
-        let elapsed = info
-            .map(|s| crate::util::format_duration(s.display_elapsed()))
-            .unwrap_or_default();
-        let (type_label, description): (String, String) = match info {
-            Some(s) => format_subagent_label(s),
-            None => (String::new(), raw_description.to_string()),
+        // Copy the row fields before the overlay mirror. `badge` used to borrow the
+        // session map through the mutable specialist call below.
+        let (
+            is_running,
+            elapsed,
+            type_label,
+            description,
+            icon,
+            icon_color,
+            label_color,
+            meta,
+            badge,
+        ) = {
+            let info = self.subagent_sessions.get(child_sid);
+            let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
+            let is_running = info.is_some_and(|s| s.is_running());
+            let elapsed = info
+                .map(|s| crate::util::format_duration(s.display_elapsed()))
+                .unwrap_or_default();
+            let (type_label, description): (String, String) = match info {
+                Some(s) => format_subagent_label(s),
+                None => (String::new(), raw_description.to_string()),
+            };
+            let completed = info.is_some_and(|s| {
+                s.status.as_deref() == Some("completed")
+                    || s.attempt.status.as_deref() == Some("completed")
+            });
+            let icon = if is_running {
+                let elapsed_ms = info
+                    .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
+            } else if completed {
+                crate::glyphs::check_mark()
+            } else {
+                crate::glyphs::ballot_x()
+            };
+            let icon_color = if is_running {
+                theme.accent_running
+            } else if completed {
+                theme.accent_success
+            } else {
+                theme.accent_error
+            };
+            let label_color = if info.is_some_and(|s| s.attempt.pending_kill) {
+                theme.accent_error
+            } else if is_running {
+                theme.accent_running
+            } else if completed {
+                theme.accent_success
+            } else {
+                theme.accent_error
+            };
+            let meta = info
+                .and_then(|s| s.attempt.model.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("")
+                .to_string();
+            let badge = info.map(format_context_badge).unwrap_or("").to_string();
+            (
+                is_running,
+                elapsed,
+                type_label,
+                description,
+                icon,
+                icon_color,
+                label_color,
+                meta,
+                badge,
+            )
         };
-        let icon = if is_running {
-            let elapsed_ms = info
-                .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
-                .unwrap_or(0);
-            crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
-            crate::glyphs::check_mark()
-        } else {
-            crate::glyphs::ballot_x()
-        };
-        let icon_color = if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let label_color = if info.is_some_and(|s| s.attempt.pending_kill) {
-            theme.accent_error
-        } else if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let meta = info
-            .and_then(|s| s.attempt.model.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
-        let badge = info.map(format_context_badge).unwrap_or("");
-        let activity_label: Option<String> = if is_running {
-            self.subagent_views.get(child_sid).and_then(|cv| {
-                cv.resolve_turn_activity()
-                    .map(|a| crate::app::subagent::format_activity_label(&a))
-                    .or_else(|| cv.session.state.is_busy().then(|| "Waiting".to_string()))
-            })
+        let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
+        let mut activity_label: Option<String> = if is_running {
+            self.subagent_views
+                .get(child_sid)
+                .and_then(|cv| match cv.resolve_turn_activity() {
+                    Some(crate::acp::tracker::TurnActivity::WritingToolCall(writing)) => writing
+                        .tool_name
+                        .clone()
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| {
+                            Some(crate::app::subagent::format_activity_label(
+                                &crate::acp::tracker::TurnActivity::WritingToolCall(writing),
+                            ))
+                        }),
+                    Some(activity) => Some(crate::app::subagent::format_activity_label(&activity)),
+                    None => cv.session.state.is_busy().then(|| "Waiting".to_string()),
+                })
         } else {
             None
         };
+        // Unlabeled TaskOutput keeps `Waiting on task output…` on the tracker.
+        // This overlay paints `Waiting on 1 task...` when that wait has one
+        // nested specialist, including an empty description.
+        if activity_label.as_deref() == Some(WAITING_ON_TASK_OUTPUT)
+            && overlay_nested_specialist_count(self, child_sid) == 1
+        {
+            activity_label = Some(WAITING_ON_ONE_TASK.to_string());
+        }
         let title_x = padded.x + 1;
         buf.set_span_safe(
             title_x,
@@ -307,12 +523,13 @@ impl AgentView {
             buf.set_span_safe(
                 rx,
                 title_y,
-                &Span::styled(badge, Style::default().fg(theme.gray_dim)),
+                &Span::styled(badge.as_str(), Style::default().fg(theme.gray_dim)),
                 badge.width() as u16,
             );
         }
         let mut child_cursor = None;
         let mut child_post_flush = None;
+        self.paint_opened_l3_context(child_sid);
         if inner.width > 5
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
@@ -346,11 +563,121 @@ impl AgentView {
             child_cursor = cursor;
             child_post_flush = post_flush;
         }
+        self.record_overlay_specialist_status_hit(buf, area, child_sid);
+        self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
         (child_cursor, child_post_flush)
+    }
+
+    /// The specialist status the L2 overlay just painted is a click target.
+    /// A left click opens that L3 session view.
+    /// `Waiting on 1 task...` wins when that row is painted, including when a
+    /// description phrase is also on screen. The hit is the lowest row of
+    /// that phrase. An unlabeled `Waiting on task output…` title and a bottom
+    /// `1 subagent still running` cue for this one-task wait are rewritten to
+    /// the same phrase so the lower row is the control. A description phrase
+    /// stays the target when the waiting row is not painted.
+    fn record_overlay_specialist_status_hit(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        child_sid: &str,
+    ) {
+        let mut specialists: Vec<(String, String, std::time::Instant)> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(_, info)| {
+                info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+            })
+            .map(|(id, info)| {
+                (
+                    id.clone(),
+                    info.description.trim().to_string(),
+                    info.attempt.started_at,
+                )
+            })
+            .collect();
+        specialists.sort_by_key(|(_, _, started)| *started);
+        if specialists.len() == 1 {
+            paint_one_task_wait_over_phrase(buf, area, WAITING_ON_TASK_OUTPUT);
+            if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
+                paint_one_task_wait_over_still_running(buf, area);
+                if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                    && let Some((id, _, _)) = specialists.first()
+                {
+                    self.hit_overlay_nested_status.set(Some(rect));
+                    self.overlay_nested_status_child_sid = Some(id.clone());
+                    return;
+                }
+            }
+        }
+        for (id, phrase, _) in specialists {
+            if phrase.is_empty() {
+                continue;
+            }
+            let Some(rect) = painted_phrase_rect(buf, area, &phrase) else {
+                continue;
+            };
+            self.hit_overlay_nested_status.set(Some(rect));
+            self.overlay_nested_status_child_sid = Some(id);
+            return;
+        }
+    }
+
+    /// Parent-registry L3 rows are invisible to the L2 view's wait chrome.
+    /// Mirror them for this draw so the overlay names the live specialist.
+    fn mirror_parented_specialists_for_overlay(&mut self, child_sid: &str) -> Vec<String> {
+        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(id, info)| {
+                info.is_running()
+                    && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+                    && self
+                        .subagent_views
+                        .get(child_sid)
+                        .is_some_and(|child| !child.subagent_sessions.contains_key(id.as_str()))
+            })
+            .map(|(id, info)| (id.clone(), info.clone()))
+            .collect();
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::new();
+        for (id, info) in borrowed {
+            child.subagent_sessions.insert(id.clone(), info);
+            keys.push(id);
+        }
+        keys
+    }
+
+    fn drop_mirrored_overlay_specialists(&mut self, child_sid: &str, keys: &[String]) {
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return;
+        };
+        for key in keys {
+            child.subagent_sessions.remove(key);
+        }
+    }
+
+    /// Idle child still listed as running: frame close cancels that row.
+    fn completed_listed_overlay_kill_id(&self) -> Option<String> {
+        let sid = self.active_subagent.as_deref()?;
+        let child_idle = self
+            .subagent_views
+            .get(sid)
+            .is_some_and(|view| !view.session.state.is_turn_running());
+        if !child_idle {
+            return None;
+        }
+        let info = self.subagent_sessions.get(sid)?;
+        if !info.is_running() {
+            return None;
+        }
+        Some(info.subagent_id.to_string())
     }
     /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
     /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
-    /// Rung order is fixed: Ctrl+Q, `[✗]` click, hover, bare-scrollback close, idle-quote, forward + filter.
+    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, idle-quote, forward + filter.
     pub(super) fn intercept_takeover_input(
         &mut self,
         ev: &Event,
@@ -377,7 +704,31 @@ impl AgentView {
                 .hit_subagent_frame_close
                 .contains(mouse.column, mouse.row)
         {
+            let kill_id = self.completed_listed_overlay_kill_id();
             self.close_subagent_fullscreen();
+            if let Some(id) = kill_id {
+                return Some(InputOutcome::Action(Action::KillSubagent(id)));
+            }
+            return Some(InputOutcome::Changed);
+        }
+        if let Event::Mouse(mouse) = ev
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self
+                .hit_overlay_nested_status
+                .contains(mouse.column, mouse.row)
+            && let Some(sid) = self.overlay_nested_status_child_sid.clone()
+            && self.subagent_views.contains_key(&sid)
+        {
+            let open_is_l2_floor = self
+                .subagent_views
+                .get(&child_sid)
+                .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+            if open_is_l2_floor {
+                self.overlay_return_sid = Some(child_sid.clone());
+                self.active_subagent = Some(sid);
+            } else {
+                self.open_subagent_fullscreen(sid);
+            }
             return Some(InputOutcome::Changed);
         }
         if let Event::Mouse(mouse) = ev
@@ -398,6 +749,45 @@ impl AgentView {
             self.close_subagent_fullscreen();
             return Some(InputOutcome::Changed);
         }
+        let l2_floor = self
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+        if l2_floor {
+            if key
+                .is_some_and(|key| key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE)
+            {
+                self.close_subagent_fullscreen();
+                return Some(InputOutcome::Changed);
+            }
+            if key.is_some_and(|key| key!('q').matches(key)) {
+                let draft_empty = self
+                    .subagent_views
+                    .get(&child_sid)
+                    .map(|view| view.prompt.text().trim().is_empty())
+                    .unwrap_or(true);
+                if draft_empty {
+                    self.close_subagent_fullscreen();
+                    return Some(InputOutcome::Changed);
+                }
+            }
+            if key.is_some_and(|key| {
+                key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
+            }) {
+                let draft = self
+                    .subagent_views
+                    .get(&child_sid)
+                    .map(|view| view.prompt.text().to_string())
+                    .unwrap_or_default();
+                if !draft.trim().is_empty() {
+                    let _ = self.l2_floor_send_interject(&child_sid, draft);
+                    return Some(InputOutcome::Changed);
+                }
+                if self.open_l3_from_l2() {
+                    return Some(InputOutcome::Changed);
+                }
+            }
+        }
         let child_quote = key.and_then(|key| {
             self.subagent_views
                 .get_mut(&child_sid)
@@ -412,15 +802,133 @@ impl AgentView {
             Some(IdleEnterQuote::ConsumedEmpty) => return Some(InputOutcome::Changed),
             Some(IdleEnterQuote::NotHandled) | None => {}
         }
-        let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
-            return Some(InputOutcome::Unchanged);
+        let outcome = {
+            let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
+                return Some(InputOutcome::Unchanged);
+            };
+            let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
+            let mut child_effects = std::mem::take(&mut child_view.pending_effects);
+            self.pending_effects.append(&mut child_effects);
+            outcome
         };
-        let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
-        let mut child_effects = std::mem::take(&mut child_view.pending_effects);
-        self.pending_effects.append(&mut child_effects);
+        if l2_floor {
+            let redirected = match &outcome {
+                InputOutcome::Action(Action::SendPrompt(text)) if !text.trim().is_empty() => {
+                    Some(text.clone())
+                }
+                InputOutcome::Action(Action::Interject { text, .. }) if !text.trim().is_empty() => {
+                    Some(text.clone())
+                }
+                _ => None,
+            };
+            if let Some(text) = redirected {
+                let _ = self.l2_floor_send_interject(&child_sid, text);
+                return Some(InputOutcome::Changed);
+            }
+        }
         Some(filter_child_outcome(outcome))
     }
 }
+
+const WAITING_ON_ONE_TASK: &str = "Waiting on 1 task...";
+const WAITING_ON_TASK_OUTPUT: &str = "Waiting on task output…";
+const ONE_SUBAGENT_STILL_RUNNING: &str = "1 subagent still running";
+
+fn overlay_nested_specialist_count(view: &AgentView, child_sid: &str) -> usize {
+    view.subagent_sessions
+        .values()
+        .filter(|info| {
+            info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+        })
+        .count()
+}
+
+/// A one-task wait's bottom status still says `1 subagent still running`.
+/// Rewrite that lowest cue so the row paints `Waiting on 1 task...`.
+/// The title row may keep the same words. Leave the row alone when it
+/// already paints the waiting phrase.
+fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
+    paint_one_task_wait_over_phrase(buf, area, ONE_SUBAGENT_STILL_RUNNING);
+}
+
+/// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the
+/// old width so a longer unlabeled wait does not leave leftover glyphs.
+fn paint_one_task_wait_over_phrase(buf: &mut Buffer, area: Rect, old: &str) {
+    let Some(still) = lowest_painted_phrase_rect(buf, area, old) else {
+        return;
+    };
+    if painted_phrase_rect_on_row(buf, area, still.y, WAITING_ON_ONE_TASK).is_some() {
+        return;
+    }
+    let style = buf
+        .cell((still.x, still.y))
+        .map(|cell| cell.style())
+        .unwrap_or_default();
+    let phrase_width = u16::try_from(WAITING_ON_ONE_TASK.chars().count()).unwrap_or(still.width);
+    let pad = still.width.saturating_sub(phrase_width);
+    let text = format!("{WAITING_ON_ONE_TASK}{}", " ".repeat(pad as usize));
+    buf.set_span_safe(
+        still.x,
+        still.y,
+        &Span::styled(text.as_str(), style),
+        still.width,
+    );
+}
+
+/// Lowest one-row run of `phrase` inside `area`.
+fn lowest_painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    phrase_rect_scanning(buf, area, phrase, true)
+}
+
+/// First one-row run of `phrase` inside `area`. One cell per glyph, so the
+/// rect's origin is the cell a left click on that status hits.
+fn painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    phrase_rect_scanning(buf, area, phrase, false)
+}
+
+fn painted_phrase_rect_on_row(buf: &Buffer, area: Rect, y: u16, phrase: &str) -> Option<Rect> {
+    let row = Rect {
+        y,
+        height: 1,
+        ..area
+    };
+    painted_phrase_rect(buf, row, phrase)
+}
+
+fn phrase_rect_scanning(buf: &Buffer, area: Rect, phrase: &str, lowest: bool) -> Option<Rect> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let bottom = area.y.saturating_add(area.height);
+    let right = area.x.saturating_add(area.width);
+    let mut found = None;
+    for y in area.y..bottom {
+        let symbols: Vec<String> = (area.x..right)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            let end = start + glyphs.len();
+            if symbols.get(start..end) == Some(glyphs.as_slice()) {
+                let width = u16::try_from(glyphs.len()).unwrap_or(u16::MAX);
+                let x = area
+                    .x
+                    .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
+                let rect = Rect::new(x, y, width, 1);
+                if !lowest {
+                    return Some(rect);
+                }
+                found = Some(rect);
+                break;
+            }
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 #[path = "subagent_takeover_tests.rs"]
 mod tests;

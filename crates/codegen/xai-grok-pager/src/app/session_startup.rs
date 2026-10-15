@@ -863,6 +863,20 @@ pub(crate) fn pre_acp_auth_manager(
 /// Pre-TUI remote restore (session state and memory only).
 /// Codebase checkout is never applied on this path; `--restore-code` requires `--worktree`.
 const REMOTE_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Print the remote restore budget as minutes and leftover seconds (`1m30s`).
+fn format_remote_restore_budget(timeout: std::time::Duration) -> String {
+    let secs = timeout.as_secs();
+    let minutes = secs / 60;
+    let rem = secs % 60;
+    if minutes > 0 && rem > 0 {
+        format!("{minutes}m{rem}s")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{secs}s")
+    }
+}
 /// `--restore-code` without `--worktree` on a remote miss: refuse in-place checkout.
 const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session requires --worktree \
      (refusing to check out snapshot code into the current directory)";
@@ -1292,8 +1306,8 @@ async fn restore_session_from_remote(
         RemoteRestoreOutcome::RecoveredAfterFailure { local_session_id } => {
             let msg = if timed_out {
                 format!(
-                    "Remote restore timed out after {}s; continuing with conversation {local_session_id}.",
-                    REMOTE_RESTORE_TIMEOUT.as_secs(),
+                    "Remote restore timed out after {}; continuing with conversation {local_session_id}.",
+                    format_remote_restore_budget(REMOTE_RESTORE_TIMEOUT),
                 )
             } else if let Some(Err(e)) = restore_result {
                 format!(
@@ -1350,8 +1364,8 @@ pub(crate) fn classify_remote_restore(
     }
     if timed_out {
         return RemoteRestoreOutcome::Failed(format!(
-            "Timed out restoring session from remote after {}s. Conversation cannot be recovered.",
-            REMOTE_RESTORE_TIMEOUT.as_secs()
+            "Timed out restoring session from remote after {}. Conversation cannot be recovered.",
+            format_remote_restore_budget(REMOTE_RESTORE_TIMEOUT)
         ));
     }
     if let Some(e) = restore_err {

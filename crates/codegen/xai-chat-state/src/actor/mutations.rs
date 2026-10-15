@@ -543,7 +543,10 @@ impl ChatStateActor {
     }
 
     /// Replace the entire conversation, persist, re-estimate `total_tokens`, and emit reset events.
-    /// `is_compaction` only marks the turn capture; the reseed math is the same for every rewrite.
+    /// Compaction uses the same provider-ratio reseed, then stays within
+    /// [`crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS`] unless the
+    /// compacted items themselves estimate higher. A 75.2k provider total
+    /// must not be painted again after a small compact.
     pub(super) fn replace_conversation(
         &mut self,
         items: Vec<ConversationItem>,
@@ -561,7 +564,13 @@ impl ChatStateActor {
         xai_grok_sampling_types::fold_tool_results_in_conversation(&mut items);
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
-        let estimated_tokens = self.reseed_total_tokens(base_estimate);
+        let mut estimated_tokens = self.reseed_total_tokens(base_estimate);
+        if is_compaction {
+            // Kept Operator prompts and dest reports may estimate above the
+            // reserve. Do not paint a total below that item estimate.
+            let ceiling = crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS.max(base_estimate);
+            estimated_tokens = estimated_tokens.min(ceiling);
+        }
         self.state.conversation = items;
         self.state.estimated_tokens_since_model = 0;
         self.state.omitted_spawn_prompt_tokens = 0;

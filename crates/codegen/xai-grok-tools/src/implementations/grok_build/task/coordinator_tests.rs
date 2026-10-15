@@ -855,7 +855,11 @@ async fn hand_off_takes_awaited_foreground_reply_before_caller_drops() {
     let backend = parent_backend(&harness);
     let spawn = tokio::spawn({
         let backend = backend.clone();
-        async move { backend.spawn(request("blocking", false), None).await }
+        async move {
+            let mut req = request("blocking", false);
+            req.description = "test child".to_owned();
+            backend.spawn(req, None).await
+        }
     });
     assert_eq!(harness.started.recv().await.as_deref(), Some("blocking"));
 
@@ -2766,6 +2770,7 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
 async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     let mut harness = harness(true, std::time::Duration::from_secs(60));
     let mut outer_request = request("outer", true);
+    outer_request.description = "test child".to_owned();
     outer_request.runtime_overrides.loop_task_id = Some("loop-task".to_owned());
     let outer_spawn = tokio::spawn({
         let backend = harness.backend.clone();

@@ -183,28 +183,34 @@ impl<T: ListItem> ListPane<'_, T> {
             buf.set_line_safe(area.x, area.y, pfx, prefix_w);
         }
 
-        if area.height == 1 || wrap_mode == WrapMode::NoWrap {
-            // NoWrap / single row: paint content after prefix, truncated.
-            let content_x = area.x + prefix_w;
-            let content_w = area.width.saturating_sub(prefix_w);
+        // NoWrap stays one truncated row. Wrap paints every wrapped row, even
+        // when the passed height is 1 and the line wraps past that row.
+        let content_x = area.x + prefix_w;
+        let content_w = area.width.saturating_sub(prefix_w);
+        let wrapped = if wrap_mode == WrapMode::Wrap && content_w > 0 {
+            word_wrap_line(content, content_w as usize)
+        } else {
+            Vec::new()
+        };
+        let wrap_count = wrapped.len() as u16;
+        if wrap_mode == WrapMode::NoWrap || content_w == 0 || (area.height == 1 && wrap_count <= 1)
+        {
             if content_w > 0 {
                 // Content paint is bidi-aware; search highlights remap columns.
                 buf.set_line_safe_bidi(content_x, area.y, content, content_w);
             }
         } else {
-            // Wrap: word-wrap content into (area.width - prefix_w) columns.
-            let content_w = area.width.saturating_sub(prefix_w) as usize;
-            if content_w == 0 {
-                return;
-            }
-            let wrapped = word_wrap_line(content, content_w);
-            let content_x = area.x + prefix_w;
+            let row_limit = if wrap_count > 1 {
+                area.height.max(wrap_count)
+            } else {
+                area.height
+            };
             for (i, wl) in wrapped.iter().enumerate() {
                 let y = area.y + i as u16;
-                if y >= area.y + area.height {
+                if y >= area.y + row_limit {
                     break;
                 }
-                buf.set_line_safe_bidi(content_x, y, wl, content_w as u16);
+                buf.set_line_safe_bidi(content_x, y, wl, content_w);
                 // On continuation lines (i > 0), the prefix area is left blank; indentation happens via the column offset
             }
         }
@@ -237,7 +243,14 @@ impl<T: ListItem> ListPane<'_, T> {
             let Some(item) = self.items.get(pi) else {
                 continue;
             };
-            let item_h = state.layout().item_height(vi);
+            let item_h = if wrap_mode == WrapMode::Wrap {
+                state
+                    .layout()
+                    .item_height(vi)
+                    .max(item.desired_height(area.width))
+            } else {
+                state.layout().item_height(vi)
+            };
 
             // How many rows to skip at the top of this item (only for the first item).
             let skip = if vi == first_vi { skip_rows } else { 0 };
@@ -389,7 +402,11 @@ impl<T: ListItem> ListPane<'_, T> {
 
             // This only triggers in NoWrap mode (where item_h == 1 regardless of content length). Viewport
             // clipping does not trigger this; only true text truncation does.
-            if item.desired_height(area.width) > item_h && rows_to_render > 0 {
+            // Wrap mode keeps the rest of the line on later rows and must not ellipsize it away.
+            if wrap_mode == WrapMode::NoWrap
+                && item.desired_height(area.width) > item_h
+                && rows_to_render > 0
+            {
                 let last_y = cursor_y + rows_to_render - 1;
                 render_truncation_ellipsis(buf, last_y, area.x, area.width);
             }
@@ -603,7 +620,7 @@ mod tests {
     use crate::tracing::TracingEntry;
     use crate::views::list_pane::layout::WrapMode;
     use crate::views::list_pane::{
-        FilterMatcher, ListMatcher, ListPaneStyle, MatchMode, QueryKind,
+        FilterMatcher, ListMatcher, ListPaneConfig, ListPaneStyle, MatchMode, QueryKind,
     };
     use ratatui::style::Style;
     use ratatui::text::Line;
@@ -697,6 +714,71 @@ mod tests {
         assert_eq!(row_text(&buf, 0, 0, 20), ">alpha");
         assert_eq!(row_text(&buf, 1, 0, 20), " beta");
         assert_eq!(row_text(&buf, 2, 0, 20), " gamma");
+    }
+
+    /// Code-file and plan search editors share this input bar. The focused
+    /// editor must show a blinking Operator-green block caret.
+    #[test]
+    fn focused_code_file_search_editor_paints_blinking_block_caret() {
+        use crate::theme::cache;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let filled = crate::glyphs::cursor_box_filled();
+        let owed = "the focused plan editor must have a visible blinking block caret";
+        let items = vec![RenderTestItem::new(0, "alpha")];
+        // `ListPaneState::new` leaves search off, so `/` does not open the bar.
+        let mut state = ListPaneState::new_with_config(
+            WrapMode::NoWrap,
+            false,
+            ListPaneConfig {
+                search_enabled: true,
+                ..ListPaneConfig::default()
+            },
+        );
+        let area = Rect::new(0, 0, 24, 4);
+        state.prepare_layout(&items, area.width, area.height);
+        assert!(state.handle_key_event(&crate::key!('/').to_key_event(), &items));
+
+        let paint = |state: &mut ListPaneState| {
+            let mut buf = Buffer::empty(area);
+            StatefulWidget::render(ListPane::new(&items), area, &mut buf, state);
+            buf
+        };
+        let find_block = |buf: &Buffer| -> Option<ratatui::buffer::Cell> {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                    {
+                        return Some(cell.clone());
+                    }
+                }
+            }
+            None
+        };
+
+        let filled_cell = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            find_block(&paint(&mut state))
+        };
+        let hollow_cell = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            find_block(&paint(&mut state))
+        };
+        let filled_cell =
+            filled_cell.unwrap_or_else(|| panic!("{owed}: search editor filled half is missing"));
+        let hollow_cell =
+            hollow_cell.unwrap_or_else(|| panic!("{owed}: search editor empty half is missing"));
+        assert_eq!(
+            filled_cell.bg, theme.accent_user,
+            "{owed}: filled half is Operator green"
+        );
+        assert_ne!(
+            hollow_cell.bg, theme.accent_user,
+            "{owed}: the two blink halves must differ"
+        );
     }
 
     #[test]

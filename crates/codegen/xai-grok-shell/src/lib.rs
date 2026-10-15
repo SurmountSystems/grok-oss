@@ -38,6 +38,8 @@ pub mod auth {
     };
     pub use xai_grok_login::*;
 
+    #[path = "accounts_tab.rs"]
+    pub mod accounts_tab;
     #[path = "allowance_exhaust_from_billing.rs"]
     pub mod allowance_exhaust_from_billing;
     #[path = "dual_auth_status.rs"]
@@ -55,6 +57,7 @@ pub mod auth {
     #[path = "xai_management.rs"]
     pub mod xai_management;
 
+    pub use accounts_tab::accounts_tab_lines;
     pub use allowance_exhaust_from_billing::{
         SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD, SupergrokBillingPollOutcome,
         SupergrokBillingPollOutcomeKind, SupergrokBillingPollTarget, active_supergrok_identity_id,
@@ -162,6 +165,10 @@ pub mod auth {
         usage_analytics_path, validate_management_key, validate_management_key_at,
         validate_management_key_outcome, validate_management_key_outcome_at,
     };
+
+    // Duplicate auth.json writer. Not a re-export of `xai_grok_login::storage`.
+    #[path = "storage.rs"]
+    mod shell_auth_storage;
 }
 pub mod builtin;
 pub mod shared_http_rate_limit;

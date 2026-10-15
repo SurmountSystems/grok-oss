@@ -124,9 +124,9 @@ impl McpDumpKind {
                 eg = examples_clause(&tools.json_tools()),
             ),
             Self::LongLineText => format!(
-                " The full output has a very long line, so grep/read_file are \
-                 ineffective on it — use `{shell}` to slice/search the saved \
-                 file{eg}.",
+                " The full output has a very long line and is plain text, not a \
+                 python program, so grep/read_file are ineffective on it — use \
+                 `{shell}` to slice/search the saved file{eg}.",
                 eg = examples_clause(&tools.text_tools()),
             ),
             Self::Other => String::new(),
@@ -214,15 +214,30 @@ pub fn densify_mcp_result_text(text: &str) -> String {
 /// Truncate `text` in place when over the limit, dumping the full payload to
 /// the session `mcp/` dir (when available) with a pointer appended.
 async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
-    // Encode structured→text under TOON policy before the byte cap (UDAX densify).
-    densify_mcp_result_text_in_place(text);
-
+    // Densify exists to keep an over-cap body under the inline limit. A payload
+    // that already fits stays quoted JSON (`"ok": true`); TOON would drop the quotes.
     if text.len() <= trunc_ctx.max_output_bytes {
         return;
     }
 
-    let total_bytes = text.len();
-    let kind = McpDumpKind::classify(text.as_str());
+    let original = text.clone();
+    let kind_before = McpDumpKind::classify(original.as_str());
+    densify_mcp_result_text_in_place(text);
+
+    // TOON can shrink a JSON array under the cap and stop looking like JSON.
+    // The dump contract is the original shape: extension, steer, and file bytes.
+    let keep_json_kind = matches!(kind_before, McpDumpKind::Json | McpDumpKind::LongLineJson);
+    let kind = if keep_json_kind {
+        kind_before
+    } else {
+        McpDumpKind::classify(text.as_str())
+    };
+    let dump_source = if keep_json_kind {
+        original.as_str()
+    } else {
+        text.as_str()
+    };
+    let total_bytes = dump_source.len();
 
     let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| {
         folder.join("mcp").join(format!(
@@ -236,7 +251,7 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        match tokio::fs::write(path, text.as_bytes()).await {
+        match tokio::fs::write(path, dump_source.as_bytes()).await {
             Ok(()) => format!(" Full output written to: {}.", path.to_string_lossy()),
             Err(e) => {
                 tracing::warn!(

@@ -2,12 +2,12 @@
 use super::state::{DashboardRowId, Filter, RowState};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
-use crate::app::roster::{RosterActivity, RosterEntry};
+use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
 use crate::views::dashboard::row_activity::{
     has_live_parent_activity, live_work_badges, top_level_activity, top_level_secondary_line,
 };
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 /// Title prefix for a session that has no name / generated title / prompt yet.
@@ -280,6 +280,72 @@ pub fn roster_activity_to_state(activity: RosterActivity) -> RowState {
         RosterActivity::Dead => RowState::Failed,
     }
 }
+/// Dashboard rows for grok-oss contexts already read from `active_sessions.json`.
+///
+/// `host` is `None` for this machine. `Some("surmount-1")` is the remote builder.
+/// The host is not written back onto the local registry row.
+pub(crate) fn l0_roster_from_active_sessions(
+    sessions: &[xai_grok_active_sessions::ActiveSession],
+    host: Option<&str>,
+) -> Vec<RosterEntry> {
+    let host = host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_string);
+    let kind = if host.is_some() { "remote" } else { "local" };
+    sessions
+        .iter()
+        .map(|session| {
+            let session_id = session.session_id.0.to_string();
+            RosterEntry {
+                session_id: session_id.clone(),
+                title: Some(session_id),
+                cwd: session.cwd.clone(),
+                is_worktree: false,
+                session_kind: None,
+                model_id: None,
+                yolo: false,
+                activity: l0_roster_activity(session.activity),
+                last_turn_summary: None,
+                resident: true,
+                last_change_unix_ms: session.opened_at.timestamp_millis(),
+                origin: RosterOrigin {
+                    kind: kind.to_string(),
+                    host: host.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Whether an L0 row receives an included-limits choice already made on this host.
+///
+/// This machine is `host` none or blank. `Some("surmount-1")` is the remote
+/// builder and stays on its own pin. The account set is role plus identity id.
+/// The same set receives the choice. A different account stays. The process
+/// that already wrote the pin (`except_pid`) stays out of the delivery.
+pub(crate) fn limits_choice_reaches_l0_row(
+    host: Option<&str>,
+    accounts: &BTreeSet<(String, String)>,
+    this_accounts: &BTreeSet<(String, String)>,
+    pid: u32,
+    except_pid: u32,
+) -> bool {
+    if pid == except_pid || this_accounts.is_empty() {
+        return false;
+    }
+    let on_this_host = host.map(str::trim).is_none_or(|name| name.is_empty());
+    on_this_host && accounts == this_accounts
+}
+
+fn l0_roster_activity(activity: xai_grok_active_sessions::SessionActivity) -> RosterActivity {
+    match activity {
+        xai_grok_active_sessions::SessionActivity::Working => RosterActivity::Working,
+        xai_grok_active_sessions::SessionActivity::Idle
+        | xai_grok_active_sessions::SessionActivity::Unknown => RosterActivity::Idle,
+    }
+}
+
 /// Append "roster-only" rows for leader sessions not represented by a local `AgentView`.
 /// Skips any roster entry whose `session_id` already matches a locally-attached agent (those carry richer data via [`build_local_rows`]).
 fn append_roster_rows(
@@ -344,7 +410,14 @@ fn append_roster_rows(
         }
         let cwd_display = super::state::compact_cwd(&cwd, home);
         let is_pinned = pinned.contains(&id);
-        let subtitle = None;
+        // Remote-builder contexts carry the host (`surmount-1`) here. Local rows leave it unset.
+        let subtitle = entry
+            .origin
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(sanitize);
         rows.push(DashboardRow {
             id,
             session_id: Some(entry.session_id.clone()),
@@ -704,6 +777,49 @@ mod tests {
     use crate::app::workspace_test_fixtures::snapshot as workspace_snapshot;
     use agent_client_protocol as acp;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn limits_choice_reaches_the_same_host_and_the_same_accounts() {
+        use std::collections::BTreeSet;
+        let these: BTreeSet<(String, String)> = BTreeSet::from([
+            ("personal".to_string(), "user-1".to_string()),
+            ("business".to_string(), "team-1".to_string()),
+        ]);
+        let other: BTreeSet<(String, String)> = BTreeSet::from([
+            ("personal".to_string(), "u-other-account".to_string()),
+            ("business".to_string(), "team-other-account".to_string()),
+        ]);
+        let empty = BTreeSet::new();
+        assert!(
+            limits_choice_reaches_l0_row(None, &these, &these, 20, 10),
+            "this host and these accounts receive the included-limits choice"
+        );
+        assert!(
+            limits_choice_reaches_l0_row(Some("  "), &these, &these, 20, 10),
+            "a blank host is this machine"
+        );
+        assert!(
+            !limits_choice_reaches_l0_row(Some("surmount-1"), &these, &these, 20, 10),
+            "the surmount-1 builder row stays"
+        );
+        assert!(
+            !limits_choice_reaches_l0_row(None, &other, &these, 20, 10),
+            "a grok-oss logged into a different account stays"
+        );
+        assert!(
+            !limits_choice_reaches_l0_row(None, &these, &these, 10, 10),
+            "the process that already wrote the pin is not a delivery target"
+        );
+        assert!(
+            !limits_choice_reaches_l0_row(None, &these, &empty, 20, 10),
+            "an empty account set on this process delivers to nobody"
+        );
+        assert!(
+            !limits_choice_reaches_l0_row(None, &empty, &these, 20, 10),
+            "a process with no accounts is a different account set"
+        );
+    }
+
     fn nth(rows: &[DashboardRow], i: usize) -> &DashboardRow {
         rows.get(i)
             .unwrap_or_else(|| panic!("expected row {i}, got {rows:?}"))

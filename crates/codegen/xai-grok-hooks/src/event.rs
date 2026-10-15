@@ -122,6 +122,9 @@ hook_events! {
         aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
         traits: (Observe, Tested, true),
     },
+    /// Fires on a genuine turn-end (`end_turn`) with stop decision control.
+    /// Interrupted, permission-rejected, and max-turns turns fire `StopCancelled`
+    /// instead. API-error turns fire `StopFailure`. Also observe-only at session end.
     Stop {
         display: "stop",
         aliases: ["Stop", "stop"],
@@ -132,6 +135,9 @@ hook_events! {
         aliases: ["StopFailure", "stop_failure", "stopFailure"],
         traits: (Observe, Tested, true),
     },
+    /// Observe-only turn end for interrupt, permission reject, and max turns.
+    /// It does not replace `Stop` or `StopFailure`. The payload uses
+    /// `StopCancelledReason`, not the same fields as `Stop`.
     StopCancelled {
         display: "stop_cancelled",
         aliases: [
@@ -610,8 +616,10 @@ impl HookPayload {
             | Self::PreCompact { source }
             | Self::PostCompact { source } => source,
             Self::SessionEnd { reason, .. } => reason,
+            // Always a non-empty name, unlike the free-text arms above.
             Self::StopFailure { error, .. } => return Some(error.as_ref()),
             Self::StopCancelled { reason, .. } => return Some(reason.as_ref()),
+            // Ignored events listed explicitly so a new Tested event can't silently return None.
             Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
@@ -692,6 +700,31 @@ mod tests {
 
             let from_snake: HookEventName = serde_json::from_str(&format!("\"{snake}\"")).unwrap();
             assert_eq!(from_snake, *expected, "snake_case deser failed for {snake}");
+        }
+    }
+
+    #[test]
+    fn event_name_display_all_variants() {
+        let cases: &[(HookEventName, &str)] = &[
+            (HookEventName::SessionStart, "session_start"),
+            (HookEventName::PreToolUse, "pre_tool_use"),
+            (HookEventName::PostToolUse, "post_tool_use"),
+            (HookEventName::PostToolUseFailure, "post_tool_use_failure"),
+            (HookEventName::SessionEnd, "session_end"),
+            (HookEventName::Stop, "stop"),
+            (HookEventName::StopFailure, "stop_failure"),
+            (HookEventName::StopCancelled, "stop_cancelled"),
+            (HookEventName::Notification, "notification"),
+            (HookEventName::UserPromptSubmit, "user_prompt_submit"),
+            (HookEventName::PermissionDenied, "permission_denied"),
+            (HookEventName::SubagentStart, "subagent_start"),
+            (HookEventName::SubagentStop, "subagent_stop"),
+            (HookEventName::SubagentEnd, "subagent_stop"), // alias collapses
+            (HookEventName::PreCompact, "pre_compact"),
+            (HookEventName::PostCompact, "post_compact"),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(&event.to_string(), expected, "Display wrong for {event:?}");
         }
     }
 

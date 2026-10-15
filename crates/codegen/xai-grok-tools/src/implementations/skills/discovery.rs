@@ -136,8 +136,8 @@ pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
 
 /// Coerce a scalar YAML value to a trimmed, non-empty string. Numbers and bools
 /// are stringified; null, blank, and non-scalars yield `None`.
-fn coerce_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
-    use serde_yaml::Value;
+fn coerce_to_string(value: Option<&serde_json::Value>) -> Option<String> {
+    use serde_json::Value;
     match value? {
         Value::String(s) => {
             let t = s.trim();
@@ -149,19 +149,52 @@ fn coerce_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
     }
 }
 
-/// Parse a boolean frontmatter value: only a YAML `true` or the string `"true"`
-/// is true; anything else (including absent) is false. Callers apply any
-/// field-specific default for the absent case.
-fn parse_boolean_frontmatter(value: Option<&serde_yaml::Value>) -> bool {
-    use serde_yaml::Value;
-    matches!(value, Some(Value::Bool(true)))
-        || matches!(value, Some(Value::String(s)) if s == "true")
+/// Whether a top-level `key:` scalar is the literal token `true`, `"true"`, or
+/// `'true'`. `None` means the key is absent, so the caller applies that field's
+/// default. YAML 1.1 aliases (`yes`, `on`, `y`, `True`) and numbers are present
+/// but not true: `serde_saphyr` would already have turned `yes` into
+/// `Bool(true)`, which is why this reads the raw line instead of the JSON value.
+fn literal_true_frontmatter(yaml: &str, key: &str) -> Option<bool> {
+    for line in yaml.lines() {
+        if line.is_empty() || line.starts_with([' ', '\t']) {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        if raw_key.trim() != key {
+            continue;
+        }
+        return Some(scalar_is_literal_true(raw_value));
+    }
+    None
+}
+
+/// Unquoted `true`, or one pair of single or double quotes around `true`.
+/// An unquoted value drops a trailing ` # comment`. Anything else is false.
+fn scalar_is_literal_true(raw_value: &str) -> bool {
+    let raw = raw_value.trim();
+    let token = if let Some(rest) = raw.strip_prefix('"') {
+        match rest.find('"') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else if let Some(rest) = raw.strip_prefix('\'') {
+        match rest.find('\'') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else {
+        raw.split_once(" #")
+            .map_or(raw, |(before, _)| before.trim_end())
+    };
+    token == "true"
 }
 
 /// Parse the `origin:` provenance slug (the tool that wrote the skill, e.g. `learn`). The value is
 /// trimmed and lowercased, then accepted only as `[a-z0-9-]{1,MAX_ORIGIN_LEN}`; anything else is
 /// `None`, so telemetry never carries a free-form user string.
-fn parse_origin_frontmatter(value: Option<&serde_yaml::Value>) -> Option<String> {
+fn parse_origin_frontmatter(value: Option<&serde_json::Value>) -> Option<String> {
     let origin = value?.as_str()?.trim().to_ascii_lowercase();
     let is_slug = !origin.is_empty()
         && origin.len() <= MAX_ORIGIN_LEN
@@ -174,11 +207,11 @@ fn parse_origin_frontmatter(value: Option<&serde_yaml::Value>) -> Option<String>
 /// Coerce `allowed-tools`: a comma- or space-delimited string, or a YAML list.
 /// Separators inside `()` are kept whole so a spec like `Bash(git diff:*)`
 /// survives. A wrong type yields `None`.
-fn coerce_tool_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
-    use serde_yaml::Value;
+fn coerce_tool_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    use serde_json::Value;
     match value? {
         Value::String(s) => Some(split_top_level(s, '(', ')', true)),
-        Value::Sequence(seq) => Some(
+        Value::Array(seq) => Some(
             seq.iter()
                 .filter_map(|v| v.as_str())
                 .filter(|t| !t.is_empty())
@@ -223,11 +256,11 @@ fn split_top_level(input: &str, open: char, close: char, split_ws: bool) -> Vec<
 /// Coerce `paths:` into split patterns (not yet normalized — see `normalize_skill_paths`). A string
 /// is comma-split outside brace groups, so `{a,b}` stays intact for the gitignore matcher to
 /// expand; a YAML list is split per item; a wrong type yields `None`.
-fn coerce_path_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
-    use serde_yaml::Value;
+fn coerce_path_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    use serde_json::Value;
     match value? {
         Value::String(s) => Some(split_top_level(s, '{', '}', false)),
-        Value::Sequence(seq) => Some(
+        Value::Array(seq) => Some(
             seq.iter()
                 .filter_map(|v| v.as_str())
                 .flat_map(|s| split_top_level(s, '{', '}', false))
@@ -255,7 +288,7 @@ fn normalize_skill_paths(patterns: Vec<String>) -> Option<Vec<String>> {
 
 /// Parse the `paths:` field into glob patterns: split (`coerce_path_list`) then
 /// normalize (`normalize_skill_paths`). `None` when absent or match-all.
-fn parse_skill_paths(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
+fn parse_skill_paths(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
     coerce_path_list(value).and_then(normalize_skill_paths)
 }
 
@@ -263,23 +296,24 @@ fn parse_skill_paths(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
 /// a `metadata:` mapping. Non-string entries (and a non-mapping value) are
 /// skipped.
 fn parse_metadata(
-    value: Option<&serde_yaml::Value>,
+    value: Option<&serde_json::Value>,
 ) -> (
     Option<String>,
     Option<String>,
     Option<std::collections::HashMap<String, String>>,
 ) {
-    use serde_yaml::Value;
-    let Some(Value::Mapping(map)) = value else {
+    use serde_json::Value;
+    let Some(Value::Object(map)) = value else {
         return (None, None, None);
     };
     let mut short_description = None;
     let mut author = None;
     let mut rest = std::collections::HashMap::new();
     for (k, v) in map {
-        let (Some(key), Some(val)) = (k.as_str(), v.as_str()) else {
+        let Some(val) = v.as_str() else {
             continue;
         };
+        let key = k.as_str();
         match key {
             "short-description" => short_description = Some(val.to_string()),
             "author" => author = Some(val.to_string()),
@@ -412,9 +446,9 @@ fn quote_problematic_values(frontmatter: &str) -> String {
 const RECOVERABLE_KEYS: &[&str] = &["name", "description", "when-to-use", "when_to_use"];
 
 /// Best-effort recovery of a few top-level scalar fields when YAML parsing fails entirely (e.g. a field mistakenly indented under
-/// `description:`, which serde_yaml rejects — otherwise dropping the whole frontmatter, `description` and all). Only unindented lines for a
+/// `description:`, which the YAML parser rejects, otherwise dropping the whole frontmatter, `description` and all). Only unindented lines for a
 /// [`RECOVERABLE_KEYS`] key are taken, and the body fallback still runs for anything not recovered.
-fn recover_scalar_fields(yaml: &str) -> std::collections::HashMap<String, serde_yaml::Value> {
+fn recover_scalar_fields(yaml: &str) -> std::collections::HashMap<String, serde_json::Value> {
     let mut map = std::collections::HashMap::new();
     for line in yaml.lines() {
         if line.is_empty() || line.starts_with([' ', '\t']) {
@@ -449,7 +483,7 @@ fn recover_scalar_fields(yaml: &str) -> std::collections::HashMap<String, serde_
             continue;
         }
         map.entry(key.to_string())
-            .or_insert_with(|| serde_yaml::Value::String(value.to_string()));
+            .or_insert_with(|| serde_json::Value::String(value.to_string()));
     }
     map
 }
@@ -481,10 +515,10 @@ pub fn parse_skill_frontmatter(
     // Untyped map coerced per-field so one mistyped field never drops its siblings; the quoting
     // retry recovers value-colon syntax errors; the final line-based recovery salvages top-level
     // scalars when YAML fails outright (rather than dropping the whole frontmatter).
-    let frontmatter: std::collections::HashMap<String, serde_yaml::Value> = serde_yaml::from_str(
+    let frontmatter: std::collections::HashMap<String, serde_json::Value> = serde_saphyr::from_str(
         yaml_content,
     )
-    .or_else(|_| serde_yaml::from_str(&quote_problematic_values(yaml_content)))
+    .or_else(|_| serde_saphyr::from_str(&quote_problematic_values(yaml_content)))
     .unwrap_or_else(|err| {
         let recovered = recover_scalar_fields(yaml_content);
         tracing::debug!(
@@ -523,7 +557,7 @@ pub fn parse_skill_frontmatter(
     if coerced_description.is_none()
         && matches!(
             description_value,
-            Some(serde_yaml::Value::Sequence(_) | serde_yaml::Value::Mapping(_))
+            Some(serde_json::Value::Array(_) | serde_json::Value::Object(_))
         )
     {
         tracing::debug!(skill = %name, "skill description is not a scalar; using fallback");
@@ -557,12 +591,14 @@ pub fn parse_skill_frontmatter(
         model: coerce_to_string(frontmatter.get("model")),
         effort: coerce_to_string(frontmatter.get("effort")),
         // Absent `user-invocable` defaults to true; `disable-model-invocation` to false.
-        user_invocable: frontmatter
-            .get("user-invocable")
-            .is_none_or(|v| parse_boolean_frontmatter(Some(v))),
-        disable_model_invocation: parse_boolean_frontmatter(
-            frontmatter.get("disable-model-invocation"),
-        ),
+        // Only the literal token `true` (or `"true"` / `'true'`) is true. Read the
+        // raw line so YAML 1.1 `yes` / `on` do not count.
+        user_invocable: literal_true_frontmatter(yaml_content, "user-invocable").unwrap_or(true),
+        disable_model_invocation: literal_true_frontmatter(
+            yaml_content,
+            "disable-model-invocation",
+        )
+        .unwrap_or(false),
         when_to_use,
         has_user_specified_description,
         paths,

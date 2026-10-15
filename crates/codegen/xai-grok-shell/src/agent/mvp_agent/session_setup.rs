@@ -392,7 +392,7 @@ impl MvpAgent {
                     method: "session/new",
                     session_id: client_session_id,
                 }),
-                self.new_session_inner_impl(arguments),
+                Box::pin(self.new_session_inner_impl(arguments)),
             )
             .await
     }
@@ -487,6 +487,9 @@ impl MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        // Map the UUID onto a ULID before the actor is registered. Load/attach
+        // does the same call. Fail-open: a store miss must not refuse the session.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         SESSION_SETUP_CONTEXT
             .with(|ctx| ctx.borrow_mut().session_id = Some(session_id.0.to_string()));
         reject_direct_hub_cloud_meta(arguments.meta.as_ref())?;
@@ -731,8 +734,7 @@ impl MvpAgent {
                 spawn_timer.subphase_span(),
                 tracing::Span::current(),
             );
-            self.spawn_and_register_session(init, spawn_opts, Some(spawn_trace))
-                .await
+            Box::pin(self.spawn_and_register_session(init, spawn_opts, Some(spawn_trace))).await
         };
         #[cfg(all(feature = "local-workspace", unix))]
         if spawn_res.is_err() {
@@ -944,7 +946,7 @@ impl MvpAgent {
         &self,
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
-        self.attach_session(arguments, AttachOperation::Load).await
+        Box::pin(self.attach_session(arguments, AttachOperation::Load)).await
     }
     async fn attach_session(
         &self,
@@ -1267,51 +1269,50 @@ impl MvpAgent {
                         .map(|m| m.info().agent_type.clone()),
                 ),
             };
-            let load_is_current = self
-                .spawn_and_register_session(
-                    init,
-                    SessionSpawnOptions {
-                        session_info: session_info.clone(),
-                        cwd: cwd.clone(),
-                        mcp_servers,
-                        initial_client_mcp_servers,
-                        mcp_meta_config_map,
-                        persistence,
-                        root_identity: cold_root_identity,
-                        attach_waiter: Some(&load_guard.rx),
-                        chat_history,
-                        rewind_points_file_path,
-                        initial_total_tokens,
-                        origin_client: origin_client.clone(),
-                        client_code_nav_enabled,
-                        client_terminal,
-                        client_fs_read,
-                        client_fs_write,
-                        envrc,
-                        persisted_signals,
-                        persisted_plan_mode,
-                        persisted_goal_mode: _persisted_goal_mode,
-                        persisted_workflow_runs,
-                        persisted_announcement_state,
-                        session_meta: request_meta.as_ref(),
-                        persisted_agent_profile: restore_profile,
-                        model_agent_type: restore_model_agent_type.as_deref(),
-                        session_model_id: summary.current_model_id.clone(),
-                        initial_reasoning_effort: None,
-                        session_yolo_mode,
-                        session_auto_mode: session_auto_mode && !session_yolo_mode,
-                        session_context_only,
-                        prompt_display_cwd,
-                        is_headless: summary.is_headless(),
-                        is_chat_kind: false,
-                        prefetch: Some(prefetch),
-                    },
-                    Some(xai_grok_telemetry::startup::SpawnTraceContext::new(
-                        spawn_timer.subphase_span(),
-                        tracing::Span::current(),
-                    )),
-                )
-                .await?;
+            let load_is_current = Box::pin(self.spawn_and_register_session(
+                init,
+                SessionSpawnOptions {
+                    session_info: session_info.clone(),
+                    cwd: cwd.clone(),
+                    mcp_servers,
+                    initial_client_mcp_servers,
+                    mcp_meta_config_map,
+                    persistence,
+                    root_identity: cold_root_identity,
+                    attach_waiter: Some(&load_guard.rx),
+                    chat_history,
+                    rewind_points_file_path,
+                    initial_total_tokens,
+                    origin_client: origin_client.clone(),
+                    client_code_nav_enabled,
+                    client_terminal,
+                    client_fs_read,
+                    client_fs_write,
+                    envrc,
+                    persisted_signals,
+                    persisted_plan_mode,
+                    persisted_goal_mode: _persisted_goal_mode,
+                    persisted_workflow_runs,
+                    persisted_announcement_state,
+                    session_meta: request_meta.as_ref(),
+                    persisted_agent_profile: restore_profile,
+                    model_agent_type: restore_model_agent_type.as_deref(),
+                    session_model_id: summary.current_model_id.clone(),
+                    initial_reasoning_effort: None,
+                    session_yolo_mode,
+                    session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
+                    prompt_display_cwd,
+                    is_headless: summary.is_headless(),
+                    is_chat_kind: false,
+                    prefetch: Some(prefetch),
+                },
+                Some(xai_grok_telemetry::startup::SpawnTraceContext::new(
+                    spawn_timer.subphase_span(),
+                    tracing::Span::current(),
+                )),
+            ))
+            .await?;
             if !load_is_current {
                 return Err(acp::Error::invalid_params().data("session load was superseded"));
             }
@@ -1421,7 +1422,13 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands {
                 trigger: crate::session::AdvertiseTrigger::SessionLoad,
             });
-            if restored.awaiting_plan_approval {
+            // Disk wins when the in-memory snapshot was loaded before the
+            // seeded `plan_mode.json` (quit, then seed, then `--continue`).
+            let disk_parked = crate::session::plan_mode::load_awaiting_plan_approval(
+                cwd.as_str(),
+                session_id.0.as_ref(),
+            );
+            if restored.awaiting_plan_approval || disk_parked {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
             let _ = handle.cmd_tx.send(SessionCommand::RestoreTodoBoard {
@@ -1903,6 +1910,20 @@ impl MvpAgent {
                     "persisted_model": persisted_model.0.as_ref(),
                 })),
             );
+            persisted_model
+        } else if let Some(reason) =
+            crate::agent::remote_config::refused_grok_4_7_substitution(persisted_model.0.as_ref())
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                previous = %persisted_model.0,
+                "Persisted grok-4.7 is not in the catalog; refusing substitution"
+            );
+            let empty_id = acp::ModelId::new(String::new());
+            self.send_model_auto_switched(session_id, &persisted_model, &empty_id, &reason)
+                .await;
+            self.session_registry
+                .set_unavailable_model(session_id, persisted_model.clone());
             persisted_model
         } else if let Some(fallback) = same_family_fallback {
             tracing::warn!(

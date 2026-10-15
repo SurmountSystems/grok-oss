@@ -715,3 +715,128 @@ fn cwd_basename() -> String {
         .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
         .expect("test process must have a cwd with a basename")
 }
+
+/// L0 is this pager dashboard, expanded to every running grok-oss context on
+/// this machine and on the remote builder. It is not a new app.
+///
+/// Owed outcome: the view lists one injected local running context and one
+/// injected builder running context. The builder context is the remote
+/// builder `surmount-1`. The rows reuse the `active_sessions.json` and
+/// `/running` shape. This test does not open a live SSH connection and does
+/// not add a database.
+#[test]
+fn l0_header_lists_grok_oss_processes_on_this_machine_and_the_remote_builder() {
+    let local_root = tempfile::tempdir().expect("local registry dir");
+    let builder_root = tempfile::tempdir().expect("builder registry dir");
+    write_active_session(
+        local_root.path(),
+        "local-grok-oss-context",
+        41_001,
+        "/home/hunter/Projects/surmount/grok-build",
+        "working",
+    );
+    write_active_session(
+        builder_root.path(),
+        "builder-grok-oss-context",
+        41_002,
+        "/home/nixbuilder/iso",
+        "working",
+    );
+    let local_rows = xai_grok_active_sessions::list_in(local_root.path())
+        .expect("read the injected local active_sessions.json");
+    let builder_rows = xai_grok_active_sessions::list_in(builder_root.path())
+        .expect("read the injected builder active_sessions.json");
+    assert_eq!(
+        local_rows.len(),
+        1,
+        "the injected local registry must parse to one running context before the view is painted, got {local_rows:?}"
+    );
+    assert_eq!(
+        builder_rows.len(),
+        1,
+        "the injected builder registry must parse to one running context before the view is painted, got {builder_rows:?}"
+    );
+    let local_running = running_json(&local_rows);
+    let builder_running = running_json(&builder_rows);
+    assert!(
+        local_running.contains("local-grok-oss-context"),
+        "local /running JSON must keep the injected session id, got {local_running}"
+    );
+    assert!(
+        builder_running.contains("builder-grok-oss-context"),
+        "builder /running JSON must keep the injected session id, got {builder_running}"
+    );
+    assert!(
+        !local_running.contains("surmount-1"),
+        "the host name is the injected builder list, not a field stuffed into the local row"
+    );
+
+    let mut roster =
+        crate::views::dashboard::row::l0_roster_from_active_sessions(&local_rows, None);
+    roster.extend(
+        crate::views::dashboard::row::l0_roster_from_active_sessions(
+            &builder_rows,
+            Some("surmount-1"),
+        ),
+    );
+    let area = ratatui::layout::Rect::new(0, 0, 200, 24);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let mut state = DashboardState::new();
+    let mut agents: indexmap::IndexMap<
+        crate::app::agent::AgentId,
+        crate::app::agent_view::AgentView,
+    > = indexmap::IndexMap::new();
+    let registry = crate::actions::ActionRegistry::defaults();
+    let _ = crate::views::dashboard::render_dashboard(
+        &mut buf,
+        area,
+        &mut state,
+        &mut agents,
+        &registry,
+        None,
+        &roster,
+        false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
+        None,
+        false,
+        None,
+        None,
+    );
+    let painted = buf_to_text(&buf);
+    assert!(
+        painted.contains("local-grok-oss-context")
+            && painted.contains("builder-grok-oss-context")
+            && painted.contains("surmount-1"),
+        "the view does not list both today. L0 must list the grok-oss process on this machine ({local_running}) and the grok-oss process on the remote builder surmount-1 ({builder_running}). Painted view: {painted:?}"
+    );
+}
+
+fn write_active_session(
+    root: &std::path::Path,
+    session_id: &str,
+    pid: u32,
+    cwd: &str,
+    activity: &str,
+) {
+    let fixture = format!(
+        r#"[
+  {{
+    "session_id": "{session_id}",
+    "pid": {pid},
+    "cwd": "{cwd}",
+    "opened_at": "2026-10-08T12:00:00Z",
+    "activity": "{activity}",
+    "title": "{session_id}"
+  }}
+]"#
+    );
+    std::fs::write(root.join("active_sessions.json"), fixture).expect("write active_sessions.json");
+}
+
+fn running_json(rows: &[xai_grok_active_sessions::ActiveSession]) -> String {
+    let running: Vec<crate::running_sessions::RunningSessionRow> = rows
+        .iter()
+        .map(crate::running_sessions::RunningSessionRow::from)
+        .collect();
+    crate::running_sessions::format_json(&running).expect("/running JSON")
+}

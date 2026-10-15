@@ -326,35 +326,36 @@ pub(super) async fn capture_and_fold_one_turn_usage(
     result: &mut SubagentResult,
     input: OneTurnUsageInput<'_>,
 ) -> bool {
-    let (by_model, incomplete, output_tokens, total_tokens) =
-        match super::handle_request::child_actor_query(
-            "session_usage",
-            input.child_handle.chat_state_handle.try_get_session_usage(),
-            Err(xai_chat_state::ChatStateActorUnreachable),
-        )
-        .await
-        {
-            Ok(usage) => {
-                let output_tokens = usage.totals.output_tokens;
-                let total_tokens = canonical_total_tokens(&usage.totals);
-                let incomplete =
-                    usage_is_incomplete(usage.incomplete, input.cancellation_may_hide_usage);
-                (
-                    Some(usage.by_model.into_iter().collect::<Vec<_>>()),
-                    incomplete,
-                    (!incomplete).then_some(output_tokens),
-                    Some(total_tokens),
-                )
-            }
-            Err(_) => (None, true, None, None),
-        };
+    let (by_model, incomplete, total_tokens) = match super::handle_request::child_actor_query(
+        "session_usage",
+        input.child_handle.chat_state_handle.try_get_session_usage(),
+        Err(xai_chat_state::ChatStateActorUnreachable),
+    )
+    .await
+    {
+        Ok(usage) => {
+            let total_tokens = canonical_total_tokens(&usage.totals);
+            let incomplete =
+                usage_is_incomplete(usage.incomplete, input.cancellation_may_hide_usage);
+            (
+                Some(usage.by_model.into_iter().collect::<Vec<_>>()),
+                incomplete,
+                Some(total_tokens),
+            )
+        }
+        Err(_) => (None, true, None),
+    };
     result.total_tokens_used = total_tokens.unwrap_or(0);
-    if let Some((task_spent, task_incomplete)) = input.task_budget_usage {
-        result.output_tokens_used = output_tokens.unwrap_or(task_spent);
-        result.output_usage_incomplete = task_incomplete || incomplete || output_tokens.is_none();
-    } else {
-        result.output_tokens_used = output_tokens.unwrap_or(0);
-        result.output_usage_incomplete = incomplete || output_tokens.is_none();
+    // The folded ledger output includes chain of thought and each finished L3.
+    // The session atomic is this session's own completion minus reasoning.
+    let reported = crate::session::nested_output::assign_subagent_output_tokens(result);
+    if reported {
+        let task_incomplete = input
+            .task_budget_usage
+            .is_some_and(|(_, task_incomplete)| task_incomplete);
+        if task_incomplete || incomplete {
+            result.output_usage_incomplete = true;
+        }
     }
     record_subagent_usage(
         input.parent_cmd_tx,

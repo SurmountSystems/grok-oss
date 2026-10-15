@@ -541,3 +541,155 @@
         }).collect();
         assert_eq!(messages, ["first attempt", "second attempt"]);
     }
+
+const CONTRACT: &str = "a nested L2 progress tick with a measured token count writes one local_usage_event row for that nested session id into the grok-oss database, and the session sqlite is untouched";
+
+fn parent_channel_progress(parent: &str, child: &str, tokens_used: u64) -> XaiSessionUpdate {
+    XaiSessionUpdate::SubagentProgress {
+        subagent_id: child.into(),
+        attempt_id: Some("at1.one".into()),
+        parent_session_id: parent.into(),
+        child_session_id: child.into(),
+        duration_ms: 100,
+        turn_count: 1,
+        tool_call_count: 0,
+        tokens_used,
+        context_window_tokens: 200_000,
+        context_usage_pct: 1,
+        tools_used: vec![],
+        error_count: 0,
+    }
+}
+
+fn rows_for(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> Vec<xai_grok_shell::token_economy::LocalUsageEvent> {
+    let store = xai_grok_shell::grok_oss::open_at(db_path).expect("grok_oss.db");
+    xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, session_id)
+        .expect("read local_usage_event")
+}
+
+/// SubagentProgress is sent on the parent session channel. That tick, not a
+/// child-session notification, is what must write the grok-oss row.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn nested_l2_progress_tick_writes_one_local_usage_event_and_leaves_the_session_sqlite_untouched() {
+    let dir = std::env::temp_dir().join(format!(
+        "grok-nested-usage-ledger-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let db_path = dir.join("grok_oss.db");
+    let session_sqlite = dir.join("session.sqlite");
+    let sentinel = b"session-sqlite-sentinel-not-the-grok-oss-ledger";
+    std::fs::write(&session_sqlite, sentinel).expect("seed session sqlite");
+
+    let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
+        grok_oss_database_path: Some(db_path.clone()),
+        ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+    };
+    xai_grok_shell::token_economy::set_token_economy_live(cfg);
+    struct ResetLiveTokenEconomy;
+    impl Drop for ResetLiveTokenEconomy {
+        fn drop(&mut self) {
+            xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        }
+    }
+    let _reset_live_token_economy = ResetLiveTokenEconomy;
+
+    let parent = format!("sess-parent-ledger-{}", std::process::id());
+    let child = format!(
+        "nested-l2-progress-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let mut app = make_app_with_agent(&parent);
+
+    assert!(
+        handle(
+            make_ext_session_notification(&parent, test_subagent_spawned(&parent, &child)),
+            &mut app,
+        ),
+        "{CONTRACT}"
+    );
+    if db_path.exists() {
+        assert!(
+            rows_for(&db_path, &child).is_empty(),
+            "{CONTRACT}: spawn with no measured tokens must not store a row"
+        );
+    }
+
+    let first = 120_000_u64;
+    assert!(
+        handle(
+            make_ext_session_notification(&parent, parent_channel_progress(&parent, &child, first),),
+            &mut app,
+        ),
+        "{CONTRACT}"
+    );
+    let rows = rows_for(&db_path, &child);
+    assert_eq!(rows.len(), 1, "{CONTRACT}");
+    assert_eq!(rows[0].session_id, child, "{CONTRACT}");
+    assert_eq!(rows[0].turn_type, "nested", "{CONTRACT}");
+    assert_eq!(rows[0].total_tokens, Some(first as i64), "{CONTRACT}");
+    assert!(
+        rows[0].cost_missing,
+        "{CONTRACT}: do not invent a dollar charge"
+    );
+    assert_eq!(rows[0].cost_usd_ticks, None, "{CONTRACT}");
+    assert_eq!(rows[0].input_tokens, None, "{CONTRACT}");
+    assert_eq!(rows[0].output_tokens, None, "{CONTRACT}");
+    let event_ulid = rows[0].event_ulid.clone();
+    assert_eq!(
+        std::fs::read(&session_sqlite).expect("session sqlite"),
+        sentinel,
+        "{CONTRACT}"
+    );
+
+    let second = 180_000_u64;
+    assert!(
+        handle(
+            make_ext_session_notification(
+                &parent,
+                parent_channel_progress(&parent, &child, second),
+            ),
+            &mut app,
+        ),
+        "{CONTRACT}"
+    );
+    let rows = rows_for(&db_path, &child);
+    assert_eq!(
+        rows.len(),
+        1,
+        "{CONTRACT}: a later progress tick updates the same row"
+    );
+    assert_eq!(rows[0].total_tokens, Some(second as i64), "{CONTRACT}");
+    assert_eq!(rows[0].event_ulid, event_ulid, "{CONTRACT}");
+    assert_eq!(
+        std::fs::read(&session_sqlite).expect("session sqlite"),
+        sentinel,
+        "{CONTRACT}"
+    );
+    assert_eq!(
+        app.agents
+            .get(&crate::app::agent::AgentId(0))
+            .expect("parent agent")
+            .subagent_sessions
+            .get(&child)
+            .expect("nested session")
+            .attempt
+            .tokens_used,
+        Some(second),
+        "{CONTRACT}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

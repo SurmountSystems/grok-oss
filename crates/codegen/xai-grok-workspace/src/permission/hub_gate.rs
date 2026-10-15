@@ -166,11 +166,21 @@ impl FolderGrants {
         if let Some(fresh) = self.store.reload_if_changed().await {
             self.state = fresh;
         }
+        // Decision-only. Do not store the plain denies on `self.state`: a later
+        // `record` would write them into the daemon file.
+        let mut decision_state = self.state.clone();
+        if matches!(self.store.access(), StateFileAccess::DaemonOwned { .. }) {
+            crate::permission::state::overlay_plain_persisted_denies(
+                &mut decision_state,
+                &self.cwd,
+            )
+            .await;
+        }
         let bash = match access {
             AccessKind::Bash(cmd) => {
                 // The ambient git scan reads `.git/config` under the cwd; off the runtime thread, and a
                 // scan that did not finish is a prompt
-                let (cmd, state, cwd) = (cmd.clone(), self.state.clone(), self.cwd.clone());
+                let (cmd, state, cwd) = (cmd.clone(), decision_state.clone(), self.cwd.clone());
                 let evaluation = tokio::task::spawn_blocking(move || {
                     evaluate_bash_with_ambient(&cmd, &state, cwd.as_path())
                 })
@@ -192,7 +202,7 @@ impl FolderGrants {
         let (decision, _) = session_grant_pre_decision(
             access,
             bash.as_ref(),
-            &self.state,
+            &decision_state,
             self.allow_edits_for_session,
             None,
             yolo_pin,
@@ -291,6 +301,8 @@ pub(crate) async fn approve_hub_call(
 pub(crate) fn grant_store_access(workspace: &WorkspaceHandle) -> StateFileAccess {
     match workspace.shared.sandbox() {
         Some(sandbox) if sandbox.mode() != SandboxMode::Off => StateFileAccess::DaemonOwned {
+            // The daemon file is the process grok home, not the writable
+            // test fallback. A quality build's home may be unwritable.
             grok_home: xai_grok_config::grok_home(),
         },
         _ => StateFileAccess::Plain,

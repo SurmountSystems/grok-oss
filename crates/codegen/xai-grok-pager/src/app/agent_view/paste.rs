@@ -370,16 +370,15 @@ impl AgentView {
                 (!text.trim().is_empty()).then_some(Action::SendPrompt(text))
             }
             AgentDeferredSend::Interject => {
-                let text = self.prompt.text().trim().to_string();
-                if !ActionRegistry::interjection_possible(self.can_send_now(), !text.is_empty()) {
+                // The stash kind stays Interject. The re-issue is send-now
+                // so a chip that landed during the probe rides the prompt.
+                if !ActionRegistry::interjection_possible(
+                    self.can_send_now(),
+                    !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty(),
+                ) {
                     return None;
                 }
-                // Rebind and log orphan placeholders. Interject has no image_notice field.
-                let _image_notice = self.unbound_image_placeholder_notice();
-                let images = self.prompt.drain_images();
-                self.prompt.set_text("");
-                self.note_draft_consumed();
-                Some(Action::Interject { text, images })
+                Some(self.send_now_action_from_composer())
             }
             AgentDeferredSend::Stash => {
                 self.handle_stash_prompt_key();
@@ -616,13 +615,17 @@ impl AgentView {
 pub(super) mod paste_key_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
+    use crate::app::actions::Action;
+    use crate::app::agent::QueueEntryKind;
     use crate::app::agent::{AgentId, AgentSession, AgentState};
     use crate::app::agent_view::test_fixtures::{
         make_followup_permission_state, make_plan_approval_view_state,
     };
     use crate::app::app_view::InputOutcome;
+    use crate::app::queue_edit::PromptMode;
     use crate::clipboard::ImageData;
     use crate::scrollback::state::ScrollbackState;
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
     use crate::views::prompt_widget::KIND_PASTE;
     fn make_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2319,6 +2322,215 @@ pub(super) mod paste_key_tests {
             }),
             "plan approval must stay on the Operator box"
         );
+    }
+
+    const PLANNING_NOTES: &str = "look at this screenshot";
+    const SHARED_QUEUE_IMAGE_TOAST: &str =
+        "Images can't be attached when editing a shared queued prompt";
+
+    /// Planning prompt: plan mode, the plan pane, and the revise composer.
+    fn planning_prompt_for_revise() -> AgentView {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.plan_mode_active = true;
+        agent.post_turn_plan_review = true;
+        agent.kept_plan =
+            crate::app::agent_view::KeptPlan::kept(Some("# Build it\n".to_owned()), None);
+        agent.open_post_turn_plan_review();
+        let Some(pav) = agent.plan_approval_view.as_mut() else {
+            panic!("the planning prompt must open plan review");
+        };
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        agent
+    }
+
+    fn comment_planning_prompt() -> AgentView {
+        let mut agent = planning_prompt_for_revise();
+        let Some(pav) = agent.plan_approval_view.as_mut() else {
+            panic!("comment needs the planning prompt");
+        };
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.commenting_range = Some(0..1);
+        pav.prompt_intent = PlanPromptIntent::Comment;
+        agent
+    }
+
+    fn plan_mode_prompt() -> AgentView {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.plan_mode_active = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent
+    }
+
+    /// Same chip completion the main composer uses. Returns the pasted bytes.
+    fn paste_planning_image(agent: &mut AgentView) -> Vec<u8> {
+        agent.prompt.textarea.insert_str(PLANNING_NOTES);
+        agent.prompt.textarea.insert_str(" ");
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = agent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "an image paste into the planning prompt must not be dropped, got {outcome:?}"
+        );
+        let ctx = ctx.expect(
+            "an image paste into the planning prompt must defer the same chip probe as the main composer",
+        );
+        let payload = test_image_data();
+        let pasted = crate::prompt_images::from_clipboard_data(&payload);
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        payload.data
+    }
+
+    fn assert_chip(agent: &AgentView, surface: &str) {
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "{surface}: the paste must insert an image chip"
+        );
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "{surface}: the paste must insert an image chip, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains(PLANNING_NOTES),
+            "{surface}: the notes must stay with the chip, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "{surface}: the dialog title must not land as text, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    fn assert_no_refusal_toast(agent: &AgentView, surface: &str) {
+        let toast = agent.toast.as_ref().map(|(msg, _)| msg.as_str());
+        assert!(
+            toast.is_none(),
+            "{surface}: the paste must not show a refusal toast, got {toast:?}"
+        );
+        assert_ne!(toast, Some(SHARED_QUEUE_IMAGE_TOAST));
+    }
+
+    fn assert_send_carries_pasted_image(outcome: &InputOutcome, bytes: &[u8], surface: &str) {
+        let (text, images) = match outcome {
+            InputOutcome::Action(Action::Interject { text, images })
+            | InputOutcome::Action(Action::SendPromptNow { text, images, .. })
+            | InputOutcome::Action(Action::RevisePlan { text, images }) => (text.as_str(), images),
+            other => panic!(
+                "{surface}: Revise, Comment, and the plan-mode prompt send the image with the notes so the planner sees it; got {other:?}"
+            ),
+        };
+        assert!(
+            text.contains(PLANNING_NOTES),
+            "{surface}: the send must carry the notes, got {text:?}"
+        );
+        assert!(
+            images
+                .iter()
+                .any(|image| image.encoded_bytes.as_deref() == Some(bytes)),
+            "{surface}: the send must carry the pasted image so the planner sees it; got {outcome:?}"
+        );
+    }
+
+    fn send_enter(agent: &mut AgentView) -> InputOutcome {
+        agent.prompt.set_cursor(0);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        agent.handle_input(&Event::Key(enter), &ActionRegistry::non_vscode_for_test())
+    }
+
+    /// Paste an image into the planning prompt. The chip is present.
+    /// Sending Revise carries that image. No refusal toast appears.
+    /// The queue-editor toast still fires on a shared queued prompt.
+    #[test]
+    fn planning_prompt_image_paste_inserts_a_chip_and_revise_sends_it_without_a_refusal_toast() {
+        let mut agent = planning_prompt_for_revise();
+        assert!(agent.plan_mode_active, "plan mode is open");
+        let bytes = paste_planning_image(&mut agent);
+        assert_chip(&agent, "planning prompt");
+        assert_eq!(
+            agent.prompt.images[0].encoded_bytes.as_deref(),
+            Some(bytes.as_slice()),
+            "the chip must hold the pasted image bytes"
+        );
+        assert_no_refusal_toast(&agent, "planning prompt");
+        let outcome = send_enter(&mut agent);
+        assert_send_carries_pasted_image(&outcome, &bytes, "Revise");
+
+        let mut queued = make_agent();
+        queued.set_active_pane(ActivePane::Prompt, true);
+        queued.prompt_mode = PromptMode::EditingQueued {
+            id: 7,
+            original: "queued notes".to_owned(),
+            server_id: Some("shared-prompt-1".to_owned()),
+            kind: QueueEntryKind::Prompt,
+        };
+        queued.prompt.set_text("queued notes");
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = queued.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(&queued);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect(
+            "editing a shared queued prompt must still reach the image paste path so the queue-editor toast can fire",
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        queued.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(
+            queued.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some(SHARED_QUEUE_IMAGE_TOAST),
+            "the queue-editor toast stays on a shared queued prompt"
+        );
+        assert!(
+            queued.prompt.images.is_empty(),
+            "a shared queued prompt must not take the image chip"
+        );
+        assert!(
+            !queued.prompt.text().contains("[Image #"),
+            "a shared queued prompt must not take the image chip, got {:?}",
+            queued.prompt.text()
+        );
+    }
+
+    /// Comment and the plan-mode prompt also carry the attached image.
+    #[test]
+    fn comment_and_plan_mode_prompt_send_the_attached_image() {
+        let mut comment = comment_planning_prompt();
+        let comment_bytes = paste_planning_image(&mut comment);
+        assert_chip(&comment, "Comment");
+        assert_no_refusal_toast(&comment, "Comment");
+        let comment_outcome = send_enter(&mut comment);
+        assert_send_carries_pasted_image(&comment_outcome, &comment_bytes, "Comment");
+
+        let mut plan_prompt = plan_mode_prompt();
+        let plan_bytes = paste_planning_image(&mut plan_prompt);
+        assert_chip(&plan_prompt, "plan-mode prompt");
+        assert_no_refusal_toast(&plan_prompt, "plan-mode prompt");
+        let plan_outcome = send_enter(&mut plan_prompt);
+        assert_send_carries_pasted_image(&plan_outcome, &plan_bytes, "plan-mode prompt");
     }
 
     /// Regular file line-viewer paste stays on list search. Empty

@@ -266,6 +266,36 @@ fn plain_directory_sentinel_is_rejected() {
     let _ = std::fs::remove_dir_all(&parent);
 }
 
+/// The sentinel name is shared. The loser of `mkdir` sees `EEXIST` (os error 17).
+/// That existing real directory is the sentinel. A symlink is still not accepted as the finished entry.
+#[test]
+fn create_sentinel_dir_accepts_existing_directory_and_ensure_still_rejects_a_symlink() {
+    let parent = temp_parent("eexist");
+    let path = parent.join(SENTINEL_DIR_NAME);
+    std::fs::create_dir(&path).unwrap();
+    create_sentinel_dir(&path).expect("EEXIST on a real directory must not abort re-exec setup");
+    let ensured =
+        ensure_sentinel_dir_under(&parent).expect("existing directory stays the sentinel");
+    assert_eq!(ensured, path);
+    let meta = std::fs::symlink_metadata(&path).unwrap();
+    assert!(
+        meta.file_type().is_dir() && !meta.file_type().is_symlink(),
+        "shared sentinel must stay a real directory"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    let target = parent.join("target-dir");
+    std::fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    create_sentinel_dir(&path).expect("EEXIST on a final symlink must not be a hard create error");
+    let ensured = ensure_sentinel_dir_under(&parent).expect("ensure replaces the symlink");
+    let meta = std::fs::symlink_metadata(&ensured).unwrap();
+    assert!(
+        meta.file_type().is_dir() && !meta.file_type().is_symlink(),
+        "a symlink must not count as the sentinel directory"
+    );
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
 /// A user's explicit deny at a well-known runtime-socket path in a profile with restrict_network=false must use strict placeholder verification.
 /// The per-spawn child network filter is not installed there, so the lenient socket arm would silently drop the user's read-deny.
 /// Strictness makes this fail outside a genuine re-exec whether the host endpoint is absent (no placeholder mount) or a live socket.

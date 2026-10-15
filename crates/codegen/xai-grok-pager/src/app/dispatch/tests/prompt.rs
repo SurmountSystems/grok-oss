@@ -2932,7 +2932,13 @@ fn revise_send_success_commits_review_after_gates() {
     let id = AgentId(0);
     install_post_turn_review(&mut app, id);
 
-    let effects = dispatch(Action::RevisePlan("add a rollback".into()), &mut app);
+    let effects = dispatch(
+        Action::RevisePlan {
+            text: "add a rollback".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
     assert!(
         matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
         "revise notes must send, got {effects:?}"
@@ -3183,12 +3189,16 @@ fn prompt_response_keeps_the_plan_file_after_a_failed_turn() {
 fn mid_turn_freeform_enter_interjects_into_running_turn() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let body = "also spawn an L2 for the check-remote slice";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        // The Operator box still holds the body, so this is soft interject.
+        // An empty box stays immediate SendPrompt.
+        agent.prompt.set_text(body);
+    }
 
-    let effects = dispatch(
-        Action::SendPrompt("also spawn an L2 for the check-remote slice".into()),
-        &mut app,
-    );
+    let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
 
     match effects.as_slice() {
         [Effect::SendInterject { text, .. }] => {

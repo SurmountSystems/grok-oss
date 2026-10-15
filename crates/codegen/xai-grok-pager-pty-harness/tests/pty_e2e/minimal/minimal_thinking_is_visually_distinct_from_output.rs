@@ -186,14 +186,14 @@ async fn minimal_thinking_is_visually_distinct_from_output() {
     quit_minimal(&mut harness);
 }
 
-/// The collapsed header advertises the only way back into the body, and `Ctrl+E` must honour the advertisement by re-printing it in full.
+/// The collapsed header advertises `ctrl+t to expand`. `Ctrl+E` still re-prints the folded body, because both chords expand the last folded block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens() {
     let Turn { mut harness, .. } = run_reasoning_turn(true).await;
 
     harness
-        .wait_for_full_text("ctrl+e to expand", Duration::from_secs(10))
+        .wait_for_full_text("ctrl+t to expand", Duration::from_secs(10))
         .unwrap_or_else(|e| {
             panic!(
                 "collapsed reasoning must advertise the expand key: {e}\nfull:\n{}",

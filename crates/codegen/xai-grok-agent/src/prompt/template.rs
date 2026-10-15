@@ -172,6 +172,94 @@ mod tests {
             .expect("codex template render failed")
     }
 
+    /// A positive order to carry out a misreading, not the prohibition that forbids it.
+    ///
+    /// "Do not ... carry out the misreading" forbids the misreading. The same
+    /// words in a sentence with no "do not" are an order. Case does not matter.
+    fn instruction_tells_agent_to_carry_out_a_misreading(text: &str) -> bool {
+        const NEEDLES: [&str; 2] = ["carry out the misreading", "carry out a misreading"];
+        let lower = text.to_ascii_lowercase();
+        for needle in NEEDLES {
+            let mut search_from = 0;
+            while let Some(rel) = lower[search_from..].find(needle) {
+                let at = search_from + rel;
+                let sentence_start = lower[..at].rfind(['.', '\n']).map(|i| i + 1).unwrap_or(0);
+                let before = lower[sentence_start..at].trim_start();
+                if !sentence_prohibits_carrying_out_a_misreading(before) {
+                    return true;
+                }
+                search_from = at + needle.len();
+            }
+        }
+        false
+    }
+
+    /// True when this sentence already says "do not" before the misreading phrase.
+    fn sentence_prohibits_carrying_out_a_misreading(sentence_before_needle: &str) -> bool {
+        let mut rest = sentence_before_needle;
+        while let Some(at) = rest.find("do not") {
+            let end = at + "do not".len();
+            let before_ok = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+            let after_ok = end == rest.len() || !rest.as_bytes()[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            rest = &rest[end..];
+        }
+        false
+    }
+
+    /// The always-loaded instruction for a normal turn is the decrypted base template.
+    /// Plan mode uses a separate reminder. This test does not read that reminder.
+    #[test]
+    fn agent_instructions_do_the_work_that_was_named() {
+        const NAMED_WORK: &str = "Do the work that was named. Do not replace it with a nearby misreading and carry out the misreading. Do not use that misreading as the reason the named work was not done. Agent words do not take the green operator accent. While an agent turn is active, the left rail is magenta, theme key `accent_running`, RGB (255, 0, 255) on DOGE. The words stay white, `text_primary`. When the turn is finished, the rail is absent. The Operator's own left rail stays green, `accent_user`, RGB (0, 255, 0). The Operator's words stay white. Do not label a sentence as the Operator's unless the Operator said that sentence. When the work has more than one contract and those contracts do not share a file, start them together. Do not queue them behind a check.";
+        let loaded = base_template();
+        assert!(
+            loaded.contains("Do the work that was named"),
+            "the always-loaded instruction is missing \"Do the work that was named\""
+        );
+        assert!(
+            loaded.contains("accent_running"),
+            "the always-loaded instruction is missing accent_running"
+        );
+        assert!(
+            loaded.contains("255, 0, 255"),
+            "the always-loaded instruction is missing 255, 0, 255"
+        );
+        assert!(
+            loaded.contains(NAMED_WORK),
+            "the always-loaded instruction must say to do the named work and must forbid the misreading"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(&loaded),
+            "the always-loaded instruction tells the agent to carry out a misreading instead"
+        );
+        assert!(
+            instruction_tells_agent_to_carry_out_a_misreading(
+                "Do the work that was named. Carry out the misreading instead."
+            ),
+            "the check must fail when the instruction tells the agent to carry out a misreading instead"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(NAMED_WORK),
+            "the prohibition must not count as telling the agent to carry out a misreading"
+        );
+        let rendered = render_base(&default_renderer(), &default_placeholders());
+        assert!(
+            rendered.contains("Do the work that was named"),
+            "a rendered normal turn is missing \"Do the work that was named\""
+        );
+        assert!(
+            rendered.contains(NAMED_WORK),
+            "a rendered normal turn drops the named-work instruction"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(&rendered),
+            "a rendered normal turn tells the agent to carry out a misreading instead"
+        );
+    }
+
     // ── Variable substitution ───────────────────────────────────────
 
     #[test]

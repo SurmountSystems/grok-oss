@@ -2781,6 +2781,9 @@ impl DashboardState {
 
         if matches!(key.code, KeyCode::Enter) {
             let mod_enter = crate::input::is_mod_enter(key);
+            // Read the chip before try_element_interaction. Enter on a paste chip inlines it and returns None so the body can send.
+            let paste_submit =
+                focused && !mod_enter && self.peek_reply.paste_element_at_cursor().is_some();
             if focused
                 && !mod_enter
                 && matches!(
@@ -2791,6 +2794,7 @@ impl DashboardState {
                 return Some(InputOutcome::Changed);
             }
             let enter_is_newline = focused
+                && !paste_submit
                 && (compose_enter_is_newline(self.multiline_mode, mod_enter)
                     || crate::input::is_delivered_super_enter(key));
             if !enter_is_newline {
@@ -2963,7 +2967,10 @@ impl DashboardState {
         }
         // An accepted no-arg slash command always sends
         // PromptWidget inserts a newline for a delivered SUPER+Enter (Kitty)
+        // Read the chip before try_element_interaction. Enter on a paste chip inlines it and returns None so the body can send.
+        let paste_submit = !mod_enter && self.dispatch.paste_element_at_cursor().is_some();
         let enter_is_newline = !slash_accepted_send
+            && !paste_submit
             && (compose_enter_is_newline(self.multiline_mode, mod_enter)
                 || crate::input::is_delivered_super_enter(key));
         // Only a real bare Enter expands paste and file chips

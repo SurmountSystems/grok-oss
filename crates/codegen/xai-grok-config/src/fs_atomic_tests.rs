@@ -226,6 +226,34 @@ fn symlink_chain(dir: &std::path::Path, hops: usize) -> (std::path::PathBuf, std
     (current, leaf)
 }
 
+#[cfg(unix)]
+fn read_through_single_hops(start: &std::path::Path) -> std::io::Result<String> {
+    let mut path = start.to_path_buf();
+    let mut hops: u8 = 0;
+    loop {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.file_type().is_symlink() {
+            return std::fs::read_to_string(&path);
+        }
+        if hops >= SYMLINK_FOLLOW_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "symlink hop limit",
+            ));
+        }
+        hops = hops.saturating_add(1);
+        let target = std::fs::read_link(&path)?;
+        path = if target.is_absolute() {
+            target
+        } else {
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.join(target),
+                _ => target,
+            }
+        };
+    }
+}
+
 /// `access` is `home/l0` where `home` → `real` and `real` holds a `leaf_hops` chain.
 /// Kernel `open` counts the parent hop plus each file hop.
 #[cfg(unix)]
@@ -342,7 +370,7 @@ fn resolve_follows_parent_symlink_plus_leaf_chain_at_limit() {
             .is_symlink()
     );
     assert_eq!("after", std::fs::read_to_string(&leaf).expect("leaf"));
-    assert_eq!("after", std::fs::read_to_string(&head).expect("via home"));
+    assert_eq!("after", read_through_single_hops(&head).expect("via home"));
 }
 
 #[cfg(unix)]

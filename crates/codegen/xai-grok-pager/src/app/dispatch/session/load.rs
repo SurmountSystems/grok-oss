@@ -297,6 +297,24 @@ fn dispatch_load_session_ungated(
     if focus {
         switch_to_agent(app, agent_id, SwitchCause::Load);
     }
+    if restore_fork_parent {
+        let parent_cwd = session_cwd.clone().unwrap_or_else(|| app.cwd.clone());
+        if let Some(parent_id) =
+            crate::app::session_startup::fork_parent_session_id(&session_id, &parent_cwd)
+        {
+            // The parent is for the family switcher. It must not take focus
+            // from the child that was just opened, and it must not load its
+            // own parent.
+            effects.extend(dispatch_load_session_ungated(
+                app,
+                parent_id,
+                Some(parent_cwd),
+                chat_kind,
+                false,
+                false,
+            ));
+        }
+    }
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
@@ -1323,8 +1341,23 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let hydrate_sid = session_id.clone();
-        let _ = scheduler_background_loops;
+        agent.bind_session_id(session_id.clone());
+        let marker_cwd = agent.session.cwd.to_string_lossy().into_owned();
+        let marker_sid = session_id.0.to_string();
+        // One-shot: the sidecar means the pane was open at the last
+        // `/rebuild` persist. Later docks in this load rewrite the file.
+        // The rewrite is consumed again after Approve is bound.
+        let consumed_isolated_preview =
+            crate::slash::commands::plan::take_isolated_preview_open(&marker_cwd, &marker_sid);
+        if consumed_isolated_preview {
+            agent.view_plan_requested = true;
+        }
         agent.scrollback.end_batch();
+        apply_canceled_turn_resume_on_load(
+            agent,
+            app.current_ui.resume_canceled_turn_on_restart_enabled(),
+        );
+        drop_recorded_occupancy_when_no_cancel_marker(agent);
         agent.session.loading_replay = false;
         agent.arm_late_replay_grace();
         agent.session.restore_degree = restore_degree;
@@ -1334,7 +1367,12 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent.scrollback.remove_entry(placeholder_id);
         }
         if let Some(m) = new_models {
-            app.models = Some(m).into();
+            let next = super::lifecycle::models_keeping_chosen_effort(
+                &agent.session.models,
+                &app.models,
+                m,
+            );
+            app.models = next;
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);
@@ -1390,6 +1428,15 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         crate::app::dispatch::rebuild::announce_rebuild_relaunch_identity(agent);
         agent.reconcile_restored_unsent_occupancy(adopting);
         agent.apply_persisted_plan_decision_on_load();
+        // `/view-plan` during reconnect, a composer that still holds that
+        // slash, or the persisted Isolated Preview marker. Capture before
+        // open clears the slash. Flush parks a held restore after this
+        // borrow ends, and that flush unmounts a local idle pane.
+        let dock_plan = agent.view_plan_requested || agent.composer_holds_view_plan_slash();
+        if dock_plan {
+            agent.view_plan_requested = true;
+            agent.open_plan_from_view_plan_or_status();
+        }
         // A `/rebuild` flush writes the still-queued interject to
         // `pending_prompts.json` and a RebuildFlush WAL line. Bind already
         // restored that row. Draining it here paints a Human turn, and the
@@ -1458,10 +1505,30 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
             effects.push(effect);
         }
+        // Resume `exit_plan_mode` docks only when this flag is still set.
+        // The open above clears it once a live waiter is bound, and the
+        // waiter is not bound until the flush below.
+        if dock_plan {
+            agent.view_plan_requested = true;
+        }
         notify_session_ready(&app.notification_service, agent);
         crate::memory_release::release_retained_memory("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
         identity_rebind.apply(app);
+        if let Some(mode) = scheduler_background_loops {
+            app.session_loop_fire_detached.insert(agent_id, mode);
+        }
+        crate::app::acp_handler::flush_pending_exit_plan_mode(app);
+        if dock_plan && let Some(agent) = app.agents.get_mut(&agent_id) {
+            // The flush parks the held waiter and unmounts the local idle
+            // pane. Bind Approve on that waiter when this load asked to dock.
+            agent.view_plan_requested = true;
+            agent.open_plan_from_view_plan_or_status();
+        }
+        if consumed_isolated_preview {
+            let _ =
+                crate::slash::commands::plan::take_isolated_preview_open(&marker_cwd, &marker_sid);
+        }
         return effects;
     }
     vec![]
@@ -1500,6 +1567,36 @@ fn primary_user_turn_finished_successfully(scrollback: &ScrollbackState) -> bool
         }
     }
     matches!(last_terminal, Some(SessionEvent::TurnCompleted { .. }))
+}
+
+/// Last-session bind with no `canceled_turn_resume.json`.
+/// Disk pending is restored, then a `continue_prior_work` row that matches
+/// chat history is dropped. The ordinary drop still spares that flag so
+/// pause and compact can keep a row. This pass is only the bind that has
+/// no cancel marker. It does not write a marker.
+fn drop_recorded_occupancy_when_no_cancel_marker(agent: &mut AgentView) {
+    let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+        return;
+    };
+    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+    let Ok(None) =
+        xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid)
+    else {
+        return;
+    };
+    agent.restore_pending_prompts_from_disk();
+    let needles = agent.committed_human_turn_texts(false, true);
+    agent.session.pending_prompts.retain(|prompt| {
+        prompt.kind != QueueEntryKind::Prompt
+            || !prompt.continue_prior_work
+            || !needles.iter().any(|recorded| {
+                xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(
+                    &prompt.text,
+                    recorded,
+                )
+            })
+    });
+    agent.sync_queue_pane();
 }
 
 /// Re-queue a canceled mid-turn once when the session marker is present and

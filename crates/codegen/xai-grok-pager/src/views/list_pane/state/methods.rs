@@ -255,17 +255,17 @@ impl ListPaneState {
     /// split (textarea and textarea_state are both fields on `self`). Called by the renderer. Stores
     /// the cursor screen position for [`cursor_position`].
     pub fn render_input_textarea(&mut self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
-        use ratatui::style::Modifier;
         use ratatui::widgets::StatefulWidgetRef;
         use unicode_width::UnicodeWidthStr;
 
         (&self.input_textarea).render_ref(area, buf, &mut self.input_textarea_state);
 
-        // Draw a visible cursor (REVERSED cell at cursor position).
-        // Also store the screen position so the caller can set the terminal hardware cursor via Frame::set_cursor_position()
+        // Blinking Operator-green block caret. Store the cell so a caller can
+        // still read it. The hardware cursor stays hidden while this paints.
         if area.width > 0 && area.height > 0 {
             let text = self.input_textarea.text();
-            let text_before_cursor = text.get(..self.input_textarea.cursor()).unwrap_or(text);
+            let cursor = self.input_textarea.cursor();
+            let text_before_cursor = text.get(..cursor).unwrap_or(text);
             let cursor_line = text_before_cursor.chars().filter(|c| *c == '\n').count();
             let last_line_start = text_before_cursor.rfind('\n').map(|i| i + 1).unwrap_or(0);
             let cursor_col = text_before_cursor
@@ -275,9 +275,24 @@ impl ListPaneState {
                 .min(area.width as usize - 1) as u16;
             let x = area.x + cursor_col;
             let y = (area.y + cursor_line as u16).min(area.y + area.height - 1);
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.modifier.insert(Modifier::REVERSED);
-            }
+            let theme = crate::theme::Theme::current();
+            let canvas_bg = buf
+                .cell((x, y))
+                .map(|cell| cell.bg)
+                .unwrap_or(theme.bg_base);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            crate::views::prompt_widget::paint_composer_box_cursor_phase(
+                buf,
+                x,
+                y,
+                &theme,
+                canvas_bg,
+                crate::glyphs::cursor_box_filled_phase(now_ms),
+                cursor == text.len(),
+            );
             self.input_cursor_screen_pos = Some((x, y));
         }
     }

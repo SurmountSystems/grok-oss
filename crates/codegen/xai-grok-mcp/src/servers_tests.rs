@@ -2160,6 +2160,10 @@ async fn overlapping_ensure_initialized_sends_one_initialize() {
     });
     let inits = Arc::clone(&handles.inits);
     let releaser = tokio::spawn(async move {
+        // The fake discover handler answers immediately, so a real initialize
+        // accept is not waiting out the 5s probe budget. A missing POST must
+        // fail here. This loop used to spin with no deadline.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if entered.load(Ordering::Relaxed) == 2 && inits.load(Ordering::Relaxed) >= 1 {
                 for _ in 0..64 {
@@ -2168,12 +2172,21 @@ async fn overlapping_ensure_initialized_sends_one_initialize() {
                 release.notify_waiters();
                 break;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "initialize POST did not arrive within 5s (entered={}, inits={})",
+                entered.load(Ordering::Relaxed),
+                inits.load(Ordering::Relaxed),
+            );
             tokio::task::yield_now().await;
         }
     });
+    // Join the releaser first. The handshakes cannot succeed until it
+    // releases the held initialize, and its deadline must fail the test
+    // without waiting out the handshake budgets.
+    releaser.await.expect("releaser");
     let first = first.await.expect("first task");
     let second = second.await.expect("second task");
-    releaser.await.expect("releaser");
     assert_eq!(1, handles.inits.load(Ordering::Relaxed));
     first.expect("first handshake");
     second.expect("second handshake");
@@ -4327,8 +4340,21 @@ async fn ensure_initialized_inflight_wait_times_out_when_holder_silent() {
 
 #[tokio::test]
 async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
+    // A documentation address is not a hang here: TCP connect fails immediately,
+    // the holder publishes Pending, and this test never observes Initializing.
+    // Accept and never answer so the handshake stays in flight until abort.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalling peer");
+    let addr = listener.local_addr().expect("stalling peer addr");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
     let config = HttpConfig {
-        url: "http://192.0.2.1:1/unreachable".to_string(),
+        url: format!("http://{addr}/unreachable"),
         headers: vec![],
         local_agent_endpoint: false,
         ..HttpConfig::default()

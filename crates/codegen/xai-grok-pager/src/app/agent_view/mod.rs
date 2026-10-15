@@ -902,6 +902,11 @@ pub struct AgentView {
     /// Hover is independent of dock keyboard focus.
     pub dock_hovered: Option<crate::views::dock::DockItem>,
     pub dock_stop_button: Option<CachedDockStop>,
+    /// Painted `[clear]` from the last dock frame. The click uses this rect.
+    pub dock_clear_rect: Option<Rect>,
+    pub dock_clear_hovered: bool,
+    /// Painted `N specialist` spans, each with the L2 child session id.
+    pub dock_specialist_hits: Vec<(Rect, String)>,
     /// Sticky: render enforces the queue overlay's visibility from this each
     /// frame, so the queue's auto-show can't re-open a manual collapse.
     pub dock_queued_expanded: bool,
@@ -1408,6 +1413,15 @@ pub struct AgentView {
     /// active and turn-end re-arms Approve for a plan the operator already
     /// decided.
     pub(crate) plan_decision_resolved: bool,
+    /// The Operator closed this plan pane (Escape, the close control, Exit,
+    /// or Ctrl-C). Draw must not open the file again on the next frame.
+    /// A new plan present or an explicit `/view-plan` clears it.
+    pub(crate) operator_closed_plan_pane: bool,
+    /// True only after Approve starts implement. That path keeps the side
+    /// panel shut. Plan Exit and abandon leave this false so a leftover
+    /// covering can reopen view-only and `/plan` can dock covering exclusive
+    /// present.
+    pub(crate) plan_approved_implement: bool,
     /// Paste-chip Approve returns `Action::Interject` and must not emit
     /// `SendInterject`. Dispatch clears this. Typed notes leave it false.
     pub(crate) paste_chip_approval_not_wire_interject: bool,
@@ -1557,6 +1571,9 @@ pub struct AgentView {
     /// Currently open subagent view (child_session_id). When Some, the scrollback area is replaced by the subagent's framed view.
     /// scrollback area is replaced by the subagent's framed view.
     pub active_subagent: Option<String>,
+    /// L2 to restore when the Operator leaves an L3 opened from that L2.
+    /// `None` means close dismisses the open view.
+    pub(crate) overlay_return_sid: Option<String>,
     /// Root of its session, or a child mirrored under a parent's takeover; every child-specific gate derives from it.
     role: AgentRole,
     /// Paint local clocks on thought, tool, and specialist rows.

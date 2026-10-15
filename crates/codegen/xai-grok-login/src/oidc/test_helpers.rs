@@ -9,7 +9,8 @@ pub(super) fn test_nonce() -> String {
 pub(super) const TEST_CLIENT_ID: &str = "test-client-id";
 pub(super) fn ensure_crypto_provider() {
     xai_grok_extra_ca::ensure_default_crypto_provider();
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    // Stay on aws-lc. The other jsonwebtoken crypto feature depends on the rsa crate.
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 }
 
 /// Test-only PKCS#8 RSA-2048 + JWK `n`/`e` for the mock IdP. Fixture, not

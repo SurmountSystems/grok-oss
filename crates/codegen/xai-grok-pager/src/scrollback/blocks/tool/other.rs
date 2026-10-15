@@ -263,12 +263,10 @@ impl BlockContent for OtherToolCallBlock {
                                     theme.dim(),
                                 ))
                             } else {
+                                // Tool text. Operator green stays on the rail and the caret.
                                 Line::from(vec![
-                                    Span::styled(
-                                        "     \u{2192} ".to_string(),
-                                        theme.fg(theme.accent_user),
-                                    ),
-                                    Span::styled(answer.clone(), theme.fg(theme.accent_user)),
+                                    Span::styled("     \u{2192} ".to_string(), theme.primary()),
+                                    Span::styled(answer.clone(), theme.primary()),
                                 ])
                             };
                             lines.push(BlockLine::styled(a_line));

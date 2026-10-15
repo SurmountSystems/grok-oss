@@ -148,7 +148,9 @@ fn mixed_report() -> DiagnosticReport {
             ThemeKind::GrokDay,
             ThemeKind::Terminal,
         ],
-        total_themes: ThemeKind::ALL.len(),
+        // Doctor human and JSON fixtures pin 6. ThemeKind::ALL also includes
+        // gated Terminal plus Doge (7). The mixed row names terminal explicitly.
+        total_themes: 6,
     };
     report.facts.keyboard = Some(KeyboardFact {
         modifier_delivery: ModifierDelivery::new_for_test(
@@ -674,6 +676,8 @@ fn json_empty_fixture_pins_null_policy() {
     report.facts.xtversion = RuntimeFact::Unavailable;
     report.facts.color.level = RuntimeFact::Unavailable;
     report.facts.color.available_themes.clear();
+    // Healthy starts from ThemeKind::ALL (7). This fixture pins totalThemes: 6.
+    report.facts.color.total_themes = 6;
     report.facts.clipboard.data_control = DataControlFact::Unavailable;
     let mut output = Vec::new();
     write_report(&report, true, &mut output).unwrap();

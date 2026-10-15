@@ -25,7 +25,7 @@ Grok Build also reads these layers, later rows winning except where a requiremen
 7. `GROK_*` environment variables.
 8. CLI flags such as `--model`, `--sandbox`, `--yolo`.
 
-Run `grok inspect` or `grok inspect --json` to see which files and values won.
+Run `grok-oss inspect` or `grok-oss inspect --json` to see which files and values won.
 
 ## config.toml
 
@@ -620,7 +620,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `ui.contextual_hints.plan_mode` | `boolean` | `yes` | `user` | Suggest plan mode (Shift+Tab) for planning-style prompts. |
 | `ui.contextual_hints.send_now` | `boolean` | `yes` | `user` | After queuing a mid-turn follow-up, Enter on an empty prompt sends now. |
 | `ui.contextual_hints.small_screen` | `boolean` | `yes` | `user` | Suggest `/compact-mode` on short terminals. |
-| `ui.contextual_hints.ssh_wrap` | `boolean` | `yes` | `user` | Recommend `grok wrap` when SSH lacks a clipboard sink. |
+| `ui.contextual_hints.ssh_wrap` | `boolean` | `yes` | `user` | Recommend `grok-oss wrap` when SSH lacks a clipboard sink. |
 | `ui.contextual_hints.undo` | `boolean` | `yes` | `user` | Ctrl+Z restores a wiped prompt draft tip. |
 | `ui.contextual_hints.word_select` | `boolean` | `yes` | `user` | After double-click with fold/nav selection, point at Word select in settings. |
 | `ui.cursor_blink` | `boolean` | `yes` | `user` | Force blinking (true) or steady (false) block cursor. Unset inherits the terminal. |
@@ -720,11 +720,11 @@ Policy pins such as `allow_managed_hooks_only` (see [Hooks](10-hooks.md#allow-on
 
 | Situation | What Grok Build does |
 | --- | --- |
-| A developer sets a key you pinned | The pinned value applies. `grok inspect` lists the requirements file that contributed. |
+| A developer sets a key you pinned | The pinned value applies. `grok-oss inspect` lists the requirements file that contributed. |
 | A developer sets a key you shipped in `managed_config.toml` | Their value applies, except `features.remote_fetch`. Pin the key instead if it must hold. |
 | `requirements.toml` is missing or its signature does not verify | The pins do not apply, and Grok Build starts without them. Set `fail_closed = true` to refuse to start instead. |
 | A pinned key names a value this version does not recognise | The key is ignored and the rest of the file still applies. |
 
 ## Check what is in effect
 
-Run `grok inspect` on the developer's machine. It lists every config file that contributed, including requirements and managed layers, so a policy that is not applying is visible in one command.
+Run `grok-oss inspect` on the developer's machine. It lists every config file that contributed, including requirements and managed layers, so a policy that is not applying is visible in one command.
