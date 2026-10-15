@@ -1898,20 +1898,19 @@ impl SessionActor {
         } else {
             error.kind.as_ref()
         };
-        let (error_type, detailed_message) = if crate::extensions::notification::is_nested_missing_auth_context(
-            &error.message,
-        ) {
-            ("auth_transient", detailed_message)
-        } else {
-            match self.auth_manager.as_ref() {
-                Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
-                    &auth_manager.auth_remedy(),
-                    detailed_message,
-                    error.status_code,
-                ),
-                _ => (error_type, detailed_message),
-            }
-        };
+        let (error_type, detailed_message) =
+            if crate::extensions::notification::is_nested_missing_auth_context(&error.message) {
+                ("auth_transient", detailed_message)
+            } else {
+                match self.auth_manager.as_ref() {
+                    Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
+                        &auth_manager.auth_remedy(),
+                        detailed_message,
+                        error.status_code,
+                    ),
+                    _ => (error_type, detailed_message),
+                }
+            };
         let detailed_message =
             if xai_grok_sampling_types::is_console_team_prepaid_message(&detailed_message) {
                 xai_grok_sampling_types::error::credit_exhausted_user_message(&detailed_message)
