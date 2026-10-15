@@ -741,7 +741,8 @@ impl SessionActor {
             }
         }
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
-        // or expired parent JWT so nested reconstruct cannot wipe a stamped inherit key.
+        // inherit stamp. Do not seed an expired AuthManager token: the resolver would
+        // send it, and a fail-closed 401 would look authenticated.
         let mut api_key = if use_bearer_resolver {
             // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
             // A session from another authority must not seed the default headers either.
@@ -750,26 +751,8 @@ impl SessionActor {
                 .filter(|_| ActiveAuthBackend::default().is_xai_authority())
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
                 .or_else(|| creds.api_key.clone().filter(|key| !key.is_empty()))
-                .or_else(|| {
-                    self.auth_manager.as_ref().and_then(|am| {
-                        am.current_or_expired()
-                            .map(|a| a.key)
-                            .filter(|key| !key.is_empty())
-                    })
-                })
         } else {
-            creds
-                .api_key
-                .clone()
-                .filter(|key| !key.is_empty())
-                .or_else(|| {
-                    self.auth_manager.as_ref().and_then(|am| {
-                        am.current_wire_valid()
-                            .or_else(|| am.current_or_expired())
-                            .map(|a| a.key)
-                            .filter(|key| !key.is_empty())
-                    })
-                })
+            creds.api_key.clone().filter(|key| !key.is_empty())
         };
         if api_key.as_ref().is_none_or(|key| key.trim().is_empty()) {
             api_key = self.sampler_handle.current_api_key().await;
@@ -892,9 +875,7 @@ impl SessionActor {
                 .extra_headers
                 .shift_remove("x-authenticateresponse");
         }
-        if (use_bearer_resolver || sampling.api_key.is_some())
-            && let Some(am) = self.auth_manager.as_ref()
-        {
+        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             sampling.bearer_resolver = Some(
                 xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
                     am.clone(),
