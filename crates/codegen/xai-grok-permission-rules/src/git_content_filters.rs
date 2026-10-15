@@ -96,15 +96,15 @@ pub(crate) fn read_local_git_config_entries(cwd: &Path) -> Option<Vec<(String, S
             git2::ConfigLevel::Local | git2::ConfigLevel::Worktree => {}
             _ => continue,
         }
-        // git2 yields None for non-UTF-8. Dropping that entry would hide a filter Git can still run.
-        let name = entry.name()?;
+        // git2 0.21 yields Err for non-UTF-8. Dropping that entry would hide a filter Git can still run.
+        let name = entry.name().ok()?;
         // libgit2 does not evaluate `includeIf.hasconfig:remote.*.url`.
         if local_includeif_unsupported(name) {
             return None;
         }
         // A bare key is boolean true. `value()` panics when no value is defined.
         let value = if entry.has_value() {
-            let Some(value) = entry.value() else {
+            let Ok(value) = entry.value() else {
                 if filter_command_driver(name).is_some() {
                     return None;
                 }
