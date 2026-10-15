@@ -701,14 +701,25 @@ check-remote:
     else
       export NIX_SSHOPTS="${extra_ssh}"
     fi
-    echo "==> just check-remote: flake metadata"
-    just flake-meta
+    # Nix copies a dirty git flake before the derivation filter runs, and that
+    # copy includes gitignored cargo output. Build from a snapshot of tracked
+    # files and untracked files that are not gitignored.
+    snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
+    trap 'rm -rf "$snapshot"' EXIT
+    git ls-files -z --cached --others --exclude-standard \
+      | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+    if find "$snapshot" -type d -name target -print -quit | grep -q .; then
+      echo "just check-remote: snapshot still contains a target directory" >&2
+      exit 2
+    fi
+    echo "==> just check-remote: flake metadata from the filtered source"
+    just nix_retry nix flake metadata "path:${snapshot}"
     echo "==> just check-remote: workspace cargo quality as a remote Nix derivation"
     # nix_retry banners and `nix build -L` logs go to stdout. Capturing that
     # whole stream as the store path makes `nix store cat` hit ARG_MAX
     # (exit 126, "Argument list too long"). Keep -L on the terminal and
     # take only the quality /nix/store path.
-    out="$(just nix_retry nix build -L ".#workspace-cargo-quality" --print-out-paths | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
+    out="$(just nix_retry nix build -L "path:${snapshot}#workspace-cargo-quality" --print-out-paths | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
     if [ -z "${out}" ]; then
       echo "just check-remote: missing quality store path in nix_retry output" >&2
       exit 2

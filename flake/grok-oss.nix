@@ -16,6 +16,10 @@ let
       let
         base = baseNameOf path;
       in
+      # Cargo output directories. A `/crates/` infix would otherwise keep
+      # nested `target/` trees in the derivation source.
+      base != "target"
+      && (
       (craneLib.filterCargoSources path type)
       || lib.hasInfix "/crates/" path
       || lib.hasSuffix "/frontend" path
@@ -33,7 +37,8 @@ let
       || base == "protoc"
       # Repo-root justfile. Crane's cargo filter drops it; the embedded
       # grep test include_str's this file from the crate directory.
-      || base == "justfile";
+      || base == "justfile"
+      );
   };
 
   nativeBuildInputs =

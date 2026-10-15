@@ -299,6 +299,22 @@ pub(crate) fn is_session_based_method_or_inherited_live_session(
     }
 }
 
+/// Auth snapshot for nested spawn.
+/// `current()` is empty during the early-invalidation window while the token is still wire-valid.
+/// `current_or_buffered_auth` only reads that window when the ACP method is already session-based, so a `"default"` cell drops the token and the nested request sends no Bearer.
+/// A refreshable wire-valid token wins. A refreshable hard-expired token is still returned so the nested method becomes `oidc` and the resolver can refresh. An API key is not taken here.
+pub(crate) fn nested_inherit_auth(
+    wire_valid: Option<xai_grok_login::GrokAuth>,
+    current_or_expired: Option<xai_grok_login::GrokAuth>,
+) -> Option<xai_grok_login::GrokAuth> {
+    if let Some(auth) = wire_valid
+        && auth_mode_is_refreshable_session(Some(auth.auth_mode))
+    {
+        return Some(auth);
+    }
+    current_or_expired.filter(|auth| auth_mode_is_refreshable_session(Some(auth.auth_mode)))
+}
+
 /// Nested spawn ACP method. A loaded session or API-key id wins. `"default"` / missing plus a live Oidc session becomes `oidc`, so the nested sampler sends Bearer.
 pub(crate) fn inherited_session_auth_method_id(
     loaded: Option<&acp::AuthMethodId>,
@@ -532,6 +548,60 @@ mod tests {
             Some(&api),
             true
         ));
+    }
+
+    /// ACP `"default"` plus a wire-valid OIDC token in the early-invalidation window must inherit `oidc`.
+    /// `current()` is empty in that window. The parent turn still sends the token via `current_wire_valid`.
+    #[test]
+    fn nested_inherit_auth_keeps_buffered_oidc_when_acp_method_is_default() {
+        let buffered = xai_grok_login::GrokAuth {
+            key: "buffered-oidc".into(),
+            auth_mode: AuthMode::Oidc,
+            ..xai_grok_login::GrokAuth::test_default()
+        };
+        let inherited_auth = nested_inherit_auth(Some(buffered.clone()), Some(buffered));
+        let inherited = inherited_session_auth_method_id(
+            Some(&acp::AuthMethodId::new("default")),
+            inherited_auth.as_ref().map(|auth| auth.auth_mode),
+        );
+        assert_eq!(inherited.0.as_ref(), OIDC_METHOD_ID);
+        assert!(is_session_based_method(&inherited));
+        assert_eq!(
+            inherited_auth.as_ref().map(|auth| auth.key.as_str()),
+            Some("buffered-oidc")
+        );
+    }
+
+    /// A hard-expired OIDC token still selects `oidc` so the nested resolver can refresh.
+    /// `WireValidBearerResolver` does not stamp that token.
+    #[test]
+    fn nested_inherit_auth_keeps_hard_expired_oidc_for_refresh() {
+        let expired = xai_grok_login::GrokAuth {
+            key: "hard-expired-oidc".into(),
+            auth_mode: AuthMode::Oidc,
+            ..xai_grok_login::GrokAuth::test_default()
+        };
+        let inherited_auth = nested_inherit_auth(None, Some(expired));
+        assert_eq!(
+            inherited_session_auth_method_id(
+                Some(&acp::AuthMethodId::new("default")),
+                inherited_auth.as_ref().map(|auth| auth.auth_mode),
+            )
+            .0
+            .as_ref(),
+            OIDC_METHOD_ID
+        );
+    }
+
+    /// An API key in the wire-valid slot is not a session inherit.
+    #[test]
+    fn nested_inherit_auth_does_not_treat_an_api_key_as_a_session() {
+        let key = xai_grok_login::GrokAuth {
+            key: "sk-console".into(),
+            auth_mode: AuthMode::ApiKey,
+            ..xai_grok_login::GrokAuth::test_default()
+        };
+        assert!(nested_inherit_auth(Some(key.clone()), Some(key)).is_none());
     }
 
     /// Missing ACP method plus a live Oidc session is still a session method for reconstruct and compact.

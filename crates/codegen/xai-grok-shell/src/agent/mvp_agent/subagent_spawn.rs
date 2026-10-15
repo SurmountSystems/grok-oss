@@ -248,6 +248,7 @@ impl MvpAgent {
             .as_ref()
             .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()));
         let memory_config = self.memory_config_snapshot();
+        let inherited_auth = self.auth_for_nested_inherit();
         let mut ctx = crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             process_scope: parent_process_scope,
@@ -264,12 +265,10 @@ impl MvpAgent {
             alpha_test_key: self.alpha_test_key(),
             auth_method_id: crate::agent::auth_method::inherited_session_auth_method_id(
                 self.auth_method_id.load().as_deref(),
-                self.current_or_buffered_auth()
-                    .as_ref()
-                    .map(|a| a.auth_mode),
+                inherited_auth.as_ref().map(|a| a.auth_mode),
             ),
             model_id: parent_model_id,
-            auth: self.current_or_buffered_auth(),
+            auth: inherited_auth,
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
             active_message_parent_prompt_index: parent_handle

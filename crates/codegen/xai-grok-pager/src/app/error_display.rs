@@ -215,11 +215,9 @@ pub(crate) fn format_request_failure(
             wire,
         };
     }
-    // Nested spawn reached cli-chat-proxy with no Bearer. The proxy text
-    // says the credentials are invalid or expired. That is false while the
-    // parent session still talks. Sending again does not attach the parent
-    // session. A real expired JWT is auth_kind=bearer and stays on the
-    // re-auth path.
+    // The proxy text is the wire body. Do not replace it with a claim about
+    // the parent session, and do not add "Try sending again." A missing
+    // Bearer is an inherit defect. A real expired JWT is auth_kind=bearer.
     if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(raw)
         || extracted
             .as_deref()
@@ -227,9 +225,8 @@ pub(crate) fn format_request_failure(
     {
         return FormattedRequestFailure {
             status,
-            headline: "Nested job had no auth context".to_string(),
-            detail: "The parent session still has credentials. This is not an expired login. Sending the message again does not fix it."
-                .to_string(),
+            headline: "Request failed".to_string(),
+            detail: extracted.unwrap_or_else(|| raw.to_string()),
             wire,
         };
     }
@@ -1040,16 +1037,20 @@ mod tests {
     }
 
     #[test]
-    fn nested_no_auth_context_does_not_say_credentials_expired_or_try_again() {
+    fn nested_no_auth_context_shows_the_proxy_text_without_a_parent_credential_story() {
         let raw = "Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
         let formatted = format_request_failure(None, None, raw);
         let message = formatted.message();
-        assert_eq!(formatted.headline, "Nested job had no auth context");
+        assert_eq!(formatted.headline, "Request failed");
+        assert!(message.contains("reason=no auth context"), "{message}");
         assert!(
-            message.contains("parent session still has credentials"),
+            !message.contains("parent session still has credentials"),
             "{message}"
         );
-        assert!(!message.contains("Invalid or expired"), "{message}");
+        assert!(
+            !message.contains("Nested job had no auth context"),
+            "{message}"
+        );
         assert!(
             !message.to_ascii_lowercase().contains("try sending again"),
             "{message}"

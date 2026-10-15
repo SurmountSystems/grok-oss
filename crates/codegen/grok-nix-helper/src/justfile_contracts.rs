@@ -200,16 +200,20 @@ fn check_remote_quotes_quality_attr_and_nix_retry_uses_argv() {
         "check-remote must set GROK_NIX_FORCE_REMOTE=1:\n{remote}"
     );
     assert!(
-        remote.contains("\".#workspace-cargo-quality\"")
-            || remote.contains("'.#workspace-cargo-quality'"),
-        "check-remote must quote .#workspace-cargo-quality:\n{remote}"
+        remote.contains("git ls-files -z --cached --others --exclude-standard"),
+        "check-remote must copy tracked and untracked source and skip gitignored paths:\n{remote}"
+    );
+    assert!(
+        remote.contains("#workspace-cargo-quality\""),
+        "check-remote must quote the workspace-cargo-quality installable:\n{remote}"
     );
     let unquoted = remote.lines().any(|l| {
-        l.contains(".#workspace-cargo-quality") && !l.contains("\".#") && !l.contains("'.#")
+        let code = l.split('#').next().unwrap_or(l);
+        code.contains("workspace-cargo-quality") && !code.contains('"') && !code.contains('\'')
     });
     assert!(
         !unquoted,
-        "check-remote must not leave .#workspace-cargo-quality unquoted:\n{remote}"
+        "check-remote must not leave workspace-cargo-quality unquoted:\n{remote}"
     );
     assert!(
         !remote.contains("just ci")

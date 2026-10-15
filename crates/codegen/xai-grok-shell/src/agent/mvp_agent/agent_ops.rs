@@ -182,6 +182,16 @@ impl MvpAgent {
                 byok_from_models(&models, preferred_model_id, current.0.as_ref()),
             );
     }
+    /// Auth the nested job inherits.
+    /// Uses the wire-valid or refreshable cached session even when the ACP method cell is still `"default"`.
+    pub(super) fn auth_for_nested_inherit(&self) -> Option<xai_grok_login::GrokAuth> {
+        crate::agent::auth_method::nested_inherit_auth(
+            self.auth_manager.current_wire_valid(),
+            self.auth_manager.current_or_expired(),
+        )
+        .or_else(|| self.current_or_buffered_auth())
+    }
+
     /// Return auth for sync config construction.
     pub(super) fn current_or_buffered_auth(&self) -> Option<xai_grok_login::GrokAuth> {
         self.auth_manager

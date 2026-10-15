@@ -2267,6 +2267,31 @@ async fn read_parent_sampling_config_ignores_global_default() {
             ctx.models_manager.current_model_id().0.as_ref(),
         );
 }
+/// ACP `"default"` plus a buffered OIDC session inherits `oidc` and installs the bearer resolver.
+/// That is the early-invalidation window: `current()` is empty and the parent turn still has a wire-valid token.
+#[tokio::test]
+async fn default_acp_method_with_buffered_oidc_installs_the_bearer_resolver() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_chat_state = None;
+    ctx.auth = Some(xai_grok_login::GrokAuth {
+        key: "buffered-oidc".into(),
+        auth_mode: xai_grok_login::AuthMode::Oidc,
+        ..xai_grok_login::GrokAuth::test_default()
+    });
+    ctx.auth_method_id = crate::agent::auth_method::inherited_session_auth_method_id(
+        Some(&acp::AuthMethodId::new("default")),
+        ctx.auth.as_ref().map(|auth| auth.auth_mode),
+    );
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    ctx.sampling_config.api_key = None;
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(ctx.auth_method_id.0.as_ref(), "oidc");
+    assert!(
+        config.bearer_resolver.is_some(),
+        "a buffered OIDC session must install the nested bearer resolver"
+    );
+}
 /// Every subagent config path must carry the live bearer resolver.
 /// A config frozen at spawn 401s for the rest of the subagent's life once the parent rotates its token (the wake-from-sleep failure mode).
 /// The test uses a first-party base URL so the assertion holds whether the catalog memo reports `NotByok` or `Unknown`.
