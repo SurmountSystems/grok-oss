@@ -937,17 +937,25 @@ impl SessionActor {
             SuppressReason::Auth
         )
     }
-    /// Terminal auth compact failure: emit RetryState auth (reauth stash) and auth_required.
+    /// Terminal auth compact failure: emit RetryState and auth_required.
+    /// A still-signed-in parent uses `auth_transient` so the pager does not paint `/login`.
     /// Separate from `AutoCompactFailed` (user-facing); this aborts the turn.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         use crate::extensions::notification::UNAUTHORIZED_NEEDLE;
         let detailed = crate::sampling::error::acp_error_message(&err);
+        let error_type = self
+            .auth_manager
+            .as_ref()
+            .map(|am| am.auth_remedy().turn_error_type())
+            .unwrap_or("auth");
         let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
             detailed
+        } else if error_type == "auth_transient" {
+            format!("{UNAUTHORIZED_NEEDLE}: compaction failed. ({detailed})")
         } else {
             format!(
-                "{UNAUTHORIZED_NEEDLE}: compaction failed — re-authenticate with /login \
+                "{UNAUTHORIZED_NEEDLE}: compaction failed. Re-authenticate with /login \
                  and retry. ({detailed})"
             )
         };
@@ -965,7 +973,7 @@ impl SessionActor {
         );
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
-                error_type: "auth".to_string(),
+                error_type: error_type.to_string(),
                 message: message.clone(),
             },
         ))

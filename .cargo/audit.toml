@@ -1,0 +1,10 @@
+# cargo-audit yanked probes crates.io HTTP. This workspace fetches through
+# menhera-cooldown. crates.io times out here (one error per lock crate).
+# Yanked versions are refused by cargo on the delayed index. Lock named tests
+# still forbid yanked aes / chacha20 / spin. Do not ignore RUSTSEC ids.
+# See https://github.com/RustSec/rustsec/blob/main/cargo-audit/audit.toml.example
+# (accessed: 2026-10-15).
+
+[yanked]
+enabled = false
+update_index = false

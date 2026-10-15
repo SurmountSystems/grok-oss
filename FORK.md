@@ -2552,6 +2552,12 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count` requires empty Enter on the L2 floor to open the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count. It does not list specialist names in place of that count. `q` or Esc from that L3 returns to the L2 and does not cancel the L2.
 - `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan` requires Enter with text in the L1 Operator box, while a turn is running, to soft-interject into that turn on the L1 session. Empty Enter must not approve a plan.
 
+**Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. GitHub issue 203.
+
+- Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
+- Nested 401 `reason=no auth context` with `auth_kind=other` while the parent session still talks does not paint `Authentication required: … Run /login`. Named test: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`.
+- A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
+
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not
 reshape the asserts to match today's paint. Older tests below are not

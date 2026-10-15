@@ -1344,11 +1344,22 @@ pub enum RetryState {
 /// Whether a terminal retry failure is a recoverable authentication error (expired/invalid credentials, 401). The user can fix those by signing in again; this drives the actionable re-auth banner.
 /// `legacy_auth` is excluded: its message carries its own migration guidance (`grok update` / `grok logout` / `grok login`), shown verbatim.
 /// `auth_transient` is excluded for the opposite reason: it is emitted only when the failure self-heals (`AuthManager::requires_manual_reauth`). Its message already says it recovers on its own, so no `/login` banner is shown.
+/// Nested spawn that sent no Bearer (`auth_kind=other`, `reason=no auth context`) is an inherit defect while the parent session still talks. That must not paint `/login`. A real expired JWT is `auth_kind=bearer`.
 pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
     if matches!(error_type, Some("legacy_auth") | Some("auth_transient")) {
         return false;
     }
+    if is_nested_missing_auth_context(message) {
+        return false;
+    }
     error_type == Some("auth") || message.contains(UNAUTHORIZED_NEEDLE)
+}
+
+/// Nested HTTP that reached cli-chat-proxy with the CLI identity header and no Authorization Bearer.
+/// Live wire: `auth_kind=other` … `reason=no auth context`. A parent JWT that actually expired is `auth_kind=bearer`.
+pub fn is_nested_missing_auth_context(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no auth context") && !lower.contains("auth_kind=bearer")
 }
 
 /// Text fallback for 401s that arrive without a typed `error_type`.

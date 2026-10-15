@@ -771,7 +771,12 @@ fn session_bearer_resolver(
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     use crate::agent::auth_method;
     auth_method::session_token_auth_gate(
-        auth_method::is_session_based_method(&ctx.auth_method_id),
+        auth_method::is_session_based_method_or_inherited_live_session(
+            Some(&ctx.auth_method_id),
+            auth_method::auth_mode_is_refreshable_session(
+                ctx.auth.as_ref().map(|auth| auth.auth_mode),
+            ),
+        ),
         byok,
         crate::util::is_xai_api_url(base_url),
     )

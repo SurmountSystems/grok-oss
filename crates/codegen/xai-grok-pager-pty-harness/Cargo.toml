@@ -62,7 +62,7 @@ tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 # Fixture helpers for the spawn tests. All of these are already in the pager
 # binary's graph the tests exec, so they add no crate compiles.
-git2 = { workspace = true }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 serial_test = { workspace = true }
 toml = { workspace = true }
 unicode-width = { workspace = true }

@@ -3795,21 +3795,6 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "git2"
-version = "0.20.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
-dependencies = [
- "bitflags 2.13.2",
- "libc",
- "libgit2-sys",
- "log",
- "openssl-probe 0.1.6",
- "openssl-sys",
- "url",
-]
-
-[[package]]
-name = "git2"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
@@ -6094,9 +6079,7 @@ checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
 dependencies = [
  "cc",
  "libc",
- "libssh2-sys",
  "libz-sys",
- "openssl-sys",
  "pkg-config",
 ]
 
@@ -6144,20 +6127,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
  "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "libssh2-sys"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f5eb74291e8691cab524a01274a1b1e7742b1a94f29d8b101d8aadc8372c1cd"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
  "pkg-config",
  "vcpkg",
 ]
@@ -7340,27 +7309,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openssl-probe"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
-
-[[package]]
-name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.117"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "opentelemetry"
@@ -9334,9 +9285,8 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+version = "0.23.46"
+source = "git+https://github.com/rustls/rustls?tag=v%2F0.23.46#f04804fa13341a9b1dc02b5d1dd8a746f2c4b7fb"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -9354,7 +9304,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
 dependencies = [
- "openssl-probe 0.2.1",
+ "openssl-probe",
  "rustls-pki-types",
  "schannel",
  "security-framework",
@@ -13358,7 +13308,7 @@ dependencies = [
  "crossbeam",
  "dashmap",
  "dunce",
- "git2 0.21.0",
+ "git2",
  "hashbrown 0.15.5",
  "ignore",
  "libc",
@@ -13581,7 +13531,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "dunce",
- "git2 0.21.0",
+ "git2",
  "globset",
  "ignore",
  "notify",
@@ -13642,7 +13592,7 @@ dependencies = [
  "chrono",
  "dunce",
  "fs2",
- "git2 0.21.0",
+ "git2",
  "ignore",
  "minijinja",
  "regex",
@@ -13861,7 +13811,7 @@ name = "xai-grok-external-agent-migration"
 version = "0.1.0"
 dependencies = [
  "dunce",
- "git2 0.20.4",
+ "git2",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -13923,7 +13873,7 @@ dependencies = [
  "dirs 6.0.0",
  "dunce",
  "filetime",
- "git2 0.21.0",
+ "git2",
  "libc",
  "md5",
  "rusqlite",
@@ -14168,7 +14118,7 @@ dependencies = [
  "dunce",
  "filetime",
  "flate2",
- "git2 0.21.0",
+ "git2",
  "libc",
  "nix 0.30.1",
  "notify",
@@ -14268,7 +14218,7 @@ dependencies = [
  "dunce",
  "flate2",
  "gethostname",
- "git2 0.21.0",
+ "git2",
  "image",
  "indexmap",
  "insta",
@@ -14448,7 +14398,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dunce",
- "git2 0.20.4",
+ "git2",
  "image",
  "libc",
  "portable-pty",
@@ -14546,7 +14496,7 @@ dependencies = [
  "agent-client-protocol",
  "dunce",
  "fs2",
- "git2 0.20.4",
+ "git2",
  "glob",
  "rusqlite",
  "serde",
@@ -14773,7 +14723,7 @@ dependencies = [
  "futures-util",
  "gcloud-storage",
  "gethostname",
- "git2 0.21.0",
+ "git2",
  "glob",
  "grok-rate-limit",
  "ignore",
@@ -15008,7 +14958,7 @@ dependencies = [
  "chrono",
  "ctor",
  "filetime",
- "git2 0.21.0",
+ "git2",
  "http",
  "mid",
  "obfstr",
@@ -15293,7 +15243,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures",
- "git2 0.21.0",
+ "git2",
  "hashbrown 0.16.1",
  "humantime-serde",
  "ignore",

@@ -1,7 +1,7 @@
 use agent_client_protocol as acp;
 
 use crate::agent::config::ModelEntry;
-use xai_grok_login::PreferredAuthMethod;
+use xai_grok_login::{AuthMode, PreferredAuthMethod};
 
 /// Shared, live handle to the agent's current ACP auth method id. `Arc` so a clone can cross the per-session-thread boundary at spawn.
 /// The `ArcSwapOption` interior lets the agent's `authenticate` handler publish a new method without re-spawning sessions. Every running session's per-turn auth gate observes the new method on its next turn.
@@ -272,6 +272,53 @@ pub(crate) fn is_session_based_method(method_id: &acp::AuthMethodId) -> bool {
     AuthMethodKind::from_id(method_id).is_session_based()
 }
 
+/// Spawn used to fill `"default"` when the parent ACP method cell was still empty.
+/// That id is [`AuthMethodKind::Unknown`], so nested reconstruct skipped the bearer resolver and cli-chat-proxy returned `auth_kind=other` / `reason=no auth context`.
+pub(crate) fn is_placeholder_auth_method(method_id: &acp::AuthMethodId) -> bool {
+    matches!(method_id.0.as_ref(), "default" | "")
+}
+
+/// Live parent session that nested spawn and compact must inherit as a refreshable bearer.
+pub(crate) fn auth_mode_is_refreshable_session(mode: Option<AuthMode>) -> bool {
+    matches!(
+        mode,
+        Some(AuthMode::Oidc | AuthMode::WebLogin | AuthMode::External)
+    )
+}
+
+/// Session-token gate input: an explicit session ACP method, or a missing/`"default"` method while the parent still holds a refreshable session.
+/// Explicit `xai.api_key` stays a static key. Pre-authenticate with no session credential stays inactive.
+pub(crate) fn is_session_based_method_or_inherited_live_session(
+    method_id: Option<&acp::AuthMethodId>,
+    live_session: bool,
+) -> bool {
+    match method_id {
+        Some(id) if is_placeholder_auth_method(id) => live_session,
+        Some(id) => is_session_based_method(id),
+        None => live_session,
+    }
+}
+
+/// Nested spawn ACP method. A loaded session or API-key id wins. `"default"` / missing plus a live Oidc session becomes `oidc`, so the nested sampler sends Bearer.
+pub(crate) fn inherited_session_auth_method_id(
+    loaded: Option<&acp::AuthMethodId>,
+    session_auth_mode: Option<AuthMode>,
+) -> acp::AuthMethodId {
+    if let Some(id) = loaded
+        && !is_placeholder_auth_method(id)
+    {
+        return id.clone();
+    }
+    match session_auth_mode {
+        Some(AuthMode::Oidc) => acp::AuthMethodId::new(OIDC_METHOD_ID),
+        Some(AuthMode::WebLogin | AuthMode::External) => acp::AuthMethodId::new(GROK_COM_METHOD_ID),
+        Some(AuthMode::ApiKey) => acp::AuthMethodId::new(XAI_API_KEY_METHOD_ID),
+        None => loaded
+            .cloned()
+            .unwrap_or_else(|| acp::AuthMethodId::new("default")),
+    }
+}
+
 /// Per-model BYOK status: whether the selected model carries its own `[model.*]` `api_key`/`env_key`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -455,6 +502,57 @@ mod tests {
         assert!(!is_session_based_method(&acp::AuthMethodId::new(
             "unknown-method"
         )));
+    }
+
+    /// Nested spawn must not keep ACP `"default"` when the parent session is live OIDC.
+    /// Operator: nested L2 jobs hit a 401 OIDC error (`reason=no auth context`) while the parent session still talks.
+    #[test]
+    fn inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default() {
+        let default = acp::AuthMethodId::new("default");
+        let inherited = inherited_session_auth_method_id(Some(&default), Some(AuthMode::Oidc));
+        assert_eq!(inherited.0.as_ref(), OIDC_METHOD_ID);
+        assert!(is_session_based_method(&inherited));
+        assert!(is_session_based_method_or_inherited_live_session(
+            Some(&default),
+            true
+        ));
+        assert!(!is_session_based_method_or_inherited_live_session(
+            Some(&default),
+            false
+        ));
+    }
+
+    /// An explicit console/API-key method stays that method even when a SuperGrok session is also loaded.
+    #[test]
+    fn inherited_session_auth_method_id_keeps_explicit_api_key() {
+        let api = acp::AuthMethodId::new(XAI_API_KEY_METHOD_ID);
+        let inherited = inherited_session_auth_method_id(Some(&api), Some(AuthMode::Oidc));
+        assert_eq!(inherited.0.as_ref(), XAI_API_KEY_METHOD_ID);
+        assert!(!is_session_based_method_or_inherited_live_session(
+            Some(&api),
+            true
+        ));
+    }
+
+    /// Missing ACP method plus a live Oidc session is still a session method for reconstruct and compact.
+    #[test]
+    fn unspecified_method_with_live_oidc_session_is_session_based() {
+        assert!(is_session_based_method_or_inherited_live_session(
+            None, true
+        ));
+        assert!(!is_session_based_method_or_inherited_live_session(
+            None, false
+        ));
+        assert_eq!(
+            inherited_session_auth_method_id(None, Some(AuthMode::Oidc))
+                .0
+                .as_ref(),
+            OIDC_METHOD_ID
+        );
+        assert_eq!(
+            inherited_session_auth_method_id(None, None).0.as_ref(),
+            "default"
+        );
     }
 
     use xai_grok_test_support::EnvGuard;

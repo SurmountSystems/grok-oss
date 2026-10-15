@@ -725,6 +725,16 @@
             Some("auth_transient"),
             "Unauthorized (401)\n\nAuthentication is temporarily unavailable"
         ));
+        // Nested spawn that sent no Bearer. Parent still talks. Do not paint /login.
+        assert!(!is_reauthable_failure(
+            Some("auth"),
+            "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)"
+        ));
+        // A parent JWT that actually expired still is re-authable.
+        assert!(is_reauthable_failure(
+            Some("auth"),
+            "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)"
+        ));
         // Unrelated failures must not be treated as re-authable.
         assert!(!is_reauthable_failure(
             Some("api"),
@@ -738,7 +748,7 @@
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
     }
 
-    /// A 401 with `error_type == "auth"` shows the actionable re-auth prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
+    /// A 401 with `error_type == "auth"` and an expired Bearer shows the actionable re-auth prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
     #[test]
     fn apply_retry_state_auth_failure_pushes_reauth_prompt() {
         let mut session = make_session(Some("s1"));
@@ -746,8 +756,9 @@
         apply_retry_state(
             &RetryState::Failed {
                 error_type: "auth".into(),
-                message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/messages: \
-                          no auth context"
+                message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: \
+                          Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, \
+                          upstream=Unauthenticated)"
                     .into(),
             },
             &mut session,
@@ -757,9 +768,34 @@
                 last_session_event(&scrollback),
                 Some(SessionEvent::ReAuthRequired)
             ),
-            "auth 401 must surface the actionable re-auth prompt"
+            "expired bearer 401 must surface the actionable re-auth prompt"
         );
         assert!(!session.credit_limit_blocked);
+    }
+
+    /// Nested L2 401 `reason=no auth context` while the parent session still talks must not paint `/login`.
+    /// Operator: "Authentication required: your session has expired or your credentials were rejected. Run /login to re-authenticate, then resend your message. It's all so obnoxious."
+    #[test]
+    fn apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            !matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::ReAuthRequired)
+            ),
+            "nested spawn 401 with no auth context must not tell the Operator to /login while the parent turn still works"
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
     }
 
     fn count_reauth_required(scrollback: &ScrollbackState) -> usize {
@@ -777,7 +813,7 @@
     fn auth_failed_retry() -> RetryState {
         RetryState::Failed {
             error_type: "auth".into(),
-            message: "Unauthorized (401) from https://proxy/v1/messages: no auth context".into(),
+            message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)".into(),
         }
     }
 

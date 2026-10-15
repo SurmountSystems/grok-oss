@@ -192,11 +192,16 @@ impl SessionTokenAuthGate {
         auth_method_id: Option<&acp::AuthMethodId>,
         model_byok: crate::agent::auth_method::ModelByok,
         base_url: &str,
+        live_session: bool,
     ) -> Self {
         Self {
-            // `None` (pre-`authenticate`) classifies as non-session-based, so the gate stays inactive until a method is selected
-            is_session_based: auth_method_id
-                .is_some_and(crate::agent::auth_method::is_session_based_method),
+            // Missing/`"default"` plus a live OIDC session is still session-based (nested spawn used to fill `"default"`).
+            // Explicit `xai.api_key` stays a static key. Pre-authenticate with no session credential stays inactive.
+            is_session_based:
+                crate::agent::auth_method::is_session_based_method_or_inherited_live_session(
+                    auth_method_id,
+                    live_session,
+                ),
             model_byok,
             endpoint_is_first_party: crate::util::is_xai_api_url(base_url),
         }
@@ -601,7 +606,22 @@ impl SessionActor {
     fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
         let byok = self.model_auth_facts(model_id).byok;
         let auth_method = self.auth_method_id.load();
-        SessionTokenAuthGate::new(auth_method.as_deref(), byok, base_url)
+        SessionTokenAuthGate::new(
+            auth_method.as_deref(),
+            byok,
+            base_url,
+            self.live_session_auth(),
+        )
+    }
+
+    /// Parent still holds a refreshable OIDC / grok.com / external session.
+    fn live_session_auth(&self) -> bool {
+        crate::agent::auth_method::auth_mode_is_refreshable_session(
+            self.auth_manager
+                .as_ref()
+                .and_then(|am| am.current_or_expired())
+                .map(|auth| auth.auth_mode),
+        )
     }
 
     /// Emit a unified-log breadcrumb whenever the session-token refresh gate sees an `Unknown` per-model BYOK status on a session-based method.
@@ -698,8 +718,12 @@ impl SessionActor {
         // `cfg.base_url` keeps an `Unknown` BYOK status refreshable against first-party xAI hosts
         // That avoids leaking the session token to a third-party endpoint
         let auth_method = self.auth_method_id.load();
-        let gate =
-            SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
+        let gate = SessionTokenAuthGate::new(
+            auth_method.as_deref(),
+            model_facts.byok,
+            &cfg.base_url,
+            self.live_session_auth(),
+        );
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         // Refresh the session token before the sampler reads it; gated to sessions that use it.

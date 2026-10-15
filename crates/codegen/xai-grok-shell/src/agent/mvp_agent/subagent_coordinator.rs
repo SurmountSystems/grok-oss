@@ -412,12 +412,12 @@ impl MvpAgent {
             managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
                 .unwrap_or_else(|| self.cli_chat_proxy_base_url()),
             alpha_test_key: self.alpha_test_key(),
-            auth_method_id: self
-                .auth_method_id
-                .load()
-                .as_deref()
-                .cloned()
-                .unwrap_or_else(|| acp::AuthMethodId::new("default")),
+            auth_method_id: crate::agent::auth_method::inherited_session_auth_method_id(
+                self.auth_method_id.load().as_deref(),
+                self.current_or_buffered_auth()
+                    .as_ref()
+                    .map(|a| a.auth_mode),
+            ),
             model_id: parent_model_id,
             auth: self.current_or_buffered_auth(),
             parent_cwd: parent_cwd.clone(),
