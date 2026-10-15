@@ -1405,6 +1405,76 @@ fn upgrade_legacy_reasoning_v0_chat_request_message_shape() {
 }
 
 #[test]
+fn patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string() {
+    let mut body = serde_json::json!({
+        "input": [
+            {
+                "type": "reasoning",
+                "id": null,
+                "summary": []
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_keep",
+                "summary": []
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "hi"
+            }
+        ]
+    });
+    patch_reasoning_text_types(&mut body);
+    let id = body
+        .pointer("/input/0/id")
+        .and_then(|value| value.as_str())
+        .expect("null reasoning id must become a string");
+    assert!(
+        !id.is_empty(),
+        "the API rejects null; the replacement must be a non-empty string"
+    );
+    assert_eq!(
+        body.pointer("/input/1/id").and_then(|value| value.as_str()),
+        Some("rs_keep"),
+        "a real reasoning id must stay"
+    );
+    assert_eq!(
+        body.pointer("/input/2/content")
+            .and_then(|value| value.as_str()),
+        Some("hi")
+    );
+}
+
+#[test]
+fn synthesized_reasoning_item_does_not_serialize_a_null_id() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("u"),
+        ConversationItem::Reasoning(synthesized_reasoning_item("think")),
+        ConversationItem::assistant("a"),
+    ]);
+    let create: rs::CreateResponse = (&req).into();
+    let mut body = serde_json::to_value(&create).unwrap();
+    patch_reasoning_text_types(&mut body);
+    let input = body
+        .get("input")
+        .and_then(|value| value.as_array())
+        .expect("input array");
+    let reasoning = input
+        .iter()
+        .find(|item| item.get("type").and_then(|value| value.as_str()) == Some("reasoning"))
+        .expect("synthesized reasoning item");
+    let id = reasoning
+        .get("id")
+        .and_then(|value| value.as_str())
+        .expect("id must be a string, not null");
+    assert!(
+        !id.is_empty(),
+        "a synthesized reasoning item must not leave id null on the wire"
+    );
+}
+
+#[test]
 fn patch_reasoning_text_types_injects_type_discriminator() {
     // Build a request body containing a reasoning item whose nested `content[]` entries lack the `type` field (the async-openai gap)
     let mut body = serde_json::json!({

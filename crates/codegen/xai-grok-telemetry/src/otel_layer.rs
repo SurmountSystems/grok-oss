@@ -28,6 +28,10 @@ where
     )
 }
 
+pub fn flush_otel() {
+    xai_grok_otel::provider::flush_provider();
+}
+
 pub fn shutdown_otel() {
     let provider = std::thread::spawn(xai_grok_otel::provider::shutdown_provider);
     crate::external::shutdown();

@@ -164,14 +164,25 @@ pub(super) fn build_responses_input(req: &ConversationRequest) -> rs::InputParam
 
 /// Inject the `type: "reasoning_text"` discriminator the API requires.
 /// `async-openai`'s `ReasoningTextContent` has no `type` field, so it serializes to `{"text": ...}` and the API answers 400.
-/// Delete this once upstream grows the field.
+/// `ReasoningItem.id` is `Option<String>` without `skip_serializing_if`, so a synthesized item serializes `"id": null` and the API answers 422 (`invalid type: null, expected a string`).
+/// Delete this once upstream grows the discriminator and omits a missing id.
 pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) else {
         return;
     };
-    for item in input.iter_mut() {
+    for (index, item) in input.iter_mut().enumerate() {
         if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
             continue;
+        }
+        let id_is_string = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| !id.is_empty());
+        if !id_is_string && let Some(obj) = item.as_object_mut() {
+            obj.insert(
+                "id".into(),
+                serde_json::Value::String(format!("rs_synth_{index}")),
+            );
         }
         let Some(content) = item.get_mut("content").and_then(|c| c.as_array_mut()) else {
             continue;

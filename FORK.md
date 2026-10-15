@@ -2571,6 +2571,8 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - A no-auth-context 401 stamps a new parent JWT once. The same key is not resubmitted as an uncharged park (50 paced retries). Named tests: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`, `missing_auth_context_401_does_not_resubmit_the_same_key`.
 - A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
 
+**Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
+
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not
 reshape the asserts to match today's paint. Older tests below are not

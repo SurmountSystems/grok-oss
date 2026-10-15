@@ -349,6 +349,15 @@ fn build_server_provider(
     provider.build()
 }
 
+pub fn flush_provider() {
+    let Some(provider) = TRACER_PROVIDER.get() else {
+        return;
+    };
+    if let Err(e) = provider.force_flush() {
+        tracing::debug!("[otel] Failed to flush tracer provider: {}", e);
+    }
+}
+
 pub fn shutdown_provider() {
     let Some(provider) = TRACER_PROVIDER.get() else {
         return;
