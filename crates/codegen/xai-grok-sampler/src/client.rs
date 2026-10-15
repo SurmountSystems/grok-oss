@@ -725,6 +725,12 @@ impl SamplingClient {
                 headers.remove(HeaderName::from_static("x-authenticateresponse"));
             }
         }
+        if headers.get(AUTHORIZATION).is_none()
+            && headers.get(HeaderName::from_static("x-api-key")).is_none()
+        {
+            headers.remove(HeaderName::from_static("x-xai-token-auth"));
+            headers.remove(HeaderName::from_static("x-authenticateresponse"));
+        }
         {
             let auth_prefix = headers
                 .get(AUTHORIZATION)
@@ -3517,6 +3523,41 @@ mod tests {
                 .headers()
                 .get(HeaderName::from_static("x-authenticateresponse"))
                 .is_none()
+        );
+    }
+
+    /// No resolver and no api_key must not send Token-Auth. That is cli-chat-proxy `auth_kind=other`.
+    #[test]
+    fn post_strips_token_auth_when_authorization_is_absent_without_a_resolver() {
+        let mut extra_headers = IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: None,
+            api_backend: ApiBackend::Responses,
+            extra_headers,
+            bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let SentRequest {
+            builder,
+            sent_bearer: sent,
+        } = client.post("https://example.test/v1/responses");
+        let request = builder.body("").build().expect("request should build");
+        assert_eq!(sent, None);
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+        assert!(
+            request
+                .headers()
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .is_none(),
+            "Token-Auth must not ride the wire without a Bearer"
         );
     }
 

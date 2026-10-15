@@ -391,19 +391,20 @@ const _: () = {
     assert_send::<SubagentSpawnContext>()
 };
 impl SubagentSpawnContext {
-    /// Would installing a live bearer resolver strip this subagent's only credential? A wired resolver is the sampler's sole auth source, so with no session key at spawn it must not displace a fallback key (env `XAI_API_KEY`).
-    /// Keyed on the resolved config key, not the session cache alone. The cache is empty in exactly the post-wake / mid-refresh states the resolver targets, and gating on it would freeze the subagent for life.
-    /// Shared by all three resolver-wiring paths so they cannot drift.
-    fn would_strip_fallback_key(&self, resolved_api_key: Option<&str>) -> bool {
-        self.auth.is_none() && resolved_api_key.is_some()
-    }
-
     /// Parent JWT to stamp when `AuthManager.current_wire_valid` is empty.
+    /// The parent turn often keeps that JWT on `sampling_config` or in `current_or_expired` while ACP method is still `"default"`.
     fn inherited_fallback_key(&self) -> Option<String> {
         self.auth
             .as_ref()
             .map(|auth| auth.key.clone())
             .filter(|key| !key.is_empty())
+            .or_else(|| {
+                self.auth_manager
+                    .current_wire_valid()
+                    .or_else(|| self.auth_manager.current_or_expired())
+                    .map(|auth| auth.key)
+                    .filter(|key| !key.is_empty())
+            })
             .or_else(|| {
                 self.sampling_config
                     .api_key
@@ -800,7 +801,8 @@ fn session_bearer_resolver(
         .auth_manager
         .current_wire_valid()
         .or_else(|| ctx.auth_manager.current_or_expired());
-    auth_method::session_token_auth_gate(
+    let fallback = ctx.inherited_fallback_key();
+    let gated = auth_method::session_token_auth_gate(
         auth_method::is_session_based_method_or_inherited_live_session(
             Some(&ctx.auth_method_id),
             auth_method::auth_mode_is_refreshable_session(
@@ -812,13 +814,17 @@ fn session_bearer_resolver(
         ),
         byok,
         crate::util::is_xai_api_url(base_url),
-    )
-    .then(|| {
-        xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
-            ctx.auth_manager.clone(),
-            ctx.inherited_fallback_key(),
-        )
-    })
+    );
+    (gated
+        || fallback.is_some()
+            && crate::util::is_xai_api_url(base_url)
+            && byok != auth_method::ModelByok::Byok)
+        .then(|| {
+            xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
+                ctx.auth_manager.clone(),
+                fallback,
+            )
+        })
 }
 /// [`session_bearer_resolver`] for an inherited config, where only the model string is known: BYOK comes from the catalog memo.
 fn inherited_bearer_resolver(
@@ -861,7 +867,10 @@ async fn read_parent_sampling_config(
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
                 ctx.inherited_fallback_key(),
             );
-            let strip_guard = ctx.would_strip_fallback_key(api_key.as_deref());
+            if api_key.as_ref().is_none_or(|key| key.is_empty()) {
+                extra_headers.shift_remove("X-XAI-Token-Auth");
+                extra_headers.shift_remove("x-authenticateresponse");
+            }
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
             let supports_backend_search = ctx
                 .models_manager
@@ -904,11 +913,7 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: if strip_guard {
-                    None
-                } else {
-                    inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url)
-                },
+                bearer_resolver: inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url),
                 supports_backend_search,
                 compactions_remaining: ctx
                     .models_manager
@@ -961,13 +966,9 @@ async fn read_parent_sampling_config(
     fallback.api_key = crate::agent::auth_method::nested_request_bearer(
         fallback.api_key.clone(),
         ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
-        ctx.auth.as_ref().map(|auth| auth.key.clone()),
+        ctx.inherited_fallback_key(),
     );
-    fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
-        None
-    } else {
-        inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url)
-    };
+    fallback.bearer_resolver = inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url);
     let catalog_model_id = parent_catalog_model_id(ctx, &fallback.model);
     fallback.supports_backend_search = ctx
         .models_manager
@@ -1101,8 +1102,8 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
-    config.bearer_resolver = if !ctx.would_strip_fallback_key(config.api_key.as_deref())
-        && resolved_auth_type == xai_chat_state::AuthType::SessionToken
+    config.bearer_resolver = if resolved_auth_type == xai_chat_state::AuthType::SessionToken
+        || ctx.inherited_fallback_key().is_some()
     {
         session_bearer_resolver(
             ctx,

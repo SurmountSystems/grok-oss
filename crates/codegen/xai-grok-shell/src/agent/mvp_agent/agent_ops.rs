@@ -193,24 +193,9 @@ impl MvpAgent {
     }
 
     /// Return auth for sync config construction.
+    /// `"default"` ACP method still inherits a refreshable cached session so nested spawn is not Token-Auth without Bearer.
     pub(super) fn current_or_buffered_auth(&self) -> Option<xai_grok_login::GrokAuth> {
-        self.auth_manager
-            .current()
-            .or_else(|| {
-                if self.is_session_based_auth() {
-                    let auth = self.auth_manager.expired_auth();
-                    if auth.is_some() {
-                        xai_grok_telemetry::unified_log::info(
-                            "auth buffered token fallback",
-                            None,
-                            None,
-                        );
-                    }
-                    auth
-                } else {
-                    None
-                }
-            })
+        self.auth_manager.current_or_expired()
     }
     fn has_managed_mcp_auth(&self) -> bool {
         self.auth_manager

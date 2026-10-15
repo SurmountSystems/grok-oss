@@ -758,7 +758,18 @@ impl SessionActor {
                     })
                 })
         } else {
-            creds.api_key
+            creds
+                .api_key
+                .clone()
+                .filter(|key| !key.is_empty())
+                .or_else(|| {
+                    self.auth_manager.as_ref().and_then(|am| {
+                        am.current_wire_valid()
+                            .or_else(|| am.current_or_expired())
+                            .map(|a| a.key)
+                            .filter(|key| !key.is_empty())
+                    })
+                })
         };
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
@@ -865,7 +876,15 @@ impl SessionActor {
             );
         }
         crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
-        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+        if sampling.api_key.as_ref().is_none_or(|key| key.is_empty()) {
+            sampling.extra_headers.shift_remove("X-XAI-Token-Auth");
+            sampling
+                .extra_headers
+                .shift_remove("x-authenticateresponse");
+        }
+        if (use_bearer_resolver || sampling.api_key.is_some())
+            && let Some(am) = self.auth_manager.as_ref()
+        {
             sampling.bearer_resolver = Some(
                 xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
                     am.clone(),
