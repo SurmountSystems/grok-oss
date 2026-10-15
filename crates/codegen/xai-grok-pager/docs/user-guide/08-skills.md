@@ -179,7 +179,7 @@ When a skill's name collides with another skill or a built-in command, Grok keep
 
 Typing `/login` in the slash menu shows both rows, with a right-aligned **built-in** or **skill · plugin-name** badge so you can tell them apart. Rename the skill (or its directory) if you want the bare `/name` for the skill instead.
 
-`grok inspect` tags colliding skills with `[collides with /login → /acme:login]`.
+`grok-oss inspect` tags colliding skills with `[collides with /login → /acme:login]`.
 
 ### Automatic Invocation
 

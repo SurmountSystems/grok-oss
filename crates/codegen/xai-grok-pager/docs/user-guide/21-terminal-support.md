@@ -25,7 +25,7 @@ that appear only as silence during capture.
 
 When Doctor finds an explicit unhealthy tmux setting, `/doctor fix` lists the
 available automatic fixes. Apply one named fix at a time, for example
-`/doctor fix tmux-clipboard` or `grok doctor fix dcs-passthrough --yes`.
+`/doctor fix tmux-clipboard` or `grok-oss doctor fix dcs-passthrough --yes`.
 Doctor can persist these four tmux options:
 
 - `terminal.tmux-clipboard` — `set -g set-clipboard on`

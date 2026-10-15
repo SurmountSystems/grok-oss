@@ -322,7 +322,7 @@ Fidelity caveats apply to a few fields.
 
 `modelUsage` carries the per-model token and cost fields grok tracks, plus `webSearchRequests` attributed to the active model. The reducer tracks a single global web-search count rather than per-model, so the whole count lands on the current or last model and other rows stay `0`. A per-model `modelUsage.*.costUSD` is `0` when that model's cost is unknown or withheld. This is the same fail-closed-to-zero behavior as the top-level `total_cost_usd`. The `json` format omits cost floats entirely when partial, but this stream keeps the field present and `0`. `contextWindow` is the current model's real total context window (the same value grok uses for auto-compaction), and it appears only on the current model's row. Other rows omit it, and so does the current row when the window is unknown. `maxOutputTokens` has no grok catalog, so that key is omitted entirely. `modelUsage` is `{}` when no per-model breakdown is available.
 
-Like `streaming-json`, this stream is read only. Tool approvals and other bidirectional flows use the ACP interface (`grok agent`).
+Like `streaming-json`, this stream is read only. Tool approvals and other bidirectional flows use the ACP interface (`grok-oss agent`).
 
 ---
 
@@ -572,9 +572,9 @@ grok-oss -p "Run the test suite" --yolo
 For headless use, authenticate with one of:
 
 - **`XAI_API_KEY`**: simplest for CI. See [Environment Variables](#environment-variables-for-headless) above.
-- **`grok login --device-auth`** (or `--device-code`): no browser needed on the target machine.
+- **`grok-oss login --device-auth`** (or `--device-code`): no browser needed on the target machine.
   See [Authentication > Device Code Flow](02-authentication.md#device-code-flow).
-- **`grok login`**: browser-based OAuth2 on machines with a GUI.
+- **`grok-oss login`**: browser-based OAuth2 on machines with a GUI.
 
 If you've previously logged in, cached credentials are used automatically.
 

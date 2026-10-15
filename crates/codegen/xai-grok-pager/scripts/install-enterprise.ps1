@@ -422,12 +422,16 @@ Move-Item -LiteralPath $binaryTmp -Destination $binaryPath -Force
 
 foreach ($binName in @('grok.exe', 'agent.exe')) {
     $dest = Join-Path $BinDir $binName
+    $old = "$dest.old"
+    if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
     try {
-        Install-Exe $binaryPath (Join-Path $BinDir $binName)
+        Copy-Item -Path $binaryPath -Destination $dest -Force
     } catch {
+        if (Test-Path $dest) { Rename-Item $dest $old -Force -ErrorAction SilentlyContinue }
         try {
-            Install-Exe $binaryPath $dest
+            Copy-Item -Path $binaryPath -Destination $dest -Force
         } catch {
+            if (Test-Path $old) { Rename-Item $old $dest -Force -ErrorAction SilentlyContinue }
             Write-Error "Failed to install $binName"
             exit 1
         }
