@@ -428,7 +428,10 @@ impl FailedResponseCapture {
             match item {
                 CapturedItem::Reasoning(reasoning) => {
                     let mut reasoning = *reasoning;
-                    let streamed_text = take_streamed(&mut streamed, &reasoning.id);
+                    let streamed_text = reasoning
+                        .id
+                        .as_deref()
+                        .and_then(|id| take_streamed(&mut streamed, id));
                     fit_reasoning(&mut reasoning, streamed_text, &mut reasoning_budget);
                     if reasoning_has_text(&reasoning) || reasoning.encrypted_content.is_some() {
                         items.push(ConversationItem::Reasoning(reasoning));

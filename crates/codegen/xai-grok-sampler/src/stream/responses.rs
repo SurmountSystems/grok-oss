@@ -94,6 +94,23 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_)
         | ResponseStreamEvent::ResponseOutputTextAnnotationAdded(_)
         | ResponseStreamEvent::ResponseError(_) => true,
+        ResponseStreamEvent::ResponseAudioDelta(event) => !event.delta.is_empty(),
+        ResponseStreamEvent::ResponseAudioTranscriptDelta(event) => !event.delta.is_empty(),
+        ResponseStreamEvent::ResponseAudioDone(_)
+        | ResponseStreamEvent::ResponseAudioTranscriptDone(_)
+        | ResponseStreamEvent::ResponseShellCallCommandAdded(_)
+        | ResponseStreamEvent::ResponseShellCallCommandDelta(_)
+        | ResponseStreamEvent::ResponseShellCallCommandDone(_)
+        | ResponseStreamEvent::ResponseShellCallOutputContentDelta(_)
+        | ResponseStreamEvent::ResponseShellCallOutputContentDone(_) => true,
+    }
+}
+
+/// Snake-case wire token for a Responses `ResponseErrorCode`. Empty or non-string serde is omitted.
+fn response_error_code_wire(code: &rs::ResponseErrorCode) -> Option<String> {
+    match serde_json::to_value(code) {
+        Ok(serde_json::Value::String(s)) if !s.is_empty() => Some(s),
+        _ => None,
     }
 }
 
@@ -181,7 +198,12 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
         | Event::ResponseMCPCallCompleted(_)
         | Event::ResponseMCPCallFailed(_)
         | Event::ResponseMCPCallArgumentsDelta(_)
-        | Event::ResponseMCPCallArgumentsDone(_) => capture.record_unreplayable(),
+        | Event::ResponseMCPCallArgumentsDone(_)
+        | Event::ResponseShellCallCommandAdded(_)
+        | Event::ResponseShellCallCommandDelta(_)
+        | Event::ResponseShellCallCommandDone(_)
+        | Event::ResponseShellCallOutputContentDelta(_)
+        | Event::ResponseShellCallOutputContentDone(_) => capture.record_unreplayable(),
         _ => {}
     }
 }
@@ -502,21 +524,24 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 ResponseStreamEvent::ResponseFailed(failed_event) => {
                     let response = failed_event.response;
-                    let error_message = response
+                    let code_owned = response
                         .error
                         .as_ref()
-                        .map(|e| format!("{}: {}", e.code, e.message))
-                        .unwrap_or_else(|| "Response failed with unknown error".to_string());
+                        .and_then(|e| response_error_code_wire(&e.code));
+                    let error_message = match (code_owned.as_deref(), response.error.as_ref()) {
+                        (Some(code), Some(e)) => format!("{code}: {}", e.message),
+                        (_, Some(e)) => e.message.clone(),
+                        _ => "Response failed with unknown error".to_string(),
+                    };
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                         message: error_message,
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
-                        error_code: response
-                            .error
-                            .as_ref()
-                            .map(|e| xai_grok_sampling_types::ApiErrorCode::parse(&e.code)),
+                        error_code: code_owned
+                            .as_deref()
+                            .map(xai_grok_sampling_types::ApiErrorCode::parse),
                     };
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),

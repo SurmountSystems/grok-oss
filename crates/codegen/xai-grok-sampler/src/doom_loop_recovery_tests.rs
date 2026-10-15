@@ -8,11 +8,11 @@ fn nth<T>(xs: &[T], i: usize) -> &T {
     x
 }
 
-fn first_part<T>(content: &Option<Vec<T>>) -> &T {
-    let Some(part) = content.as_ref().and_then(|c| c.first()) else {
-        panic!("expected a content part");
-    };
-    part
+fn first_part_text(content: &Option<Vec<rs::ReasoningItemContent>>) -> &str {
+    match content.as_ref().and_then(|c| c.first()) {
+        Some(rs::ReasoningItemContent::ReasoningText(t)) => t.text.as_str(),
+        _ => panic!("expected a reasoning text part"),
+    }
 }
 
 fn armed() -> FailedResponseCapture {
@@ -90,8 +90,8 @@ fn done_values_replace_deltas_without_duplication() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning.id, "reasoning-1");
-    assert_eq!(first_part(&reasoning.content).text, "full reasoning");
+    assert_eq!(reasoning.id.as_deref(), Some("reasoning-1"));
+    assert_eq!(first_part_text(&reasoning.content), "full reasoning");
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
         panic!("expected assistant item");
     };
@@ -108,7 +108,7 @@ fn summary_is_used_when_raw_reasoning_is_absent() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(first_part(&reasoning.content).text, "full summary");
+    assert_eq!(first_part_text(&reasoning.content), "full summary");
 }
 
 /// A raw reasoning event that carries no text must not displace the summary: the retry would otherwise lose the thought it exists to replay.
@@ -123,7 +123,7 @@ fn an_empty_raw_reasoning_event_keeps_the_summary() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    assert_eq!(first_part(&reasoning.content).text, "the summary");
+    assert_eq!(first_part_text(&reasoning.content), "the summary");
 }
 
 /// Same when the summary already spent the reasoning budget: the raw event records nothing, so the summary stays the recovery context.
@@ -142,7 +142,7 @@ fn a_budget_spent_raw_event_keeps_the_summary() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    let text = &first_part(&reasoning.content).text;
+    let text = &first_part_text(&reasoning.content);
     assert!(
         text.starts_with("summary "),
         "the summary is replayed: {text:.40}"
@@ -164,7 +164,7 @@ fn a_raw_delta_with_no_room_left_records_nothing() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    assert_eq!(first_part(&reasoning.content).text, summary);
+    assert_eq!(first_part_text(&reasoning.content), summary);
 }
 
 /// A disarmed capture (every stream that is not an armed recovery attempt) records nothing at all.
@@ -273,7 +273,7 @@ fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     let ConversationItem::Reasoning(merged) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(first_part(&merged.content).text, "raw reasoning");
+    assert_eq!(first_part_text(&merged.content), "raw reasoning");
     assert_eq!(merged.encrypted_content.as_deref(), Some("cipher-1"));
     let Some(part) = merged.summary.first() else {
         panic!("expected a summary part");
@@ -283,7 +283,7 @@ fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     let ConversationItem::Reasoning(sibling) = nth(&items, 1) else {
         panic!("expected the unstreamed sibling to survive");
     };
-    assert_eq!(first_part(&sibling.content).text, "unstreamed");
+    assert_eq!(first_part_text(&sibling.content), "unstreamed");
 }
 
 /// The opaque encrypted blob is charged to the replay budget.
@@ -312,7 +312,7 @@ fn an_oversized_encrypted_blob_is_dropped() {
         "the oversized blob is dropped"
     );
     assert_eq!(
-        first_part(&trimmed.content).text,
+        first_part_text(&trimmed.content),
         "another thought",
         "dropping the blob does not cost the readable thought"
     );
@@ -395,7 +395,7 @@ fn a_terminal_turn_does_not_gain_items_from_the_deltas() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning.id, "reasoning-final");
+    assert_eq!(reasoning.id.as_deref(), Some("reasoning-final"));
 }
 
 /// A final item that carried its own content keeps it: the capture only fills gaps, it never overwrites the authoritative turn.
@@ -413,7 +413,7 @@ fn terminal_content_wins_over_streamed_text() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(first_part(&reasoning.content).text, "final reasoning");
+    assert_eq!(first_part_text(&reasoning.content), "final reasoning");
 }
 
 /// A runaway thought is capped and marked, so repeated recovery attempts cannot inflate the retry prompt without bound.
@@ -430,7 +430,7 @@ fn a_runaway_thought_is_capped_without_eliding_the_answer() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    let text = &first_part(&reasoning.content).text;
+    let text = &first_part_text(&reasoning.content);
     assert!(text.ends_with(TRUNCATION_MARKER), "truncation is marked");
     assert!(text.len() <= MAX_RECOVERY_REASONING_BYTES + TRUNCATION_MARKER.len());
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
