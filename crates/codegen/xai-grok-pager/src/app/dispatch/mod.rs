@@ -45,9 +45,9 @@ mod transcript;
 mod turn;
 pub(crate) mod unstick;
 mod voice;
+pub(crate) use auth::scrollback_has_reauth_prompt;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
-pub(crate) use auth::{scrollback_has_reauth_prompt, scrollback_has_recent_disk_full};
 pub(crate) use billing::{
     CREDIT_LIMIT_RETRY_OPTION_ID, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
     background_billing_poll_fetch_billing, background_billing_poll_snapshot_mode,
