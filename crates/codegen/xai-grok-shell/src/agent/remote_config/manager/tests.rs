@@ -2,9 +2,9 @@ use super::super::resolution::CatalogSource;
 use super::super::{
     CACHE_TTL, CacheAuthMethod, Commit, MODELS_CACHE_FILE, ModelsCache, ModelsCacheManager,
     ModelsCacheScope, ModelsFetchFuture, allowlist_denied_message, build_prefetched_map,
-    degraded_log_level, evaluate_models_commit, refused_grok_4_7_substitution,
-    resolve_live_models_cache_scope, resolve_models_cache_scope,
-    resolve_prefetch_inputs_from_parts, resolve_startup_endpoints,
+    catalog_key_for_requested_grok_4_7, choose_restored_model, degraded_log_level,
+    evaluate_models_commit, refused_grok_4_7_substitution, resolve_live_models_cache_scope,
+    resolve_models_cache_scope, resolve_prefetch_inputs_from_parts, resolve_startup_endpoints,
     selectable_catalog_key_for_persisted,
 };
 use super::*;
@@ -2113,6 +2113,56 @@ fn requested_grok_4_7_does_not_silently_become_grok_4_6() {
     assert!(
         refused_grok_4_7_substitution("grok-4.6").is_none(),
         "{owed}"
+    );
+}
+#[test]
+fn grok_4_7_absent_from_catalog_stays_grok_4_7_without_a_latch() {
+    let owed = "a grok-4.7 session stays grok-4.7 when the catalog omits it";
+    let models = IndexMap::new();
+    let available = test_available_keys(&["grok-4.6"]);
+    let persisted = acp::ModelId::new("grok-4.7");
+    let choice = choose_restored_model(&models, &available, &persisted);
+    assert_eq!(choice.model_id.0.as_ref(), "grok-4.7", "{owed}");
+    assert_ne!(choice.model_id.0.as_ref(), "grok-4.6", "{owed}");
+    assert!(!choice.latch_unavailable, "{owed}");
+    assert!(choice.auto_switch.is_none(), "{owed}");
+}
+#[test]
+fn grok_4_7_catalog_variant_is_used_even_when_not_selectable() {
+    let owed = "a grok-4.7 session uses a catalog slug or variant even when that row is not picker-selectable";
+    let mut models = IndexMap::new();
+    let mut entry = make_model_entry("fleet-grok-4-7");
+    entry.info.model = "grok-4.7".to_string();
+    entry.info.user_selectable = false;
+    models.insert("fleet-grok-4-7".to_string(), entry);
+    let available = test_available_keys(&["grok-4.6"]);
+    let persisted = acp::ModelId::new("grok-4.7");
+    assert!(
+        catalog_key_for_requested_grok_4_7(&models, "grok-4.7")
+            .is_some_and(|id| id.0.as_ref() == "fleet-grok-4-7"),
+        "{owed}"
+    );
+    let choice = choose_restored_model(&models, &available, &persisted);
+    assert_eq!(choice.model_id.0.as_ref(), "fleet-grok-4-7", "{owed}");
+    assert!(!choice.latch_unavailable, "{owed}");
+    assert!(choice.auto_switch.is_none(), "{owed}");
+}
+#[test]
+fn grok_4_7_prompt_does_not_ask_for_a_new_session() {
+    let owed = "a latched grok-4.7 prompt must not tell the Operator to start a new session";
+    assert!(
+        refused_grok_4_7_substitution("grok-4.7").is_some(),
+        "{owed}"
+    );
+    let models = IndexMap::new();
+    let available = test_available_keys(&["grok-4.6"]);
+    let choice = choose_restored_model(&models, &available, &acp::ModelId::new("grok-4.7"));
+    let notice = choice.auto_switch.as_ref().map(|n| n.reason.as_str());
+    assert!(
+        notice.is_none_or(
+            |reason| !reason.contains("start a new session") && !reason.contains("Switched to")
+        ),
+        "{owed}: {notice:?}"
     );
 }
 #[test]

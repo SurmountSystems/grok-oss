@@ -41,6 +41,7 @@ use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_cred
 use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
 use crate::agent::remote_config::{
+    catalog_key_for_requested_grok_4_7, choose_restored_model, refused_grok_4_7_substitution,
     resolve_catalog_key, selectable_catalog_key_for_persisted,
 };
 use crate::agent::session_config;

@@ -1847,6 +1847,8 @@ impl MvpAgent {
         }
     }
     /// A vanished model falls back within its family, or blocks prompts.
+    /// grok-4.7 stays grok-4.7: a catalog slug or variant wins, and a missing
+    /// catalog row does not switch to grok-4.6 or latch a prompt block.
     async fn resolve_restored_model(
         &self,
         session_id: &acp::SessionId,
@@ -1865,39 +1867,24 @@ impl MvpAgent {
             available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
             "load_session: restoring persisted model (debug)"
         );
-        let is_grok_build = persisted_model.0.starts_with("grok-build");
-        let same_family_fallback = if is_grok_build {
-            available
-                .keys()
-                .find(|id| id.0.starts_with("grok-build"))
-                .cloned()
-        } else {
-            available
-                .keys()
-                .find(|id| !id.0.starts_with("grok-build"))
-                .cloned()
-        };
-        let selectable_catalog_key =
-            selectable_catalog_key_for_persisted(&models, &available, &persisted_model);
-        if let Some(catalog_key) = selectable_catalog_key {
-            if catalog_key != persisted_model {
-                tracing::info!(
-                    session_id = %session_id.0,
-                    persisted = %persisted_model.0,
-                    catalog_key = %catalog_key.0,
-                    "load_session: mapped persisted routing slug to catalog key"
-                );
-                xai_grok_telemetry::unified_log::info(
-                    "load_session: mapped persisted routing slug to catalog key",
-                    Some(session_id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "persisted_model": persisted_model.0.as_ref(),
-                        "catalog_key": catalog_key.0.as_ref(),
-                    })),
-                );
-            }
-            catalog_key
-        } else if available.is_empty() {
+        let choice = choose_restored_model(&models, &available, &persisted_model);
+        if choice.model_id != persisted_model && choice.auto_switch.is_none() {
+            tracing::info!(
+                session_id = %session_id.0,
+                persisted = %persisted_model.0,
+                catalog_key = %choice.model_id.0,
+                "load_session: mapped persisted routing slug to catalog key"
+            );
+            xai_grok_telemetry::unified_log::info(
+                "load_session: mapped persisted routing slug to catalog key",
+                Some(session_id.0.as_ref()),
+                Some(serde_json::json!({
+                    "persisted_model": persisted_model.0.as_ref(),
+                    "catalog_key": choice.model_id.0.as_ref(),
+                })),
+            );
+        }
+        if available.is_empty() && choice.model_id == persisted_model {
             tracing::warn!(
                 session_id = %session_id.0,
                 persisted = %persisted_model.0,
@@ -1910,69 +1897,37 @@ impl MvpAgent {
                     "persisted_model": persisted_model.0.as_ref(),
                 })),
             );
-            persisted_model
-        } else if let Some(reason) =
-            crate::agent::remote_config::refused_grok_4_7_substitution(persisted_model.0.as_ref())
-        {
+        }
+        if let Some(notice) = &choice.auto_switch {
             tracing::warn!(
                 session_id = %session_id.0,
-                previous = %persisted_model.0,
-                "Persisted grok-4.7 is not in the catalog; refusing substitution"
-            );
-            let empty_id = acp::ModelId::new(String::new());
-            self.send_model_auto_switched(session_id, &persisted_model, &empty_id, &reason)
-                .await;
-            self.session_registry
-                .set_unavailable_model(session_id, persisted_model.clone());
-            persisted_model
-        } else if let Some(fallback) = same_family_fallback {
-            tracing::warn!(
-                session_id = %session_id.0,
-                previous = %persisted_model.0,
-                new = %fallback.0,
-                "Persisted model no longer available, auto-switching within family"
-            );
-            let reason = format!(
-                "Model \"{}\" is no longer available for your account.",
-                persisted_model.0,
-            );
-            self.send_model_auto_switched(session_id, &persisted_model, &fallback, &reason)
-                .await;
-            fallback
-        } else {
-            let fallback = available
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| persisted_model.clone());
-            tracing::warn!(
-                session_id = %session_id.0,
-                previous = %persisted_model.0,
-                fallback = %fallback.0,
-                available_count = available.len(),
-                available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
-                "Persisted model no longer available, no same-family fallback — blocking prompts for this session"
+                previous = %notice.previous,
+                new = %notice.new,
+                latch = choice.latch_unavailable,
+                "load_session: persisted model no longer available"
             );
             xai_grok_telemetry::unified_log::warn(
-                "load_session: persisted model unavailable, no same-family fallback",
+                "load_session: persisted model unavailable",
                 Some(session_id.0.as_ref()),
                 Some(serde_json::json!({
-                    "persisted_model": persisted_model.0.as_ref(),
-                    "fallback_model": fallback.0.as_ref(),
+                    "persisted_model": notice.previous,
+                    "fallback_model": notice.new,
                     "available_count": available.len(),
                 })),
             );
-            let reason = format!(
-                "Model \"{}\" is no longer available. Please start a new session.",
-                persisted_model.0,
-            );
-            let empty_id = acp::ModelId::new(String::new());
-            self.send_model_auto_switched(session_id, &persisted_model, &empty_id, &reason)
-                .await;
+            self.send_model_auto_switched(
+                session_id,
+                &acp::ModelId::new(notice.previous.clone()),
+                &acp::ModelId::new(notice.new.clone()),
+                &notice.reason,
+            )
+            .await;
+        }
+        if choice.latch_unavailable {
             self.session_registry
                 .set_unavailable_model(session_id, persisted_model.clone());
-            fallback
         }
+        choice.model_id
     }
     /// Response phase: assemble the attach `_meta`, including the running prompt id a mid-turn loader adopts to pass the `session/update` gate.
     async fn build_attach_response_meta(

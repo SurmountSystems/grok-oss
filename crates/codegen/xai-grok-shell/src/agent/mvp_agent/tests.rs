@@ -1374,6 +1374,10 @@ async fn seeded_test_model_keeps_chat_completions_backend() {
             .is_err(),
         "vanished grok-* slugs must not take the seeded-model fallback"
     );
+    let grok_47 = acp::ModelId::new("grok-4.7");
+    let entry = crate::agent::handlers::model_switch::model_entry_for_apply(&agent, &grok_47)
+        .expect("grok-4.7 must apply even when this catalog omits it");
+    assert_eq!(entry.info.model, "grok-4.7");
 }
 #[tokio::test]
 async fn model_state_prefers_session_reasoning_effort_over_global() {

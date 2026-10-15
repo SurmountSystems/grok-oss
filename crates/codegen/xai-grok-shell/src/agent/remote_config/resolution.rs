@@ -145,6 +145,131 @@ pub(crate) fn refused_grok_4_7_substitution(persisted: &str) -> Option<String> {
     )
 }
 
+/// Catalog key for a persisted grok-4.7 id, including rows that are not picker-selectable.
+pub(crate) fn catalog_key_for_requested_grok_4_7(
+    models: &IndexMap<String, ModelEntry>,
+    persisted: &str,
+) -> Option<acp::ModelId> {
+    if persisted != "grok-4.7" {
+        return None;
+    }
+    if models.contains_key("grok-4.7") {
+        return Some(acp::ModelId::new("grok-4.7"));
+    }
+    models
+        .iter()
+        .rev()
+        .find(|(_, entry)| {
+            entry.info.has_model_id("grok-4.7")
+                || entry
+                    .info
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Grok 4.7"))
+        })
+        .map(|(key, _)| acp::ModelId::new(key.clone()))
+}
+
+/// How `session/load` maps a persisted model onto this catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RestoredModelChoice {
+    pub model_id: acp::ModelId,
+    pub latch_unavailable: bool,
+    pub auto_switch: Option<RestoredModelNotice>,
+}
+
+/// Operator-visible auto-switch notice. Empty `new` means the session kept the persisted id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RestoredModelNotice {
+    pub previous: String,
+    pub new: String,
+    pub reason: String,
+}
+
+/// Pick the model `session/load` should restore.
+///
+/// A grok-4.7 session uses a matching catalog slug or variant when one exists,
+/// including rows that are not picker-selectable. When the catalog omits grok-4.7,
+/// the session stays on grok-4.7. It does not switch to grok-4.6, latch a prompt
+/// block, or tell the Operator to start a new session.
+pub(crate) fn choose_restored_model(
+    models: &IndexMap<String, ModelEntry>,
+    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
+    persisted: &acp::ModelId,
+) -> RestoredModelChoice {
+    let persisted_str = persisted.0.as_ref();
+    if let Some(catalog_key) = selectable_catalog_key_for_persisted(models, available, persisted) {
+        return RestoredModelChoice {
+            model_id: catalog_key,
+            latch_unavailable: false,
+            auto_switch: None,
+        };
+    }
+    if available.is_empty() {
+        return RestoredModelChoice {
+            model_id: persisted.clone(),
+            latch_unavailable: false,
+            auto_switch: None,
+        };
+    }
+    if let Some(key) = catalog_key_for_requested_grok_4_7(models, persisted_str) {
+        return RestoredModelChoice {
+            model_id: key,
+            latch_unavailable: false,
+            auto_switch: None,
+        };
+    }
+    if refused_grok_4_7_substitution(persisted_str).is_some() {
+        return RestoredModelChoice {
+            model_id: persisted.clone(),
+            latch_unavailable: false,
+            auto_switch: None,
+        };
+    }
+    let is_grok_build = persisted_str.starts_with("grok-build");
+    let same_family_fallback = if is_grok_build {
+        available
+            .keys()
+            .find(|id| id.0.starts_with("grok-build"))
+            .cloned()
+    } else {
+        available
+            .keys()
+            .find(|id| !id.0.starts_with("grok-build"))
+            .cloned()
+    };
+    if let Some(fallback) = same_family_fallback {
+        RestoredModelChoice {
+            model_id: fallback.clone(),
+            latch_unavailable: false,
+            auto_switch: Some(RestoredModelNotice {
+                previous: persisted_str.to_string(),
+                new: fallback.0.to_string(),
+                reason: format!(
+                    "Model \"{persisted_str}\" is no longer available for your account."
+                ),
+            }),
+        }
+    } else {
+        let fallback = available
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| persisted.clone());
+        RestoredModelChoice {
+            model_id: fallback.clone(),
+            latch_unavailable: true,
+            auto_switch: Some(RestoredModelNotice {
+                previous: persisted_str.to_string(),
+                new: String::new(),
+                reason: format!(
+                    "Model \"{persisted_str}\" is no longer available. Please start a new session."
+                ),
+            }),
+        }
+    }
+}
+
 /// Keep a persisted session model that is not in this catalog and is not a
 /// `grok-*` catalog slug. Those custom / seeded ids must not remap to the
 /// default Responses model on `session/load`. Vanished `grok-*` ids still

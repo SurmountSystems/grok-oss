@@ -18,8 +18,9 @@ pub(crate) enum ConfigNotice {
     Send,
     Skip,
 }
-/// Catalog hit, or a seeded non-`grok-*` slug kept on Chat Completions.
-/// A missing `grok-*` slug does not take that seeded fallback.
+/// Catalog hit, a requested grok-4.7 id kept when the catalog omits it, or a
+/// seeded non-`grok-*` slug kept on Chat Completions.
+/// Other missing `grok-*` slugs do not take that seeded fallback.
 pub(crate) fn model_entry_for_apply(
     agent: &MvpAgent,
     model_id: &acp::ModelId,
@@ -28,6 +29,12 @@ pub(crate) fn model_entry_for_apply(
         return Ok(entry);
     }
     let raw = model_id.0.as_ref();
+    if raw == "grok-4.7" {
+        return Ok(crate::agent::config::ModelEntry::fallback(
+            raw,
+            &crate::agent::config::EndpointsConfig::default(),
+        ));
+    }
     if raw.starts_with("grok-") {
         return Err(acp::Error::invalid_params().data("unknown model id"));
     }
@@ -71,7 +78,7 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
-    let model = agent.resolve_model_id(&model_id)?;
+    let model = model_entry_for_apply(agent, &model_id)?;
     let use_concise = model.info().use_concise;
     let session_default = handle
         .session_default_agent_profile

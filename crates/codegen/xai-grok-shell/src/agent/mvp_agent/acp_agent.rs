@@ -1091,12 +1091,21 @@ impl acp::Agent for MvpAgent {
                     &available,
                     &unavailable_model,
                 )
-                .unwrap_or(unavailable_model.clone());
-            if available.contains_key(&restore_model_id) {
+                .or_else(|| {
+                    catalog_key_for_requested_grok_4_7(&models, unavailable_model.0.as_ref())
+                })
+                .unwrap_or_else(|| unavailable_model.clone());
+            let keep_grok_4_7 =
+                refused_grok_4_7_substitution(unavailable_model.0.as_ref()).is_some();
+            let can_restore = available.contains_key(&restore_model_id)
+                || resolve_catalog_key(&models, &restore_model_id).is_some()
+                || keep_grok_4_7;
+            if can_restore {
                 tracing::info!(
                     session_id = %arguments.session_id.0,
                     model_id = %restore_model_id.0,
-                    "prompt: previously-unavailable model is back in the catalog; restoring it and unblocking the session"
+                    keep_grok_4_7,
+                    "prompt: restoring the latched model and unblocking the session"
                 );
                 xai_grok_telemetry::unified_log::info(
                     "prompt: previously-unavailable model recovered, unblocking session",
