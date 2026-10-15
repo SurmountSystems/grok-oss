@@ -204,7 +204,20 @@ fn check_remote_quotes_quality_attr_and_nix_retry_uses_argv() {
         "check-remote must copy tracked and untracked source and skip gitignored paths:\n{remote}"
     );
     assert!(
-        remote.contains("#workspace-cargo-quality\""),
+        remote.contains("rsync -a --delete --exclude target"),
+        "check-remote must rsync the filtered source and must not upload a Nix source archive:\n{remote}"
+    );
+    assert!(
+        remote.contains("/home/nixbuilder/grok-oss-src"),
+        "check-remote must build from the synced tree on the builder:\n{remote}"
+    );
+    assert!(
+        !remote.contains("path:${snapshot}#workspace-cargo-quality"),
+        "check-remote must not nix-build the local snapshot over ssh-ng:\n{remote}"
+    );
+    assert!(
+        remote.contains("#workspace-cargo-quality\"")
+            || remote.contains("#workspace-cargo-quality'"),
         "check-remote must quote the workspace-cargo-quality installable:\n{remote}"
     );
     let unquoted = remote.lines().any(|l| {
@@ -442,8 +455,19 @@ fn nix_retry_flake_meta_and_check_remote_do_not_require_helper_binary() {
         "flake-meta must call just nix_retry (not a helper trampoline):\n{meta}"
     );
     assert!(
-        remote.contains("just flake-meta"),
-        "check-remote must reach flake metadata through just flake-meta:\n{remote}"
+        !remote.contains("just flake-meta")
+            && !remote.contains("just nix_retry nix flake metadata"),
+        "check-remote must not run flake metadata through nix_retry on this laptop:\n{remote}"
+    );
+    let rsync_at = remote
+        .find("rsync -a --delete --exclude target")
+        .expect("check-remote rsync");
+    let meta_at = remote
+        .find("nix flake metadata 'path:${remote_src}'")
+        .expect("check-remote flake metadata on the builder");
+    assert!(
+        rsync_at < meta_at,
+        "check-remote flake metadata runs on the builder after rsync:\n{remote}"
     );
     assert!(
         retry.contains("\"$@\"")

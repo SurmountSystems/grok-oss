@@ -770,11 +770,18 @@ fn session_bearer_resolver(
     base_url: &str,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     use crate::agent::auth_method;
+    let manager_auth = ctx
+        .auth_manager
+        .current_wire_valid()
+        .or_else(|| ctx.auth_manager.current_or_expired());
     auth_method::session_token_auth_gate(
         auth_method::is_session_based_method_or_inherited_live_session(
             Some(&ctx.auth_method_id),
             auth_method::auth_mode_is_refreshable_session(
-                ctx.auth.as_ref().map(|auth| auth.auth_mode),
+                ctx.auth
+                    .as_ref()
+                    .map(|auth| auth.auth_mode)
+                    .or_else(|| manager_auth.as_ref().map(|auth| auth.auth_mode)),
             ),
         ),
         byok,
@@ -822,7 +829,11 @@ async fn read_parent_sampling_config(
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
             let inherited_base_url = cfg.base_url.clone();
-            let strip_guard = ctx.would_strip_fallback_key(creds.api_key.as_deref());
+            let api_key = crate::agent::auth_method::nested_request_bearer(
+                creds.api_key,
+                ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
+            );
+            let strip_guard = ctx.would_strip_fallback_key(api_key.as_deref());
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
             let supports_backend_search = ctx
                 .models_manager
@@ -833,7 +844,7 @@ async fn read_parent_sampling_config(
                 &cfg.base_url,
             );
             let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: creds.api_key,
+                api_key,
                 base_url: cfg.base_url,
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 model: cfg.model.clone(),
@@ -919,6 +930,10 @@ async fn read_parent_sampling_config(
         })),
     );
     let mut fallback = ctx.sampling_config.clone();
+    fallback.api_key = crate::agent::auth_method::nested_request_bearer(
+        fallback.api_key.clone(),
+        ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
+    );
     fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
         None
     } else {

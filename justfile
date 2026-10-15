@@ -712,21 +712,34 @@ check-remote:
       echo "just check-remote: snapshot still contains a target directory" >&2
       exit 2
     fi
-    echo "==> just check-remote: flake metadata from the filtered source"
-    just nix_retry nix flake metadata "path:${snapshot}"
-    echo "==> just check-remote: workspace cargo quality as a remote Nix derivation"
-    # nix_retry banners and `nix build -L` logs go to stdout. Capturing that
-    # whole stream as the store path makes `nix store cat` hit ARG_MAX
-    # (exit 126, "Argument list too long"). Keep -L on the terminal and
-    # take only the quality /nix/store path.
-    out="$(just nix_retry nix build -L "path:${snapshot}#workspace-cargo-quality" --print-out-paths | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
+    # Nix ssh-ng store copy sends the whole source archive on every hash change.
+    # rsync sends changed files. The builder then copies that directory into its
+    # own store. The laptop does not upload the archive.
+    builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
+    builder_field="${builder_field%%\?*}"
+    ssh_spec="${builder_field#ssh-ng://}"
+    if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
+      echo "just check-remote: builders file has no ssh-ng destination" >&2
+      exit 2
+    fi
+    remote_src="/home/nixbuilder/grok-oss-src"
+    echo "==> just check-remote: rsync filtered source to the builder. The first sync sends the crate tree. Later syncs send changed files."
+    # Do not print the builders destination.
+    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
+    rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
+    echo "==> just check-remote: flake metadata on the builder"
+    # After rsync. nix_retry would add --store ssh-ng and copy this source from the laptop.
+    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
+    echo "==> just check-remote: nix build on the builder from the synced source"
+    # Single quotes keep '#' from becoming a remote-shell comment.
+    out="$(ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix build -L 'path:${remote_src}#workspace-cargo-quality' --print-out-paths --cores 64 --no-link" | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
     if [ -z "${out}" ]; then
-      echo "just check-remote: missing quality store path in nix_retry output" >&2
+      echo "just check-remote: missing quality store path in the builder nix build output" >&2
       exit 2
     fi
     echo "==> just check-remote: quality output ${out}"
     echo "==> just check-remote: quality receipt (printed even when Nix reuses a previous result)"
-    just nix_retry nix store cat "${out}/quality-summary.txt"
+    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" nix store cat "${out}/quality-summary.txt"
 
 # Named cargo on the same remote builder as check-remote (surmount-remote).
 # Kind is test, nextest, clippy, build, or check. Remaining words are the

@@ -634,6 +634,20 @@ fn is_auth_compact_error_classifies_401_messages() {
     let size = acp::Error::internal_error()
         .data("compact failed: The prompt is too long for this model's context window.");
     assert!(!SessionActor::is_auth_compact_error(&size));
+    let missing = acp::Error::internal_error().data(
+        "compact failed: Unauthorized (401): Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)",
+    );
+    assert!(
+        !SessionActor::is_auth_compact_error(&missing),
+        "no auth context is not an expired login"
+    );
+    let bearer = acp::Error::internal_error().data(
+        "compact failed: Unauthorized (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)",
+    );
+    assert!(
+        SessionActor::is_auth_compact_error(&bearer),
+        "an expired bearer still counts as an auth compact failure"
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
@@ -685,6 +699,17 @@ fn suppression_notification_message_is_reason_specific() {
     );
     assert_eq!(
         msg(SuppressReason::Auth, detail),
+        "authentication problem — re-authenticate using /login and retry."
+    );
+    let missing_context = "Unauthorized (401): Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
+    let missing_msg = msg(SuppressReason::Auth, missing_context);
+    assert!(
+        !missing_msg.contains("/login") && !missing_msg.contains("re-authenticate"),
+        "a compaction failure with no auth context must not tell the Operator to /login: {missing_msg}"
+    );
+    let expired_bearer = "Unauthorized (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)";
+    assert_eq!(
+        msg(SuppressReason::Auth, expired_bearer),
         "authentication problem — re-authenticate using /login and retry."
     );
     assert_eq!(
@@ -1904,6 +1929,18 @@ fn classify_suppress_reason_maps_error_text() {
     );
     assert_eq!(
         classify("API error (status 401 Unauthorized)"),
+        SuppressReason::Auth
+    );
+    assert_eq!(
+        classify(
+            "Unauthorized (401): Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)"
+        ),
+        SuppressReason::Other
+    );
+    assert_eq!(
+        classify(
+            "Unauthorized (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)"
+        ),
         SuppressReason::Auth
     );
     assert_eq!(

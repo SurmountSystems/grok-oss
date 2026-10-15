@@ -605,6 +605,18 @@ impl SuppressReason {
         }
     }
 }
+
+/// Compaction 401 that reached the proxy with no Bearer.
+/// `reason=no auth context` or `auth_kind=other` is not an expired login.
+/// `auth_kind=bearer` is the expired JWT and still asks for `/login`.
+fn compaction_failure_is_missing_auth_context(message: &str) -> bool {
+    if crate::extensions::notification::is_nested_missing_auth_context(message) {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("auth_kind=other") && !lower.contains("auth_kind=bearer")
+}
+
 /// Splice the preserved prefix (`conversation[0..prefix_len]`) onto the compacted suffix, dropping the suffix's leading System.
 /// If the prefix already has an AGENTS.md item, drop the suffix's re-injected AGENTS.md too (else the model sees it twice).
 /// Returns `Err(compacted_history)` unchanged when `prefix_len` is 0 or out of range.
@@ -867,7 +879,11 @@ impl SessionActor {
                 "out of credits or over your spending limit. Add credits and retry.".to_string()
             }
             SuppressReason::Auth => {
-                "authentication problem — re-authenticate using /login and retry.".to_string()
+                if compaction_failure_is_missing_auth_context(detail) {
+                    Self::failure_with_retry_guidance(detail)
+                } else {
+                    "authentication problem — re-authenticate using /login and retry.".to_string()
+                }
             }
             SuppressReason::Size => "this conversation is too large to compact.".to_string(),
             SuppressReason::Schema => "this conversation can't be summarized.".to_string(),
@@ -900,6 +916,10 @@ impl SessionActor {
             SuppressReason::CreditBlock
         } else if is_context_length_error(&m) {
             SuppressReason::Size
+        } else if compaction_failure_is_missing_auth_context(&m) {
+            // `auth_kind=other` / `reason=no auth context` is not an expired bearer.
+            // A real expired JWT is `auth_kind=bearer` and stays Auth (`/login`).
+            SuppressReason::Other
         } else if m.contains("status 401") || m.contains("unauthorized") {
             SuppressReason::Auth
         } else if m.contains("invalid_request_error") {
@@ -949,7 +969,9 @@ impl SessionActor {
             .as_ref()
             .map(|am| am.auth_remedy().turn_error_type())
             .unwrap_or("auth");
-        let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
+        let message = if compaction_failure_is_missing_auth_context(&detailed)
+            || detailed.to_ascii_lowercase().contains("unauthorized")
+        {
             detailed
         } else if error_type == "auth_transient" {
             format!("{UNAUTHORIZED_NEEDLE}: compaction failed. ({detailed})")

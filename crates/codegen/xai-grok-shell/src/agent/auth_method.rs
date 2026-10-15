@@ -299,6 +299,19 @@ pub(crate) fn is_session_based_method_or_inherited_live_session(
     }
 }
 
+/// Bearer for a nested request.
+/// Chat-state credentials are often empty while the parent sampler stamps `AuthManager`'s wire-valid token.
+/// An empty chat key must not win over that token, or the nested request goes out with `X-XAI-Token-Auth` and no `Authorization`.
+pub(crate) fn nested_request_bearer(
+    chat_api_key: Option<String>,
+    wire_valid_key: Option<String>,
+) -> Option<String> {
+    match chat_api_key {
+        Some(key) if !key.is_empty() => Some(key),
+        _ => wire_valid_key.filter(|key| !key.is_empty()),
+    }
+}
+
 /// Auth snapshot for nested spawn.
 /// `current()` is empty during the early-invalidation window while the token is still wire-valid.
 /// `current_or_buffered_auth` only reads that window when the ACP method is already session-based, so a `"default"` cell drops the token and the nested request sends no Bearer.
@@ -548,6 +561,24 @@ mod tests {
             Some(&api),
             true
         ));
+    }
+
+    /// An empty chat-state key uses the wire-valid parent token.
+    #[test]
+    fn nested_request_bearer_uses_the_wire_valid_token_when_chat_credentials_are_empty() {
+        assert_eq!(
+            nested_request_bearer(None, Some("parent-jwt".into())).as_deref(),
+            Some("parent-jwt")
+        );
+        assert_eq!(
+            nested_request_bearer(Some(String::new()), Some("parent-jwt".into())).as_deref(),
+            Some("parent-jwt")
+        );
+        assert_eq!(
+            nested_request_bearer(Some("chat-jwt".into()), Some("parent-jwt".into())).as_deref(),
+            Some("chat-jwt")
+        );
+        assert!(nested_request_bearer(None, None).is_none());
     }
 
     /// ACP `"default"` plus a wire-valid OIDC token in the early-invalidation window must inherit `oidc`.
