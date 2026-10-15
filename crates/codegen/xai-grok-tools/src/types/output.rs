@@ -791,7 +791,10 @@ impl ToolOutput {
                         format!("=== Task {} ===", r.task_id),
                         format!("Command: {}", r.command),
                         format!("Status: {}", r.status),
-                        format!("Duration: {:.2}s", r.duration_secs),
+                        format!(
+                            "Duration: {}",
+                            Self::format_task_duration_secs(r.duration_secs)
+                        ),
                     ];
                     if let Some(code) = r.exit_code {
                         lines.push(format!("Exit Code: {}", code));

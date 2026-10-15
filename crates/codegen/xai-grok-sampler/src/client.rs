@@ -1058,11 +1058,21 @@ impl SamplingClient {
         span_timing: &mut StreamSpanTiming,
     ) -> Result<reqwest::Response> {
         span_timing.record_request_build();
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            span_timing.record_transport_failure(&e.to_string());
-            e
-        })?;
+        let headers_budget = stream_headers_timeout();
+        let response =
+            match tokio::time::timeout(headers_budget, self.http.execute(built_request)).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(e)) => {
+                    tracing::debug!("HTTP request failed: {}", e);
+                    span_timing.record_transport_failure(&e.to_string());
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    let message = "timed out waiting for response headers";
+                    span_timing.record_transport_failure(message);
+                    return Err(SamplingError::EventStreamError(message.into()));
+                }
+            };
         span_timing.record_response_headers();
         Ok(response)
     }

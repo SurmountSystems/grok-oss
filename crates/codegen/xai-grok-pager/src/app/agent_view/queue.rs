@@ -1191,7 +1191,7 @@ mod queue_edit_routing_tests {
         );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
+            InputOutcome::Action(Action::Interject { text, images, .. }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the interject");
             }

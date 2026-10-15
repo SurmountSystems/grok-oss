@@ -334,7 +334,7 @@ fn streamed_reasoning_the_wire_never_completed_replays_last() {
     let ConversationItem::Reasoning(first) = nth(&items, 0) else {
         panic!("the wire order is preserved");
     };
-    assert_eq!(first.id, "reasoning-1");
+    assert_eq!(first.id.as_deref(), Some("reasoning-1"));
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
         panic!("expected assistant item");
     };
@@ -342,7 +342,7 @@ fn streamed_reasoning_the_wire_never_completed_replays_last() {
     let ConversationItem::Reasoning(cut) = nth(&items, 2) else {
         panic!("expected the uncompleted item from the deltas");
     };
-    assert_eq!(cut.id, "reasoning-late");
+    assert_eq!(cut.id.as_deref(), Some("reasoning-late"));
 }
 
 /// A compaction item is opaque Responses state the retry cannot carry.

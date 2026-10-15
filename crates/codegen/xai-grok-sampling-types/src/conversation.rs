@@ -4792,6 +4792,8 @@ mod tests {
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: None,
+            #[allow(deprecated)]
+            prompt_cache_retention: None,
             reasoning: None,
             safety_identifier: None,
             service_tier: None,

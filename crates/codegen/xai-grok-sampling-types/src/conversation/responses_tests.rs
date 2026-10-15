@@ -222,6 +222,8 @@ fn test_responses_api_response_to_conversation_item() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -283,6 +285,8 @@ fn test_responses_api_response_to_conversation_item() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -338,6 +342,8 @@ fn test_response_reasoning_effort_stamped_on_assistant() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: Some(rs::Reasoning {
             effort: Some(rs::ReasoningEffort::Xhigh),
             summary: None,
@@ -533,6 +539,8 @@ fn test_responses_api_with_encrypted_reasoning() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -623,6 +631,8 @@ fn test_responses_api_with_only_encrypted_reasoning() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -1219,6 +1229,8 @@ fn responses_api_conversion_preserves_model_fingerprint() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
+        #[allow(deprecated)]
+        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
