@@ -186,13 +186,11 @@ let
         mkdir -p frontend/apps/grok-desktop/scripts
         cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
         ${workspaceCargoJobsFromCores}
-        # Host cargo target reuse for this derivation only. A missing
-        # directory stays on the build's own target dir. Do not mkdir
-        # it and do not fail the derivation. Do not force
-        # CARGO_BUILD_INCREMENTAL=false when the cache path is visible.
-        if [ -d /var/cache/grok-oss-cargo-target ]; then
-          export CARGO_TARGET_DIR=/var/cache/grok-oss-cargo-target
-        fi
+        # Stay on this derivation's target directory under the Nix build
+        # dir. /var/cache/grok-oss-cargo-target is outside that directory.
+        # The linker wrapper rejects those outputs as an impure path
+        # (collect2: impure path used in link). Do not export
+        # CARGO_TARGET_DIR to the host cache.
         export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
         export GROK_DISABLE_SHARED_HARNESS_SECRETS="''${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"

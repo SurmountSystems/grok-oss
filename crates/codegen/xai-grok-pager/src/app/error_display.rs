@@ -215,6 +215,24 @@ pub(crate) fn format_request_failure(
             wire,
         };
     }
+    // Nested spawn reached cli-chat-proxy with no Bearer. The proxy text
+    // says the credentials are invalid or expired. That is false while the
+    // parent session still talks. Sending again does not attach the parent
+    // session. A real expired JWT is auth_kind=bearer and stays on the
+    // re-auth path.
+    if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(xai_grok_shell::extensions::notification::is_nested_missing_auth_context)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Nested job had no auth context".to_string(),
+            detail: "The parent session still has credentials. This is not an expired login. Sending the message again does not fix it."
+                .to_string(),
+            wire,
+        };
+    }
     let team_prepaid = xai_grok_shell::sampling::error::is_console_team_prepaid_message(raw)
         || extracted
             .as_deref()
@@ -1019,6 +1037,24 @@ mod tests {
             "must not say used up: {}",
             formatted.detail
         );
+    }
+
+    #[test]
+    fn nested_no_auth_context_does_not_say_credentials_expired_or_try_again() {
+        let raw = "Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
+        let formatted = format_request_failure(None, None, raw);
+        let message = formatted.message();
+        assert_eq!(formatted.headline, "Nested job had no auth context");
+        assert!(
+            message.contains("parent session still has credentials"),
+            "{message}"
+        );
+        assert!(!message.contains("Invalid or expired"), "{message}");
+        assert!(
+            !message.to_ascii_lowercase().contains("try sending again"),
+            "{message}"
+        );
+        assert!(!message.contains("/login"), "{message}");
     }
 
     #[test]
