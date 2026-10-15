@@ -688,7 +688,7 @@ pub fn format_usage_summary_with_live(
     if let Some(reset) = &balance.period_end_display {
         lines.push(format!("Next reset: {reset}"));
     }
-    // Free SuperGrok period linear-burn pacing (omit when bounds missing).
+    // Included SuperGrok period linear-burn pacing (omit when bounds missing).
     if balance.included_usage_known
         && let Some(pacing) = balance.pacing_sentence(live, now)
     {

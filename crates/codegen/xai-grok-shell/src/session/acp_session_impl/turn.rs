@@ -947,27 +947,18 @@ impl SessionActor {
             if extraction.images.is_empty() {
                 (extraction.text, Vec::new())
             } else {
-                let cleaned_text = extraction.text;
-                let count = extraction.images.len();
+                crate::session::placeholder_images::recover_orphan_placeholders(
+                    &query,
+                    &mut raw_images,
+                    std::path::Path::new(&self.session_info.cwd),
+                )
+            };
+            if recovered > 0 {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    count,
-                    "base64 images extracted from user query",
+                    recovered,
+                    "server-side placeholder fallback: loaded orphan image(s) from disk",
                 );
-                let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
-                    .images
-                    .into_iter()
-                    .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
-                    .collect();
-                let nr = crate::session::image_normalize::normalize_images(acp_imgs, false).await;
-                if !nr.re_encode_fallbacks.is_empty() {
-                    tracing::warn!(
-                        session_id = %self.session_info.id,
-                        notes = %nr.re_encode_fallbacks.join(" "),
-                        "Extracted user query image kept original after re-encode failure",
-                    );
-                }
-                (cleaned_text, nr.images)
             }
         } else {
             (query, Vec::new())

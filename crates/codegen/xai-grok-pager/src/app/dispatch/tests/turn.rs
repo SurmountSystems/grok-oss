@@ -604,6 +604,10 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
         ),
         "a manual retry still re-sends, got {effects:?}"
     );
+    let pending = get_agent(&app, id)
+        .pending_cancel_resend
+        .as_ref()
+        .expect("resend record must survive");
     assert!(
         app.agents[&id].session.state.is_idle(),
         "[stop] during Cancelling must finish, got {:?}",

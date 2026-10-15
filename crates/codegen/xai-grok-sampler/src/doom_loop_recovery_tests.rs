@@ -15,11 +15,6 @@ fn first_part<T>(content: &Option<Vec<T>>) -> &T {
     part
 }
 
-fn reasoning_body(content: &Option<Vec<rs::ReasoningItemContent>>) -> &str {
-    let rs::ReasoningItemContent::ReasoningText(part) = first_part(content);
-    part.text.as_str()
-}
-
 fn armed() -> FailedResponseCapture {
     FailedResponseCapture::armed()
 }
@@ -43,7 +38,6 @@ fn message_item(id: &str, text: &str) -> rs::OutputItem {
         id: id.into(),
         role: rs::AssistantRole::Assistant,
         status: rs::OutputStatus::Completed,
-        phase: None,
     })
 }
 
@@ -54,15 +48,12 @@ fn function_call_item(call_id: &str) -> rs::OutputItem {
         id: Some(call_id.into()),
         name: "read_file".into(),
         status: Some(rs::OutputStatus::Completed),
-        namespace: None,
-        caller: None,
-        r#async: None,
     })
 }
 
 fn reasoning_item(id: &str, content: Option<&str>, summary: Option<&str>) -> rs::ReasoningItem {
     rs::ReasoningItem {
-        id: Some(id.to_string()),
+        id: id.into(),
         summary: summary
             .map(|text| {
                 vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
@@ -70,13 +61,7 @@ fn reasoning_item(id: &str, content: Option<&str>, summary: Option<&str>) -> rs:
                 })]
             })
             .unwrap_or_default(),
-        content: content.map(|text| {
-            vec![rs::ReasoningItemContent::ReasoningText(
-                rs::ReasoningTextContent {
-                    text: text.to_string(),
-                },
-            )]
-        }),
+        content: content.map(|text| vec![rs::ReasoningTextContent { text: text.into() }]),
         encrypted_content: None,
         status: None,
     }
@@ -97,8 +82,8 @@ fn done_values_replace_deltas_without_duplication() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning.id, Some("reasoning-1".to_string()));
-    assert_eq!(reasoning_body(&reasoning.content), "full reasoning");
+    assert_eq!(reasoning.id, "reasoning-1");
+    assert_eq!(first_part(&reasoning.content).text, "full reasoning");
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
         panic!("expected assistant item");
     };
@@ -115,7 +100,7 @@ fn summary_is_used_when_raw_reasoning_is_absent() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning_body(&reasoning.content), "full summary");
+    assert_eq!(first_part(&reasoning.content).text, "full summary");
 }
 
 /// A raw reasoning event that carries no text must not displace the summary: the retry would otherwise lose the thought it exists to replay.
@@ -130,7 +115,7 @@ fn an_empty_raw_reasoning_event_keeps_the_summary() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    assert_eq!(reasoning_body(&reasoning.content), "the summary");
+    assert_eq!(first_part(&reasoning.content).text, "the summary");
 }
 
 /// Same when the summary already spent the reasoning budget: the raw event records nothing, so the summary stays the recovery context.
@@ -149,7 +134,7 @@ fn a_budget_spent_raw_event_keeps_the_summary() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    let text = reasoning_body(&reasoning.content);
+    let text = &first_part(&reasoning.content).text;
     assert!(
         text.starts_with("summary "),
         "the summary is replayed: {text:.40}"
@@ -171,7 +156,7 @@ fn a_raw_delta_with_no_room_left_records_nothing() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected the summary to survive");
     };
-    assert_eq!(reasoning_body(&reasoning.content), summary);
+    assert_eq!(first_part(&reasoning.content).text, summary);
 }
 
 /// A disarmed capture (every stream that is not an armed recovery attempt) records nothing at all.
@@ -280,7 +265,7 @@ fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     let ConversationItem::Reasoning(merged) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning_body(&merged.content), "raw reasoning");
+    assert_eq!(first_part(&merged.content).text, "raw reasoning");
     assert_eq!(merged.encrypted_content.as_deref(), Some("cipher-1"));
     let Some(part) = merged.summary.first() else {
         panic!("expected a summary part");
@@ -290,7 +275,7 @@ fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     let ConversationItem::Reasoning(sibling) = nth(&items, 1) else {
         panic!("expected the unstreamed sibling to survive");
     };
-    assert_eq!(reasoning_body(&sibling.content), "unstreamed");
+    assert_eq!(first_part(&sibling.content).text, "unstreamed");
 }
 
 /// The opaque encrypted blob is charged to the replay budget.
@@ -319,7 +304,7 @@ fn an_oversized_encrypted_blob_is_dropped() {
         "the oversized blob is dropped"
     );
     assert_eq!(
-        reasoning_body(&trimmed.content),
+        first_part(&trimmed.content).text,
         "another thought",
         "dropping the blob does not cost the readable thought"
     );
@@ -341,7 +326,7 @@ fn streamed_reasoning_the_wire_never_completed_replays_last() {
     let ConversationItem::Reasoning(first) = nth(&items, 0) else {
         panic!("the wire order is preserved");
     };
-    assert_eq!(first.id, Some("reasoning-1".to_string()));
+    assert_eq!(first.id, "reasoning-1");
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
         panic!("expected assistant item");
     };
@@ -349,7 +334,7 @@ fn streamed_reasoning_the_wire_never_completed_replays_last() {
     let ConversationItem::Reasoning(cut) = nth(&items, 2) else {
         panic!("expected the uncompleted item from the deltas");
     };
-    assert_eq!(cut.id, Some("reasoning-late".to_string()));
+    assert_eq!(cut.id, "reasoning-late");
 }
 
 /// A compaction item is opaque Responses state the retry cannot carry.
@@ -402,7 +387,7 @@ fn a_terminal_turn_does_not_gain_items_from_the_deltas() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning.id, Some("reasoning-final".to_string()));
+    assert_eq!(reasoning.id, "reasoning-final");
 }
 
 /// A final item that carried its own content keeps it: the capture only fills gaps, it never overwrites the authoritative turn.
@@ -420,7 +405,7 @@ fn terminal_content_wins_over_streamed_text() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    assert_eq!(reasoning_body(&reasoning.content), "final reasoning");
+    assert_eq!(first_part(&reasoning.content).text, "final reasoning");
 }
 
 /// A runaway thought is capped and marked, so repeated recovery attempts cannot inflate the retry prompt without bound.
@@ -437,7 +422,7 @@ fn a_runaway_thought_is_capped_without_eliding_the_answer() {
     let ConversationItem::Reasoning(reasoning) = nth(&items, 0) else {
         panic!("expected reasoning item");
     };
-    let text = reasoning_body(&reasoning.content);
+    let text = &first_part(&reasoning.content).text;
     assert!(text.ends_with(TRUNCATION_MARKER), "truncation is marked");
     assert!(text.len() <= MAX_RECOVERY_REASONING_BYTES + TRUNCATION_MARKER.len());
     let ConversationItem::Assistant(assistant) = nth(&items, 1) else {
@@ -479,16 +464,12 @@ fn a_runaway_terminal_turn_is_capped_per_channel() {
     let reasoning_bytes: usize = items
         .iter()
         .filter_map(|item| match item {
-            ConversationItem::Reasoning(reasoning) => {
-                Some(reasoning.content.as_ref().map_or(0, |parts| {
-                    parts
-                        .iter()
-                        .map(|part| match part {
-                            rs::ReasoningItemContent::ReasoningText(text) => text.text.len(),
-                        })
-                        .sum()
-                }))
-            }
+            ConversationItem::Reasoning(reasoning) => Some(
+                reasoning
+                    .content
+                    .as_ref()
+                    .map_or(0, |parts| parts.iter().map(|part| part.text.len()).sum()),
+            ),
             _ => None,
         })
         .sum();

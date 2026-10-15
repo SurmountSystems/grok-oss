@@ -653,7 +653,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Empty-prompt `c` types in the Human box. Comment is the CTA.
+        // Empty-prompt `c` types in the Operator box. Comment is the CTA.
         // A line-comment overlay that is already open still takes `c` as text.
         if in_plan_approval && key!('c').matches(key) && plan_preview_key_is_composer_text(key) {
             return self.handle_plan_feedback_key(key);
@@ -678,9 +678,9 @@ impl AgentView {
         }
 
         // Printable / edit keys while plan approval is open type in the
-        // Human box. Preview stays Preview so Enter is a human turn, not
+        // Operator box. Preview stays Preview so Enter is an Operator turn, not
         // Revise. Comment / Revise clicks are what focus Prompt. Viewer
-        // navigation (j/k/arrows/…) and select-to-copy (y/Y) stay below.
+        // navigation (j/k/arrows/...) and select-to-copy (y/Y) stay below.
         if in_plan_approval {
             let is_composer_key = match key.code {
                 // y/Y: line / whole-plan copy on plan surfaces (handlers below).

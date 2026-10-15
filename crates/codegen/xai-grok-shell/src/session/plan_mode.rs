@@ -606,6 +606,97 @@ fn path_token_does_not_continue(text: &str, end: usize) -> bool {
     }
 }
 
+/// A living document beside plan.md: the plan names this exact path, the
+/// path is under `.agents/reports/`, and it is not Rust source.
+///
+/// Directory and extension are checked before `plan.md` is read, so a Rust
+/// source path never becomes allowed because the plan mentions it.
+fn living_report_the_plan_names(edit_path: &Path, plan_file: &Path) -> bool {
+    if !has_agents_reports_components(edit_path) || extension_is_rs(edit_path) {
+        return false;
+    }
+    let Some(path_token) = edit_path.to_str() else {
+        return false;
+    };
+    let Ok(plan_text) = std::fs::read_to_string(plan_file) else {
+        return false;
+    };
+    plan_text_names_bounded_path(&plan_text, path_token)
+}
+
+fn has_agents_reports_components(path: &Path) -> bool {
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component_is(component, ".agents")
+            && components
+                .next()
+                .is_some_and(|next| component_is(next, "reports"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn component_is(component: std::path::Component<'_>, name: &str) -> bool {
+    matches!(component, std::path::Component::Normal(text) if text == name)
+}
+
+fn extension_is_rs(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
+/// Characters that keep a path token going. A sentence period is not this:
+/// `.` then whitespace or end of text ends the token.
+fn is_path_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '%')
+}
+
+fn plan_text_names_bounded_path(plan_text: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(rel) = plan_text[search_from..].find(path) {
+        let at = search_from + rel;
+        let before_ok = match plan_text[..at].chars().next_back() {
+            None => true,
+            Some(c) => !is_path_char(c),
+        };
+        let end = at + path.len();
+        if before_ok && path_token_does_not_continue(plan_text, end) {
+            return true;
+        }
+        let step = plan_text[at..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        search_from = at + step;
+    }
+    false
+}
+
+/// The path does not continue after `end`. A sentence period (`.` then
+/// whitespace or end of text) is allowed. `.` then a path character, such
+/// as `.bak`, means the plan named a longer path.
+fn path_token_does_not_continue(text: &str, end: usize) -> bool {
+    let mut chars = text[end..].chars();
+    match chars.next() {
+        None => true,
+        Some('.') => match chars.next() {
+            None => true,
+            Some(c) if c.is_whitespace() => true,
+            Some(c) if is_path_char(c) => false,
+            Some(_) => true,
+        },
+        Some(c) if is_path_char(c) => false,
+        Some(_) => true,
+    }
+}
+
 /// Session `plan_mode.json` path under `$GROK_HOME/sessions/<cwd>/<id>/`.
 pub fn plan_mode_json_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
     let sid = session_id.trim();

@@ -385,7 +385,7 @@ mod tests {
         items.insert(
             1,
             ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
-                id: Some("rs_1".to_owned()),
+                id: "rs_1".to_owned(),
                 summary: vec![xai_grok_sampling_types::rs::SummaryPart::SummaryText(
                     xai_grok_sampling_types::rs::SummaryTextContent {
                         text: "user prefers tabs".to_owned(),

@@ -99,65 +99,37 @@ is_not_found() {
     [ "$code" = "404" ]
 }
 
-# SHA-256 of a file (lowercase hex). Not SHA-1. Needs sha256sum, shasum -a 256,
-# or openssl dgst -sha256. Do not echo tokens or secret env values.
-file_sha256() {
-    local f="$1" out
-    if command -v sha256sum >/dev/null 2>&1; then
-        out=$(sha256sum "$f" | awk '{print $1}')
-    elif command -v shasum >/dev/null 2>&1; then
-        out=$(shasum -a 256 "$f" | awk '{print $1}')
-    elif command -v openssl >/dev/null 2>&1; then
-        out=$(openssl dgst -sha256 "$f" | awk '{print $NF}')
-    else
-        echo "Error: sha256sum, shasum -a 256, or openssl is required to verify the download." >&2
-        return 1
+fetch_compressed() {
+    local url="$1" tmp="$2" out="$3"
+    shift 3
+    is_not_found "$url" && return 1
+    download_file_parallel "$url" "$tmp" || return 1
+    # pipefail catches a decoder error (corrupt) or the over-cap SIGPIPE so the
+    # caller falls back; head bounds the write so a bomb cannot fill the disk.
+    # A real binary is ~170 MiB, well under the cap.
+    local max=$((512 * 1024 * 1024))
+    if (set -o pipefail; "$@" <"$tmp" 2>/dev/null | head -c "$max" >"$out"); then
+        [ -s "$out" ] && return 0
     fi
-    printf '%s' "$out" | tr 'A-F' 'a-f'
-}
-
-# First field must be exactly 64 hex digits (GNU `hash  name` or bare hash).
-# Not SHA-1. Not `SHA256 (name) = …` tag form.
-parse_sha256_file() {
-    local f="$1" line hex
-    line=$(tr -d '\r' < "$f" | head -n1)
-    hex=$(printf '%s' "$line" | awk '{print $1}')
-    hex=$(printf '%s' "$hex" | tr 'A-F' 'a-f')
-    hex="${hex#\*}"
-    if [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
-        printf '%s' "$hex"
-        return 0
-    fi
+    rm -f "$out"
     return 1
 }
 
-# Fail-closed: missing checksum file, unreadable digest, or mismatch refuses
-# the blob. Published file is ${artifact}.sha256 next to the binary.
-verify_downloaded_sha256() {
-    local artifact="$1" checksum_url="$2"
-    local sum_tmp expected actual
-    sum_tmp=$(mktemp 2>/dev/null) || {
-        echo "Error: could not create a temp file for the SHA-256 checksum." >&2
-        return 1
-    }
-    if ! download_file "$checksum_url" "$sum_tmp"; then
-        rm -f "$sum_tmp"
-        echo "Error: SHA-256 checksum file missing (${checksum_url}). Refusing the download." >&2
-        return 1
+fetch_binary() {
+    local base="$1" out="$2" tmp
+    tmp=$(mktemp 2>/dev/null) || tmp=""
+    if [ -n "$tmp" ]; then
+        if command -v zstd >/dev/null 2>&1 && fetch_compressed "${base}.zst" "$tmp" "$out" zstd -q -dc; then
+            rm -f "$tmp"
+            return 0
+        fi
+        if command -v gzip >/dev/null 2>&1 && fetch_compressed "${base}.gz" "$tmp" "$out" gzip -dc; then
+            rm -f "$tmp"
+            return 0
+        fi
+        rm -f "$tmp"
     fi
-    expected=$(parse_sha256_file "$sum_tmp") || {
-        rm -f "$sum_tmp"
-        echo "Error: checksum file is not a SHA-256 hex digest (${checksum_url})." >&2
-        return 1
-    }
-    rm -f "$sum_tmp"
-    actual=$(file_sha256 "$artifact") || return 1
-    if [ "$actual" != "$expected" ]; then
-        echo "Error: SHA-256 mismatch for downloaded grok. Keeping the existing install." >&2
-        return 1
-    fi
-    echo "  SHA-256 verified." >&2
-    return 0
+    download_file_parallel "$base" "$out"
 }
 
 fetch_compressed() {

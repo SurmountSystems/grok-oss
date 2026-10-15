@@ -3011,6 +3011,26 @@ pub fn render_extensions_modal(
                     entry_badge_color.push(None);
                 }
             }
+            ExtensionsTab::Workflows => {
+                // The builder owns all data states (loaded/empty/error).
+                for row in
+                    build_workflows_picker_rows(&state.workflows_data, state.picker_state.query())
+                {
+                    entry_labels.push(row.label);
+                    entry_right_labels.push(row.right_label);
+                    entry_desc_lines.push(row.desc_lines);
+                    entry_summary_lines.push(vec![]);
+                    entry_fields.push(row.fields);
+                    entry_is_header.push(false);
+                    entry_dimmed.push(row.dimmed);
+                    entry_indent.push(0);
+                    // Browse-only rows: no data indices, no group keys.
+                    entry_data_indices.push(None);
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(String::new());
+                    entry_badge_color.push(None);
+                }
+            }
             ExtensionsTab::Plugins => {
                 if let TabDataState::Loaded(ref response) = state.plugins_data {
                     let mut groups = GroupedPlugins::new();

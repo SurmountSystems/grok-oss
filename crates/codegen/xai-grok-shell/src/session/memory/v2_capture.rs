@@ -466,6 +466,7 @@ mod tests {
         assert_eq!(
             format
                 .schema
+                .unwrap()
                 .pointer("/properties/outcome/enum/0")
                 .and_then(serde_json::Value::as_str),
             Some("noop")

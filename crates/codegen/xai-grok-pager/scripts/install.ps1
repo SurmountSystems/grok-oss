@@ -424,7 +424,7 @@ Move-Item -LiteralPath $binaryTmp -Destination $binaryPath -Force
 foreach ($binName in @('grok.exe', 'agent.exe')) {
     $dest = Join-Path $BinDir $binName
     try {
-        Copy-Item -Path $binaryPath -Destination $dest -Force
+        Install-Exe $binaryPath (Join-Path $BinDir $binName)
     } catch {
         try {
             Install-Exe $binaryPath $dest

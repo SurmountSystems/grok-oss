@@ -360,7 +360,7 @@ pub fn column_encodings(path: &Path) -> Result<Vec<(String, Vec<Encoding>)>, Sto
     let mut found = Vec::new();
     for row_group in metadata.row_groups() {
         for column in row_group.columns() {
-            found.push((column.column_path().string(), column.encodings().collect()));
+            found.push((column.column_path().string(), column.encodings().to_vec()));
         }
     }
     Ok(found)

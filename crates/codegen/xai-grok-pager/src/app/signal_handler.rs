@@ -211,6 +211,7 @@ fn dispatch_first_lifecycle_code(code: i32) {
     }
 }
 
+
 /// Request the event loop's graceful quit when it is registered and the TUI still owns the terminal.
 /// Otherwise hard-exit (agent mode, or a signal after teardown already started).
 fn request_graceful_or_exit(code: i32) {

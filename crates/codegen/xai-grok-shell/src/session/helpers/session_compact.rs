@@ -6,7 +6,7 @@ use crate::sampling::{
     ToolDefinition, ToolSpec, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
-use async_openai::types::responses::{ResponseErrorCode, ResponseStreamEvent};
+use async_openai::types::responses::ResponseStreamEvent;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use xai_grok_sampler::SamplerConfig as SamplingConfig;
@@ -194,16 +194,6 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
         CompactFailure::Deterministic(acp_err)
     } else {
         CompactFailure::Transient(acp_err)
-    }
-}
-
-/// Snake_case wire token for `ResponseErrorCode`.
-/// The enum has no `as_str` and no `Display`. Serde is the wire form.
-/// A non-string or empty result is `None`.
-fn response_error_code_wire(code: &ResponseErrorCode) -> Option<String> {
-    match serde_json::to_value(code) {
-        Ok(serde_json::Value::String(text)) if !text.is_empty() => Some(text),
-        _ => None,
     }
 }
 
@@ -772,9 +762,7 @@ pub(crate) async fn generate_session_compact(
                             }
                             ResponseStreamEvent::ResponseFailed(failed_event) => {
                                 let event_error = failed_event.response.error.as_ref();
-                                let code_wire =
-                                    event_error.and_then(|e| response_error_code_wire(&e.code));
-                                let code = code_wire.as_deref();
+                                let code = event_error.map(|e| e.code.as_str());
                                 let message = event_error
                                     .map(|e| e.message.as_str())
                                     .unwrap_or("unknown error");

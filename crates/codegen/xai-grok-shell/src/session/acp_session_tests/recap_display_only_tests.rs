@@ -1277,7 +1277,7 @@ async fn messages_side_calls_preserve_completed_reasoning() {
 
             let reasoning = |turn: usize| {
                 ConversationItem::Reasoning(rs::ReasoningItem {
-                    id: Some(String::new()),
+                    id: String::new(),
                     summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                         text: format!("thinking for turn {turn}"),
                     })],

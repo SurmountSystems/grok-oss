@@ -98,6 +98,8 @@ Ctrl+Z restores the Operator box draft after a clear. The four idle actions are 
 
 Approving while the plan panel is open keeps the composer comment. The session quotes `The user approved the plan with the following review comments:` and then the comment, leaves plan review, and can start the work. A confirmed comment is `Love it! Execute now.` Pressing Enter with an empty composer does not approve the plan.
 
+Approving while the plan panel is open keeps the composer comment. The session quotes `The user approved the plan with the following review comments:` and then the comment, leaves plan review, and can start the work. A confirmed comment is `Love it! Execute now.` Pressing Enter with an empty composer does not approve the plan.
+
 If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, comment (then Approve, Clarify, or Revise), revise, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan

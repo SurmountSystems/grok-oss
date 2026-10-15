@@ -234,32 +234,33 @@ buckets — never tree-wide bulk checkout, never 18 parallel one-file agents.
 Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 ### Live stack (update when tip moves)
 
-**Snapshot: 2026-08-12 — restack onto public Grok Build 1.0.3 (`e5fd4816`).**
+**Snapshot: 2026-10-15 UTC. Merge Surmount `origin/main` HB-1 into `onto-xai/2bdd1d6a6369`.**
 
 | Field | Value |
 |-------|--------|
-| Branch | `onto-xai/b13fa526f511` (same PR #36 name; old joined tip on `backup/onto-xai-b13fa526f511-0f61ff44-joined-20260812`) |
-| xAI tip | `e5fd4816d43260c15ba785f103990c1ed6cea230` (tree `25eefa9bdb3a4748cc065be3fa8200d04bc54493`) |
-| Onto first-parent tip | `ee8a80d28cf5df2841b3762396b5921837e15813` (24 first-parent picks from `b13fa526f511..09c407e2`) |
-| Onto tip (after join) | `e08e596167538f9e72da0760865340adfa34868f` |
-| Compile mop | `4651593a1da1bbaf2831f316791cfb6d69c663e6` (shell + pager + update; tree `42dfccb62b5258ec7d8505f71e7318d89e88746a`) |
-| Onto tree | `42dfccb62b5258ec7d8505f71e7318d89e88746a` (after compile mop; join tree was `ae3568e6fa7dcff47a63ca6f87c6c3e8fec18d28`) |
-| Join | Done (`e08e5961`, `-s ours` via commit-tree); `origin/main` (`f17e84d8`) is ancestor |
-| Cherry-picks | **Done** — no active pick |
-| Toolchain | `rust-toolchain.toml` / fenix **1.97.1** |
-| Nucleo | `FuzzySearchManager` reuse-per-root; `Nucleo::new(..., Some(2), 1)` |
+| Branch | `onto-xai/2bdd1d6a6369` |
+| xAI tip | `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` (tree `d7f2fa79787169d549eee97c8c2dbf9fbe3a43d3`) |
+| Onto first-parent before this merge | `b8ccd3ffa99e8c795f7082a1c55df39e7ba6a885` (tree `555486f04ad975b07ce3b9c6135f67b4df56f658`; one commit ahead of `origin/onto-xai/2bdd1d6a6369` at `f1b4076f54594ec7ab3cb91a80f431ef244dbc78`) |
+| Onto tip | `81e1530e1801db580f3cab3c0d1286ef44c9bb5b` |
+| Onto tree | `e9bb02c65f4b29ac98454f2ba9838e89789bd8d1` |
+| Merge | Real merge of `origin/main` `b7ab91532c9e8008081b4f281794be43ecae73a6` (HB-1, tree `0088decb0b81780e899771f46c447f8c62154ba6`). First parent `b8ccd3ff`. Second parent `b7ab9153`. Merge-base was `d1d3b7377e85c760caf17b74cf6d319301a77d1e`. |
+| Join `-s ours` | Not run. `origin/main` is already an ancestor of this tip because it is the merge second parent. |
+| Cherry-picks | None in flight. `CHERRY_PICK_HEAD` is absent. `MERGE_HEAD` is absent. Unmerged count is 0. |
+| `origin/main` ancestor | Yes |
+| xAI tip ancestor | Yes |
 
-**Finished on tip:** OpenRouter through `09c407e2 merge upstream` replayed onto 1.0.3, then join current `origin/main`, then compile mop `4651593a`. Report: `.agents/reports/recon-restack-1.0.3-2026-08-12.md`.
+**Finished on tip:** Hunter's razor merge of HB-1 Grok OSS seams onto the xAI 2bdd1d6a tip. Product CLI is grok-oss. SuperGrok is paid. Report: `/home/hunter/.agents/reports/recon-hb1-onto-2bdd-2026-10-14.md`.
 
-**Human next:**
+**Operator next:** Push this branch. Do not open the GitHub PR until `origin` has this onto tip.
 
 ```bash
-# already authorized: force-with-lease this PR branch only
-git push --force-with-lease origin onto-xai/b13fa526f511
-# do not create a new PR; SurmountSystems/grok-oss#36 updates
+git push -u origin onto-xai/2bdd1d6a6369
+gh pr create --base main --head onto-xai/2bdd1d6a6369 \
+  --title "Merge origin/main HB-1 onto xAI tip 2bdd1d6a, keep complete Grok OSS product" \
+  --body "Real merge of origin/main b7ab9153 (HB-1) into onto-xai/2bdd1d6a6369. First parent b8ccd3ff. Second parent b7ab9153. Tree e9bb02c6. xAI tip 2bdd1d6a is an ancestor. origin/main is an ancestor. Join -s ours was not required. Named land tests that exist as fn on origin/main remain. Do not reset Surmount main to this tip."
 ```
 
-**Historical notes:** Resume from mid-stack at `75a84a52` after 3/9 picks. Recon-unsigned intermediates via `ALLOW_UNSIGNED` + `commit-tree` (PreToolUse blocks `--no-gpg-sign` string). Mega-picks #4/#12 used intentional ours/theirs groups, not bulk tree checkout.
+**Historical notes (2026-08-12 restack onto Grok Build 1.0.3 `e5fd4816`):** Resume from mid-stack at `75a84a52` after 3/9 picks. Recon-unsigned intermediates via `ALLOW_UNSIGNED` plus `commit-tree` (PreToolUse blocks the `--no-gpg-sign` string). Mega-picks #4/#12 used intentional ours/theirs groups, not bulk tree checkout. That snapshot's onto branch was `onto-xai/b13fa526f511`.
 
 #### #7 — 18 unmerged paths (resolve carefully)
 

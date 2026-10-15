@@ -45,6 +45,7 @@ mod transcript;
 mod turn;
 pub(crate) mod unstick;
 mod voice;
+pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use auth::{scrollback_has_reauth_prompt, scrollback_has_recent_disk_full};
 pub(crate) use billing::{

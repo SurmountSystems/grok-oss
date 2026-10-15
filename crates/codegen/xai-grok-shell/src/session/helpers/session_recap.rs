@@ -666,7 +666,7 @@ mod tests {
     fn mk_reasoning(id: &str) -> ConversationItem {
         use crate::sampling::rs;
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some(id.to_string()),
+            id: id.to_string(),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: format!("secret thinking {id}"),
             })],
