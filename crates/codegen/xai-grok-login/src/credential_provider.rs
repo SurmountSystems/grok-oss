@@ -58,7 +58,8 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
 
     /// Closes the pre-flight→send gap: the turn's pre-flight ran `auth()`, but the request can leave much later (a sampling-permit wait, a rate-limit sleep, a resubmit that skips the pre-flight).
     /// If the cached bearer is wire-valid now but would not survive the send, refresh here instead of letting `current_bearer` strip it and send the request with no credential.
-    /// Only that race is handled here. With no wire-valid bearer at all the pre-flight has already made its refresh attempt and the 401 arm (recovery, parking) owns the outcome; a refresh per send would let every parked, deliberately credential-less resubmit drive the escalation budget.
+    /// A missing wire-valid bearer that still has a refresh token is the nested inherit miss: refresh here so the request does not leave with `X-XAI-Token-Auth` and no `Authorization`.
+    /// Parked, credential-less resubmits have no refresh token and do not enter this arm.
     fn prepare_for_send(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
@@ -67,6 +68,24 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
                 return;
             }
             let Some(remaining) = self.0.remaining_wire_life() else {
+                let refreshable = self.0.current_or_expired().is_some_and(|auth| {
+                    matches!(
+                        auth.auth_mode,
+                        crate::AuthMode::Oidc
+                            | crate::AuthMode::WebLogin
+                            | crate::AuthMode::External
+                    ) && auth.refresh_token.as_ref().is_some_and(|rt| !rt.is_empty())
+                });
+                if refreshable {
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth: pre-send refresh, no wire-valid bearer, refresh token still present",
+                        None,
+                        Some(serde_json::json!({
+                            "budget_ms": PRE_SEND_REFRESH_BUDGET.as_millis() as u64
+                        })),
+                    );
+                    let _ = self.0.silent_refresh_within(PRE_SEND_REFRESH_BUDGET).await;
+                }
                 return;
             };
             if self.0.has_sendable_token() {
@@ -84,6 +103,48 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
             }
             let _ = self.0.silent_refresh_within(budget).await;
         })
+    }
+}
+
+/// Nested spawn resolver: the parent's `AuthManager` first, then the inherited session key.
+/// `WireValidBearerResolver` alone returns `None` when `current_wire_valid` is empty while the parent JWT still lives on `ctx.auth` or the frozen sampling config. That send is `X-XAI-Token-Auth` with no `Authorization`.
+pub struct InheritedSessionBearerResolver {
+    inner: WireValidBearerResolver,
+    fallback: Option<String>,
+}
+
+impl InheritedSessionBearerResolver {
+    /// Shared constructor for nested spawn and nested reconstruct so the fallback cannot drift.
+    pub fn shared(
+        auth_manager: Arc<AuthManager>,
+        fallback: Option<String>,
+    ) -> xai_grok_sampler::SharedBearerResolver {
+        Arc::new(Self {
+            inner: WireValidBearerResolver(auth_manager),
+            fallback: fallback.filter(|key| !key.is_empty()),
+        })
+    }
+}
+
+impl std::fmt::Debug for InheritedSessionBearerResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InheritedSessionBearerResolver")
+            .field("fallback_present", &self.fallback.is_some())
+            .finish()
+    }
+}
+
+impl xai_grok_sampler::BearerResolver for InheritedSessionBearerResolver {
+    fn current_bearer(&self) -> Option<String> {
+        self.inner
+            .current_bearer()
+            .or_else(|| self.fallback.clone())
+    }
+
+    fn prepare_for_send(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.prepare_for_send()
     }
 }
 
@@ -664,10 +725,9 @@ mod tests {
         );
     }
 
-    /// With no wire-valid bearer the hook does nothing: the pre-flight already refreshed and the 401 arm owns the tokenless case.
-    /// A refresh per send here would let parked, deliberately credential-less resubmits drive the escalation budget.
+    /// A hard-expired session that still has a refresh token is refreshed before the send.
     #[tokio::test]
-    async fn prepare_for_send_is_a_no_op_without_a_wire_valid_bearer() {
+    async fn prepare_for_send_refreshes_when_wire_life_is_gone_and_a_refresh_token_remains() {
         use xai_grok_sampler::BearerResolver;
         let _guard = EarlyInvalidationGuard::pin_to_default();
         let dir = tempfile::tempdir().unwrap();
@@ -686,10 +746,44 @@ mod tests {
         resolver.prepare_for_send().await;
         assert_eq!(
             refresher.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a missing wire-valid bearer with a refresh token must refresh before the send"
+        );
+        assert_eq!(
+            resolver.current_bearer().as_deref(),
+            Some("pre-send-minted")
+        );
+    }
+
+    /// Parked credential-less resubmits have no refresh token and must not drive the escalation budget.
+    #[tokio::test]
+    async fn prepare_for_send_is_a_no_op_without_a_refreshable_session() {
+        use xai_grok_sampler::BearerResolver;
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir, None);
+        let refresher = Arc::new(MintingRefresher(std::sync::atomic::AtomicU32::new(0)));
+        mgr.set_refresher(refresher.clone());
+        let resolver = WireValidBearerResolver(mgr.clone());
+
+        resolver.prepare_for_send().await;
+        assert_eq!(
+            refresher.0.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "a hard-expired credential is the pre-flight's and the 401 arm's problem, not the send hook's"
+            "an empty manager must not refresh on every send"
         );
         assert_eq!(resolver.current_bearer(), None);
+    }
+
+    /// Nested inherit: AuthManager has no wire-valid token, the parent JWT still lives on the fallback.
+    #[test]
+    fn inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token()
+    {
+        use xai_grok_sampler::BearerResolver;
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir, None);
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("buffered-oidc".into()));
+        assert_eq!(resolver.current_bearer().as_deref(), Some("buffered-oidc"));
     }
 
     /// The wait is bounded by the cached bearer's remaining life, so a slow mint cannot outlive the token it was protecting.

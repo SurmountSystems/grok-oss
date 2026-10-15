@@ -2287,9 +2287,26 @@ async fn default_acp_method_with_buffered_oidc_installs_the_bearer_resolver() {
     ctx.sampling_config.api_key = None;
     let (config, _) = read_parent_sampling_config(&ctx).await;
     assert_eq!(ctx.auth_method_id.0.as_ref(), "oidc");
+    assert_eq!(
+        config.api_key.as_deref(),
+        Some("buffered-oidc"),
+        "a buffered OIDC session must stamp the parent bearer onto the nested config"
+    );
     assert!(
         config.bearer_resolver.is_some(),
         "a buffered OIDC session must install the nested bearer resolver"
+    );
+    assert_eq!(
+        config
+            .bearer_resolver
+            .as_ref()
+            .and_then(|resolver| {
+                use xai_grok_sampler::BearerResolver;
+                resolver.current_bearer()
+            })
+            .as_deref(),
+        Some("buffered-oidc"),
+        "the nested resolver must return the inherited parent bearer when AuthManager has no wire-valid token"
     );
 }
 /// Every subagent config path must carry the live bearer resolver.

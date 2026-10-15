@@ -2683,26 +2683,38 @@ fn subagent_auth_type_rule() {
     let byok = byok_model_entry("grok-byok");
     let plain = test_model_entry("grok-plain");
     assert_eq!(
-            super::subagent_auth_type(Some(&byok), &session),
+            super::subagent_auth_type(Some(&byok), &session, false),
             AuthType::ApiKey
         );
     assert_eq!(
-            super::subagent_auth_type(Some(&byok), &api_key),
+            super::subagent_auth_type(Some(&byok), &api_key, false),
             AuthType::ApiKey
         );
     assert_eq!(
-            super::subagent_auth_type(Some(&plain), &session),
+            super::subagent_auth_type(Some(&plain), &session, false),
             AuthType::SessionToken,
         );
     assert_eq!(
-            super::subagent_auth_type(Some(&plain), &api_key),
+            super::subagent_auth_type(Some(&plain), &api_key, false),
             AuthType::ApiKey
         );
     assert_eq!(
-            super::subagent_auth_type(None, &session),
+            super::subagent_auth_type(None, &session, false),
             AuthType::SessionToken
         );
-    assert_eq!(super::subagent_auth_type(None, &api_key), AuthType::ApiKey);
+    assert_eq!(
+        super::subagent_auth_type(None, &api_key, false),
+        AuthType::ApiKey
+    );
+    let default = acp::AuthMethodId::new("default");
+    assert_eq!(
+        super::subagent_auth_type(Some(&plain), &default, true),
+        AuthType::SessionToken
+    );
+    assert_eq!(
+        super::subagent_auth_type(Some(&plain), &default, false),
+        AuthType::ApiKey
+    );
 }
 const SELECTABLE_TOOL: ModelOverrideProvenance = ModelOverrideProvenance::Tool {
     selection: TaskModelSelection::Selectable,

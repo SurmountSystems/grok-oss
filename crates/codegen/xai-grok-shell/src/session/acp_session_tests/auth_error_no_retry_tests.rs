@@ -1944,6 +1944,55 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
         .await;
 }
 
+fn missing_auth_context_error() -> xai_grok_sampler::SamplingErrorInfo {
+    xai_grok_sampler::SamplingErrorInfo {
+        message: "Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)".to_string(),
+        credential: xai_grok_sampling_types::SentCredential::Missing,
+        ..auth_error()
+    }
+}
+
+/// Nested send with Token-Auth and no Bearer must stamp the parent session key and resubmit.
+/// Parking or `/login` is the live miss while the parent still talks.
+#[tokio::test(flavor = "current_thread")]
+async fn missing_auth_context_401_stamps_the_parent_bearer_and_resubmits() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (dir, am) = auth_manager_with_refresher(Arc::new(AlwaysTransientFailRefresher {
+                called: Arc::new(AtomicBool::new(false)),
+            }));
+            let _dir = dir;
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    missing_auth_context_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        ..
+                    })
+                ),
+                "a no-auth-context 401 must stamp the parent bearer and resubmit instead of parking"
+            );
+            let creds = actor.chat_state_handle.get_credentials().await;
+            assert_eq!(
+                creds.api_key.as_deref(),
+                Some("initial-test-key"),
+                "chat-state credentials must carry the parent session key"
+            );
+        })
+        .await;
+}
+
 /// When limits mode is on, the next model request draws included SuperGrok
 /// period limits. `SamplingClient::post` stamps `bearer_resolver`, not the
 /// ranked `api_key`. A live Team JWT stays on that session when no live

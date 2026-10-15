@@ -302,14 +302,15 @@ pub(crate) fn is_session_based_method_or_inherited_live_session(
 /// Bearer for a nested request.
 /// Chat-state credentials are often empty while the parent sampler stamps `AuthManager`'s wire-valid token.
 /// An empty chat key must not win over that token, or the nested request goes out with `X-XAI-Token-Auth` and no `Authorization`.
+/// When both of those are empty, the inherited parent session key (or the parent sampling config `api_key`) is the last stamp.
 pub(crate) fn nested_request_bearer(
     chat_api_key: Option<String>,
     wire_valid_key: Option<String>,
+    inherited_key: Option<String>,
 ) -> Option<String> {
-    match chat_api_key {
-        Some(key) if !key.is_empty() => Some(key),
-        _ => wire_valid_key.filter(|key| !key.is_empty()),
-    }
+    [chat_api_key, wire_valid_key, inherited_key]
+        .into_iter()
+        .find_map(|key| key.filter(|s| !s.is_empty()))
 }
 
 /// Auth snapshot for nested spawn.
@@ -567,18 +568,41 @@ mod tests {
     #[test]
     fn nested_request_bearer_uses_the_wire_valid_token_when_chat_credentials_are_empty() {
         assert_eq!(
-            nested_request_bearer(None, Some("parent-jwt".into())).as_deref(),
+            nested_request_bearer(None, Some("parent-jwt".into()), None).as_deref(),
             Some("parent-jwt")
         );
         assert_eq!(
-            nested_request_bearer(Some(String::new()), Some("parent-jwt".into())).as_deref(),
+            nested_request_bearer(Some(String::new()), Some("parent-jwt".into()), None).as_deref(),
             Some("parent-jwt")
         );
         assert_eq!(
-            nested_request_bearer(Some("chat-jwt".into()), Some("parent-jwt".into())).as_deref(),
+            nested_request_bearer(Some("chat-jwt".into()), Some("parent-jwt".into()), None)
+                .as_deref(),
             Some("chat-jwt")
         );
-        assert!(nested_request_bearer(None, None).is_none());
+        assert!(nested_request_bearer(None, None, None).is_none());
+    }
+
+    /// Chat and wire-valid can both be empty while the parent still holds a session JWT.
+    #[test]
+    fn nested_request_bearer_falls_back_to_the_inherited_parent_key() {
+        assert_eq!(
+            nested_request_bearer(None, None, Some("inherited-jwt".into())).as_deref(),
+            Some("inherited-jwt")
+        );
+        assert_eq!(
+            nested_request_bearer(None, None, Some(String::new())).as_deref(),
+            None
+        );
+        assert_eq!(
+            nested_request_bearer(
+                None,
+                Some("parent-jwt".into()),
+                Some("inherited-jwt".into())
+            )
+            .as_deref(),
+            Some("parent-jwt")
+        );
     }
 
     /// ACP `"default"` plus a wire-valid OIDC token in the early-invalidation window must inherit `oidc`.
@@ -603,8 +627,7 @@ mod tests {
         );
     }
 
-    /// A hard-expired OIDC token still selects `oidc` so the nested resolver can refresh.
-    /// `WireValidBearerResolver` does not stamp that token.
+    /// A hard-expired OIDC token still selects `oidc` so the nested resolver can refresh or fall back to the inherited key.
     #[test]
     fn nested_inherit_auth_keeps_hard_expired_oidc_for_refresh() {
         let expired = xai_grok_login::GrokAuth {

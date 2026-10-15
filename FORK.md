@@ -2557,6 +2557,12 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
 - Nested 401 `reason=no auth context` with `auth_kind=other` while the parent session still talks does not paint `Authentication required: … Run /login`. Named test: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`.
 - A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
+- Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`.
+- A `"default"` ACP method with a live parent session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.
+- The nested bearer resolver returns the inherited parent key when `AuthManager` has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`.
+- A missing wire-valid bearer that still has a refresh token is refreshed before send. Named test: `prepare_for_send_refreshes_when_wire_life_is_gone_and_a_refresh_token_remains`.
+- A wired resolver that returns `None` does not send `X-XAI-Token-Auth` without a Bearer. Named test: `bearer_resolver_none_strips_token_auth_when_authorization_is_absent`.
+- A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`.
 
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not

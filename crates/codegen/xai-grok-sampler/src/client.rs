@@ -719,6 +719,10 @@ impl SamplingClient {
                         }
                     }
                 }
+            } else {
+                // Token-Auth without Authorization is `auth_kind=other` / `reason=no auth context`.
+                headers.remove(HeaderName::from_static("x-xai-token-auth"));
+                headers.remove(HeaderName::from_static("x-authenticateresponse"));
             }
         }
         {
@@ -3463,6 +3467,56 @@ mod tests {
         assert!(
             request.headers().get(AUTHORIZATION).is_none(),
             "stale default Authorization must not be sent when resolver is empty"
+        );
+    }
+
+    /// A wired resolver that returns `None` must not send `X-XAI-Token-Auth` without a Bearer.
+    /// That combination is cli-chat-proxy `auth_kind=other` / `reason=no auth context`.
+    #[test]
+    fn bearer_resolver_none_strips_token_auth_when_authorization_is_absent() {
+        #[derive(Debug)]
+        struct EmptyResolver;
+        impl crate::config::BearerResolver for EmptyResolver {
+            fn current_bearer(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let mut extra_headers = IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: Some("stale-token".to_string()),
+            api_backend: ApiBackend::Responses,
+            extra_headers,
+            bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let SentRequest {
+            builder,
+            sent_bearer: sent,
+        } = client.post("https://example.test/v1/responses");
+        let request = builder.body("").build().expect("request should build");
+        assert_eq!(sent, None, "capture must agree: nothing was sent");
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+        assert!(
+            request
+                .headers()
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .is_none(),
+            "Token-Auth must not ride the wire without a Bearer"
+        );
+        assert!(
+            request
+                .headers()
+                .get(HeaderName::from_static("x-authenticateresponse"))
+                .is_none()
         );
     }
 

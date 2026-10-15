@@ -397,6 +397,32 @@ impl SubagentSpawnContext {
     fn would_strip_fallback_key(&self, resolved_api_key: Option<&str>) -> bool {
         self.auth.is_none() && resolved_api_key.is_some()
     }
+
+    /// Parent JWT to stamp when `AuthManager.current_wire_valid` is empty.
+    fn inherited_fallback_key(&self) -> Option<String> {
+        self.auth
+            .as_ref()
+            .map(|auth| auth.key.clone())
+            .filter(|key| !key.is_empty())
+            .or_else(|| {
+                self.sampling_config
+                    .api_key
+                    .clone()
+                    .filter(|key| !key.is_empty())
+            })
+    }
+
+    /// Parent still holds a refreshable OIDC / grok.com / external session.
+    fn spawn_live_session(&self) -> bool {
+        crate::agent::auth_method::auth_mode_is_refreshable_session(
+            self.auth.as_ref().map(|auth| auth.auth_mode).or_else(|| {
+                self.auth_manager
+                    .current_wire_valid()
+                    .or_else(|| self.auth_manager.current_or_expired())
+                    .map(|auth| auth.auth_mode)
+            }),
+        )
+    }
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual model id, picked by `resolve_subagent_sampling_config`, not the parent's.
     /// Walks the same precedence as the main session's resolver: env > user [model.<id>] > user [session] > GB per-model > GB global > 85.
     /// The GB per-model tier is read from `available_models` (the same catalog used to pick the subagent's `SamplerConfig`). User TOML and GB global tiers are sourced from the parent's snapshot captured at spawn-context build time.
@@ -788,8 +814,9 @@ fn session_bearer_resolver(
         crate::util::is_xai_api_url(base_url),
     )
     .then(|| {
-        xai_grok_login::credential_provider::WireValidBearerResolver::shared(
+        xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
             ctx.auth_manager.clone(),
+            ctx.inherited_fallback_key(),
         )
     })
 }
@@ -832,6 +859,7 @@ async fn read_parent_sampling_config(
             let api_key = crate::agent::auth_method::nested_request_bearer(
                 creds.api_key,
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
+                ctx.inherited_fallback_key(),
             );
             let strip_guard = ctx.would_strip_fallback_key(api_key.as_deref());
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
@@ -933,6 +961,7 @@ async fn read_parent_sampling_config(
     fallback.api_key = crate::agent::auth_method::nested_request_bearer(
         fallback.api_key.clone(),
         ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
+        ctx.auth.as_ref().map(|auth| auth.key.clone()),
     );
     fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
         None
@@ -957,14 +986,18 @@ async fn read_parent_sampling_config(
     (fallback, ctx.model_id.clone())
 }
 /// `AuthType` for a subagent: BYOK gets `ApiKey` (don't overwrite the BYOK key).
-/// A session-based ACP method gets `SessionToken` (keep refresh wired); otherwise `ApiKey`.
+/// A session-based ACP method, or `"default"` with a live parent session, gets `SessionToken`.
 fn subagent_auth_type(
     model: Option<&crate::agent::config::ModelEntry>,
     auth_method_id: &acp::AuthMethodId,
+    live_session: bool,
 ) -> xai_chat_state::AuthType {
     if model.is_some_and(|m| m.has_own_credentials()) {
         xai_chat_state::AuthType::ApiKey
-    } else if crate::agent::auth_method::is_session_based_method(auth_method_id) {
+    } else if crate::agent::auth_method::is_session_based_method_or_inherited_live_session(
+        Some(auth_method_id),
+        live_session,
+    ) {
         xai_chat_state::AuthType::SessionToken
     } else {
         xai_chat_state::AuthType::ApiKey
@@ -1057,7 +1090,8 @@ fn resolve_model_override_to_config(
         preferred,
         auto_use_included_limits,
     );
-    credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
+    credentials.auth_type =
+        subagent_auth_type(Some(&entry), &ctx.auth_method_id, ctx.spawn_live_session());
     let resolved_auth_type = credentials.auth_type;
     let mut config = sampling_config_for_model(
         &entry,

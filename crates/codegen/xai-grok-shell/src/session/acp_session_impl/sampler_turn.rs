@@ -740,8 +740,8 @@ impl SessionActor {
                 let _ = am.align_to_ranked_free_period_primary();
             }
         }
-        // Session path: only seed a wire-valid AT
-        // Hard-expired keys must not land in default headers when the resolver has nothing to stamp
+        // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
+        // or expired parent JWT so nested reconstruct cannot wipe a stamped inherit key.
         let api_key = if use_bearer_resolver {
             // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
             // A session from another authority must not seed the default headers either.
@@ -749,6 +749,14 @@ impl SessionActor {
                 .as_ref()
                 .filter(|_| ActiveAuthBackend::default().is_xai_authority())
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
+                .or_else(|| creds.api_key.clone().filter(|key| !key.is_empty()))
+                .or_else(|| {
+                    self.auth_manager.as_ref().and_then(|am| {
+                        am.current_or_expired()
+                            .map(|a| a.key)
+                            .filter(|key| !key.is_empty())
+                    })
+                })
         } else {
             creds.api_key
         };
@@ -827,15 +835,8 @@ impl SessionActor {
             // Attribute sampler 401s against the bearer sent on the wire.
             // `None` for sessions spawned without an `AuthManager` (BYOK direct, certain test fixtures)
             attribution_callback: self.attribution_callback.clone(),
-            // Per-request bearer override is only valid for session-token auth.
-            // Explicit API-key/env-key models must keep their configured bearer and must not be overwritten by the interactive session token
-            bearer_resolver: if use_bearer_resolver {
-                self.auth_manager.as_ref().map(|am| {
-                    xai_grok_login::credential_provider::WireValidBearerResolver::shared(am.clone())
-                })
-            } else {
-                None
-            },
+            // Assigned after ranked pins so the inherited fallback matches the key that reconstruct kept.
+            bearer_resolver: None,
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
@@ -864,6 +865,14 @@ impl SessionActor {
             );
         }
         crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
+        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+            sampling.bearer_resolver = Some(
+                xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
+                    am.clone(),
+                    sampling.api_key.clone(),
+                ),
+            );
+        }
         sampling
     }
 
@@ -1215,6 +1224,51 @@ impl SessionActor {
         }
     }
 
+    /// Parent JWT that a missing-auth 401 can stamp: wire-valid, then expired session, then chat key.
+    async fn stampable_nested_parent_bearer(&self) -> Option<String> {
+        if let Some(am) = self.auth_manager.as_ref()
+            && let Some(key) = am
+                .current_wire_valid()
+                .or_else(|| am.current_or_expired())
+                .map(|auth| auth.key)
+                .filter(|key| !key.is_empty())
+        {
+            return Some(key);
+        }
+        self.chat_state_handle
+            .get_credentials()
+            .await
+            .api_key
+            .filter(|key| !key.is_empty())
+    }
+
+    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the parent JWT and resubmit.
+    async fn try_stamp_parent_bearer_on_missing_auth(
+        &self,
+        message: &str,
+        credential: xai_grok_sampling_types::SentCredential,
+    ) -> Option<SamplerFailureRecovery> {
+        if !crate::extensions::notification::is_nested_missing_auth_context(message) {
+            return None;
+        }
+        let bearer = self.stampable_nested_parent_bearer().await?;
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            "auth recovery: missing auth context, stamping parent bearer, retrying"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth recovery: missing auth context, stamping parent bearer, retrying",
+            Some(self.session_info.id.0.as_ref()),
+            None,
+        );
+        self.set_chat_api_key(bearer).await;
+        self.prepare_sampler_for_turn().await;
+        Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
+            credential,
+            store: RecoveredStore::SessionToken,
+        })
+    }
+
     /// Park eligibility for a credential-less 401: kill switch on, provably no credential on the
     /// wire, a self-healing remedy (manual-login stays terminal). One predicate so the two
     /// fail-closed gates cannot drift.
@@ -1540,6 +1594,12 @@ impl SessionActor {
             // A parked turn makes at most one recovery attempt (the pre-park one): each dispatch is up to two counted.
             // IdP attempts and `OidcRefresher` escalates five into a process-wide permanent verdict, so 50 parked cycles must not drive refreshes — the escalation-aware proactive loop owns refresh while parked.
             if park.is_parked() && self.uncharged_401_park_eligible(am, error.credential) {
+                if let Some(recovery) = self
+                    .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+                    .await
+                {
+                    return Ok(recovery);
+                }
                 return Ok(self.park_uncharged_401(error.credential, true));
             }
             if am
@@ -1569,6 +1629,12 @@ impl SessionActor {
                     "credential": error.credential,
                 })),
             );
+            if let Some(recovery) = self
+                .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+                .await
+            {
+                return Ok(recovery);
+            }
             // The 401 says nothing about the missing credential: park instead of failing the turn.
             // Do not add `prepare_sampler_for_turn` here — a prepare's refresh would count against the shared escalation budget.
             if self.uncharged_401_park_eligible(am, error.credential) {
@@ -1585,6 +1651,13 @@ impl SessionActor {
                 credential: error.credential,
                 store: RecoveredStore::AuthProvider,
             });
+        }
+
+        if let Some(recovery) = self
+            .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+            .await
+        {
+            return Ok(recovery);
         }
 
         // 4d. Bounded resubmit, after the auth arms, before the terminal paths.
