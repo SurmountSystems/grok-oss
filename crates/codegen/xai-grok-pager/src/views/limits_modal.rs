@@ -6873,7 +6873,7 @@ mod tests {
             fixture.personal_end, fixture.business_end,
             "{owed} matching day counts are not a shared pool"
         );
-        let doc = xai_grok_shell::auth::read_limits_snapshot_file(&limits_reading_grok_home())
+        let doc = xai_grok_shell::auth::read_limits_snapshot_file(limits_reading_grok_home())
             .expect("dual heavy snapshot");
         let personal_row = doc
             .identities
