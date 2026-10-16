@@ -867,10 +867,12 @@ async fn read_parent_sampling_config(
                 .unwrap_or_default();
             let inherited_base_url = cfg.base_url.clone();
             let api_key = crate::agent::auth_method::nested_request_bearer(
-                cfg.api_key
-                    .clone()
-                    .filter(|key| !key.is_empty())
-                    .or(creds.api_key),
+                creds.api_key.filter(|key| !key.is_empty()).or_else(|| {
+                    ctx.sampling_config
+                        .api_key
+                        .clone()
+                        .filter(|key| !key.is_empty())
+                }),
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
                 ctx.inherited_fallback_key(),
             );

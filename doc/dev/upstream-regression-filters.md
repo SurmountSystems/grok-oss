@@ -833,6 +833,7 @@ paints once. Do not fit those tests to the old nag.
 | `xai-grok-pager` `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run` | Real bearer expiry paints `/login` once |
 | `xai-grok-login` `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token` | Nested POST uses the live parent JWT even when AuthManager has a recovered token |
 | `xai-grok-shell` `nested_request_bearer_falls_back_to_the_inherited_parent_key` | Inherited parent JWT wins over AuthManager recovered `current_wire_valid` |
+| `xai-grok-pager` `auth_complete_resumes_nested_l2s_that_401d` | After `/login`, a 401'd nested L2 is un-finished and its last prompt is resent; the parent session stays bound |
 
 ```bash
 cargo test -p xai-grok-shell --lib -- \
