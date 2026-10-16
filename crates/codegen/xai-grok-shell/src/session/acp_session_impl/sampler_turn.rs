@@ -1310,6 +1310,8 @@ impl SessionActor {
     /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer, or a nested 401 after
     /// recovery claimed success. Stamp the live sampler JWT and resubmit.
     /// A parent (not nested) missing-auth stamp still fails closed on the same key.
+    /// Parent `auth_kind=bearer` plus `reason=no auth context` does not stamp; that 401 keeps
+    /// the WebLogin and OIDC hints. Nested still stamps. Empty-Bearer parent still stamps.
     /// Nested same-key 401 prepares the sampler again (reconstruct can drop Authorization) and
     /// resubmits as Sent so the charged budget can still exhaust.
     async fn try_stamp_parent_bearer_on_missing_auth(
@@ -1318,7 +1320,9 @@ impl SessionActor {
         _credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
         let nested = self.startup_hints.is_subagent;
-        if !crate::extensions::notification::is_nested_missing_auth_context(message) && !nested {
+        if !crate::extensions::notification::should_stamp_parent_bearer_on_missing_auth(
+            message, nested,
+        ) {
             return None;
         }
         let bearer = self.stampable_nested_parent_bearer().await?;
@@ -1564,11 +1568,12 @@ impl SessionActor {
             error.message.clone()
         };
 
-        // Token-Auth without Bearer, or a nested 401 while the parent sampler still talks.
-        // Stamp the live sampler JWT. Do not park 50 uncharged resubmits.
-        if crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
-            || self.startup_hints.is_subagent
-        {
+        // Nested missing-auth, or parent empty-Bearer missing-auth. Stamp the live sampler JWT.
+        // Do not park 50 uncharged resubmits. Do not stamp a parent `auth_kind=bearer` 401.
+        if crate::extensions::notification::should_stamp_parent_bearer_on_missing_auth(
+            &detailed_message,
+            self.startup_hints.is_subagent,
+        ) {
             if let Some(recovery) = self
                 .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
                 .await

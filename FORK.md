@@ -2611,6 +2611,12 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 
 **Nested explore spawn while writing or presenting (pinned 2026-10-16).** These sentences say what nested spawn must do while plan mode is writing or presenting. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. The advertised `spawn_subagent` description says that. Named tests: `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting`, `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve`, `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`, `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`. Follow-up to a still-running L2 is not a start. A `plan` type is not explore or implement.
 
+**Wayland doctor finding when wl-copy is present (pinned 2026-10-16).** These sentences say what `grok doctor` / `/doctor` must do for `terminal.wayland-data-control`. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint.
+
+- If `wl-copy` is already on PATH, doctor must not emit this finding. `diagnose_wayland_data_control(true, false, true)` returns None. There is no Issue and no "install wl-clipboard" note. Named test: `wayland_no_data_control_warns`. Doctor report path: `standalone_wayland_with_wl_copy_is_not_an_issue`.
+- If `wl-copy` is missing on a Wayland session that does not expose data-control, doctor keeps a real Issue and a package install hint that names more than one distro family (pacman, dnf, and apt). Do not hardcode only apt as if every Linux is Debian. Named test: `wayland_no_data_control_missing_wl_copy_suggests_install`.
+- If the compositor exposes data-control, stay quiet even when `wl-copy` is missing. Named test: `wayland_with_data_control_is_quiet`.
+
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not
 reshape the asserts to match today's paint. Older tests below are not

@@ -111,9 +111,8 @@ pub enum WarningCategory {
     /// Shift+Enter is then byte-identical to Enter and can't insert newlines.
     /// WezTerm's default Alt+Enter binding (ToggleFullScreen) eats the fallback chord.
     WezTermKittyKeyboardOff,
-    /// Wayland session whose compositor lacks the data-control clipboard protocol (GNOME 47 and earlier).
-    /// Every native copy then goes through a focus-dependent path (arboard via the XWayland selection bridge, or `wl-copy` without data-control).
-    /// A copy fails if the terminal loses focus mid-copy.
+    /// Wayland session without data-control and without `wl-copy` on PATH.
+    /// Doctor asks the operator to install the wl-clipboard package.
     WaylandNoDataControl,
     /// Color support is below truecolor, so truecolor themes are hidden. Reported by explicit `/doctor` only.
     LimitedColorSupport,
@@ -701,27 +700,27 @@ pub fn diagnose_clipboard_from_values(
     warnings
 }
 
-/// Warns only when the session is Wayland and the compositor lacks the data-control protocol. That is a partial
-/// mitigation: its verified write is the most reliable route without data-control. No warning when data-control is
-/// present (copies are focus-free) or off Wayland.
+/// No finding when off Wayland, when data-control is present, or when `wl-copy` is on PATH.
+/// Missing `wl-copy` on Wayland without data-control is an Issue with a multi-distro install hint.
 pub fn diagnose_wayland_data_control(
     is_wayland: bool,
     data_control: bool,
     wl_copy_available: bool,
 ) -> Option<TerminalWarning> {
-    if !is_wayland || data_control {
+    if !is_wayland || data_control || wl_copy_available {
         return None;
     }
-    let fix = (!wl_copy_available).then_some("sudo apt install wl-clipboard");
     let mut warning = TerminalWarning::new(
         WarningCategory::WaylandNoDataControl,
-        "Clipboard copies may fail if you switch away from this Wayland terminal",
-        fix,
+        "Clipboard copies may fail on this Wayland session because wl-copy is not on PATH",
+        Some(
+            "install the wl-clipboard package (pacman -S wl-clipboard, dnf install wl-clipboard, or apt install wl-clipboard)",
+        ),
         None,
     );
     warning.note = Some(
-        "Keep this terminal focused until the copy message appears. If your distribution does \
-         not use apt, install the `wl-clipboard` package with its package manager."
+        "Doctor found no wl-copy binary. Install the wl-clipboard package with your \
+         distribution's package manager, then run grok doctor again."
             .to_owned(),
     );
     Some(warning)
@@ -1419,20 +1418,41 @@ mod tests {
 
     #[test]
     fn wayland_no_data_control_warns() {
-        let w = diagnose_wayland_data_control(true, false, true).expect("must warn");
-        assert_eq!(w.category, WarningCategory::WaylandNoDataControl);
-        assert!(w.message.contains("switch away"));
-        assert!(w.fix.is_none(), "wl-copy present: nothing to install");
+        assert!(
+            diagnose_wayland_data_control(true, false, true).is_none(),
+            "wl-copy on PATH is enough; doctor must not emit this finding"
+        );
     }
 
     #[test]
     fn wayland_no_data_control_missing_wl_copy_suggests_install() {
         let w = diagnose_wayland_data_control(true, false, false).expect("must warn");
         assert_eq!(w.category, WarningCategory::WaylandNoDataControl);
+        let fix = w
+            .fix
+            .as_deref()
+            .expect("missing wl-copy must suggest install");
         assert!(
-            w.fix.as_deref().is_some_and(|f| f.contains("wl-clipboard")),
-            "fix must suggest installing wl-clipboard, got: {:?}",
-            w.fix
+            fix.contains("wl-clipboard"),
+            "fix must suggest installing wl-clipboard, got: {fix}"
+        );
+        assert!(
+            fix.contains("pacman") && fix.contains("dnf") && fix.contains("apt"),
+            "install hint must name more than one distro family, got: {fix}"
+        );
+        assert_ne!(
+            fix, "sudo apt install wl-clipboard",
+            "do not hardcode only apt as if every distro uses it"
+        );
+        let finding = view::finding_from_warning(w).expect("missing wl-copy is a doctor finding");
+        assert_eq!(finding.disposition, FindingDisposition::Issue);
+        assert!(
+            finding
+                .remediation
+                .as_ref()
+                .is_some_and(|remediation| remediation.fix.contains("wl-clipboard")),
+            "Issue must carry the package install hint, got: {:?}",
+            finding.remediation
         );
     }
 
@@ -1930,7 +1950,7 @@ mod tests {
     #[test]
     fn wayland_banner_surfaces_without_ssh_gate() {
         // `summarize_warnings` is SSH-gated, so the Wayland warning reaches the welcome banner through the assemble bypass instead
-        let w = diagnose_wayland_data_control(true, false, true).unwrap();
+        let w = diagnose_wayland_data_control(true, false, false).unwrap();
         let out = assemble_startup_warnings(None, Some(&w), None, vec![clipboard_banner()]);
         assert_eq!(out.len(), 2);
         assert!(
@@ -1944,7 +1964,7 @@ mod tests {
     #[test]
     fn wezterm_banner_outranks_wayland_banner() {
         let wez = wezterm_kitty_keyboard_warning(&wezterm_ctx(), false, None).unwrap();
-        let way = diagnose_wayland_data_control(true, false, true).unwrap();
+        let way = diagnose_wayland_data_control(true, false, false).unwrap();
         let out = assemble_startup_warnings(Some(&wez), Some(&way), None, vec![clipboard_banner()]);
         assert_eq!(out.len(), 3);
         assert!(nth(&out, 0).message.contains("WezTerm"));
@@ -1977,7 +1997,7 @@ mod tests {
     #[test]
     fn actionable_startup_banners_keep_severity_order_and_share_doctor_cta() {
         let wezterm = wezterm_kitty_keyboard_warning(&wezterm_ctx(), false, None).unwrap();
-        let wayland = diagnose_wayland_data_control(true, false, true).unwrap();
+        let wayland = diagnose_wayland_data_control(true, false, false).unwrap();
         let sandbox = sandbox_profile_conflict_warning_from(vec!["dev".to_string()]).unwrap();
         let out = assemble_startup_warnings(
             Some(&wezterm),

@@ -344,14 +344,21 @@ fn restore_session_secrets(auth_file: &Path, map: &mut AuthStore) {
         }
         if auth.key.is_empty() {
             if let Ok(Some((username, secret))) = store.read(&session_key_url(account)) {
-                if username == "key" {
+                // Keyring reports "Bearer"; the file mirror keeps "key".
+                if (username == "key" || username == super::credentials_store::BEARER_USERNAME)
+                    && !secret.is_empty()
+                {
                     auth.key = secret;
                 }
             }
         }
         if auth.refresh_token.is_none() {
             if let Ok(Some((username, secret))) = store.read(&session_refresh_url(account)) {
-                if username == "refresh_token" {
+                // Keyring reports "Bearer"; the file mirror keeps "refresh_token".
+                // An empty secret is still Some("") after a successful store write.
+                if username == "refresh_token"
+                    || username == super::credentials_store::BEARER_USERNAME
+                {
                     auth.refresh_token = Some(secret);
                 }
             }

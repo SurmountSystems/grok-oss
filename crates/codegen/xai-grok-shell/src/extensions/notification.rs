@@ -1369,6 +1369,20 @@ pub fn is_nested_missing_auth_context(message: &str) -> bool {
     lower.contains("auth_kind=other")
 }
 
+/// Stamp the live parent bearer for a missing-auth 401.
+/// Nested inherit defects stamp. Parent empty-Bearer (`auth_kind=other` or no `auth_kind=bearer`) stamps.
+/// A parent actor whose 401 already has `auth_kind=bearer` does not stamp; that path keeps the WebLogin and OIDC hints.
+/// Pager `/login` skip still uses [`is_nested_missing_auth_context`] unchanged.
+pub fn should_stamp_parent_bearer_on_missing_auth(message: &str, is_subagent: bool) -> bool {
+    if !is_nested_missing_auth_context(message) {
+        return false;
+    }
+    if is_subagent {
+        return true;
+    }
+    !message.to_ascii_lowercase().contains("auth_kind=bearer")
+}
+
 /// Text fallback for 401s that arrive without a typed `error_type`.
 /// Messages lacking this exact literal rely on the typed `error_type == "auth"` alone.
 pub const UNAUTHORIZED_NEEDLE: &str = "Unauthorized (401)";
@@ -1605,6 +1619,39 @@ mod tests {
     fn http_401_needle_is_contained_in_unauthorized_needle() {
         // Pins the sub-needle doc claim.
         assert!(UNAUTHORIZED_NEEDLE.contains(HTTP_401_NEEDLE));
+    }
+
+    /// Parent `auth_kind=bearer` plus `reason=no auth context` does not stamp.
+    /// Nested with that same 401 stamps. Parent empty-Bearer (`auth_kind=other`) plus missing auth context stamps.
+    #[test]
+    fn parent_bearer_no_auth_context_does_not_stamp_and_nested_still_stamps() {
+        let parent_bearer_no_auth = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: {\"error\":\"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)\"}";
+        let live_nested_paste = "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        let parent_empty_bearer = "Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
+        assert!(
+            is_nested_missing_auth_context(parent_bearer_no_auth),
+            "pager /login skip still treats reason=no auth context as missing auth context"
+        );
+        assert!(
+            !should_stamp_parent_bearer_on_missing_auth(parent_bearer_no_auth, false),
+            "a parent actor whose 401 already has auth_kind=bearer must not stamp"
+        );
+        assert!(
+            should_stamp_parent_bearer_on_missing_auth(live_nested_paste, true),
+            "nested inherit defect with auth_kind=bearer plus reason=no auth context must stamp"
+        );
+        assert!(
+            should_stamp_parent_bearer_on_missing_auth(parent_empty_bearer, false),
+            "parent empty-Bearer auth_kind=other plus missing auth context must stamp"
+        );
+        assert!(
+            !should_stamp_parent_bearer_on_missing_auth("Unauthorized (401)", false),
+            "a 401 without missing auth context must not stamp"
+        );
+        assert!(
+            !should_stamp_parent_bearer_on_missing_auth("Unauthorized (401)", true),
+            "nested without missing auth context must not stamp through this gate"
+        );
     }
 
     #[test]

@@ -878,6 +878,31 @@ cargo test -p xai-grok-agent --lib -- \
   orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting
 ```
 
+#### Wayland doctor finding when wl-copy is present
+
+If `wl-copy` is already on PATH, `grok doctor` / `/doctor` must not emit
+`terminal.wayland-data-control`. There is no Issue and no install note.
+If `wl-copy` is missing on Wayland without data-control, doctor keeps a
+real Issue and a package install hint that names more than one distro
+family. Do not hardcode only apt. Data-control present stays quiet. Do
+not fit these tests to a finding that still warns when `wl-copy` is
+present.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `wayland_no_data_control_warns` | `diagnose_wayland_data_control(true, false, true)` returns None |
+| `xai-grok-pager` `wayland_no_data_control_missing_wl_copy_suggests_install` | Missing `wl-copy` is an Issue with a multi-distro install hint, not apt-only |
+| `xai-grok-pager` `wayland_with_data_control_is_quiet` | Data-control present stays quiet even when `wl-copy` is missing |
+| `xai-grok-pager` `standalone_wayland_with_wl_copy_is_not_an_issue` | Doctor report path does not emit `terminal.wayland-data-control` when `wl-copy` is on PATH |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  wayland_no_data_control_warns \
+  wayland_no_data_control_missing_wl_copy_suggests_install \
+  wayland_with_data_control_is_quiet \
+  standalone_wayland_with_wl_copy_is_not_an_issue
+```
+
 #### File-level infer-from-path verify
 
 After ACP `search_replace` / `apply_patch`, the edit tool formats and
