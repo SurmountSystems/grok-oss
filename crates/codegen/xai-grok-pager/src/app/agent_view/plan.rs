@@ -778,16 +778,23 @@ impl AgentView {
     /// would look like a review park that is not on screen. Idle leftover
     /// `plan.md` is view-only until `/view-plan` or a live present docks.
     /// Idle Revise/Clarify wait uses `PLAN_REVISING_STATUS` /
-    /// `PLAN_WAITING_UPDATED_STATUS`. Busy rewrite yields `None` so real turn
-    /// status can paint. Never returns `PLAN_IDLE_REVIEW_STATUS` while the
-    /// panel is shut or feedback is in flight.
+    /// `PLAN_WAITING_UPDATED_STATUS` only when there is no live present.
+    /// A parked `plan_approval_view` falls through to
+    /// `plan_approval_status_label` even if leftover in-flight is still Some.
+    /// Busy rewrite yields `None` so real turn status can paint. Never
+    /// returns `PLAN_IDLE_REVIEW_STATUS` while the panel is shut or feedback
+    /// is in flight.
     pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
         use crate::views::plan_approval_view::plan_approval_status_label;
         if let Some(in_flight) = self.plan_feedback_in_flight {
             if self.session.state.is_turn_running() {
                 return None;
             }
-            return Some(in_flight.status_label());
+            // Live `exit_plan_mode` present must not keep Revising plan...
+            // leftover in-flight is the rewrite window only with no present.
+            if self.plan_approval_view.is_none() {
+                return Some(in_flight.status_label());
+            }
         }
         if self.plan_decision_resolved || self.plan_approved_implement {
             return None;

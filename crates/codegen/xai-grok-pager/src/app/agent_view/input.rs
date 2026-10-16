@@ -682,6 +682,23 @@ impl AgentView {
             {
                 return self.handle_prompt_key(key, registry, false);
             }
+            // Live plan mode with the auto-opened pane is not Isolated Preview.
+            // Composer keys type in the titled planning composer. Bare Enter
+            // stays on the viewer so this path does not send or Approve.
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && self.plan_mode_pending.unwrap_or(self.plan_mode_active)
+                && self.plan_approval_view.is_none()
+                && self
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.list_state.input_mode().is_none())
+                && super::viewer::plan_preview_key_is_composer_text(key)
+                && !super::viewer::isolated_preview_search_owns_key(self, key)
+                && !(key.code == KeyCode::Enter && key.modifiers.is_empty())
+            {
+                return self.handle_prompt_key(key, registry, false);
+            }
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()

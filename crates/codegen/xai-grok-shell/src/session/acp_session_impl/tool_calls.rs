@@ -170,6 +170,8 @@ pub(super) enum PlanEditGate {
     Allow,
     /// Grok-toolset edit outside the plan file (plan-file-only rule).
     RejectNonPlanFile,
+    /// Nested explore or implement spawn while plan mode is writing or presenting.
+    RejectExploreOrImplementUntilApprove,
 }
 /// Compat-toolset `Delete` is not on the markdown carve-out: it maps to `AccessKind::Edit` and is plan-file-only (same as grok edits).
 /// `apply_patch` is `AccessKind::Tool` (its files are named inside the patch text) and is always rejected: it could touch anything.
@@ -185,11 +187,11 @@ fn access_kind_for_resolved_tool(tool_name: &str, tool_input: &ToolInput) -> Acc
     }
     AccessKind::from(tool_input)
 }
-/// Gate edit-class tool calls while plan mode is active.
+/// Gate edit-class tool calls while plan mode is writing or presenting.
 ///
 /// Plan mode is read-only **in every permission mode, including
 /// always-approve**: the permission manager's YOLO fast path deliberately
-/// knows nothing about plan mode, so this gate — not the permission system —
+/// knows nothing about plan mode, so this gate, not the permission system,
 /// is what enforces it. Two rules, matching the two toolsets' contracts:
 ///
 /// - **Compat-toolset `Write`/`StrReplace`**: any markdown
@@ -209,20 +211,25 @@ fn access_kind_for_resolved_tool(tool_name: &str, tool_input: &ToolInput) -> Acc
 ///
 /// `apply_patch` maps to a placeholder `AccessKind::Edit("apply_patch")` and
 /// therefore never matches the plan file: it is always rejected in plan mode
-/// (conservative — per-file targets are only known after patch parsing).
+/// (conservative; per-file targets are only known after patch parsing).
 /// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
 /// flow to the normal permission path, where yolo may still auto-approve
 /// them. `enter_plan_mode` / `exit_plan_mode` map to `AccessKind::Read` and
-/// are likewise never gated.
+/// are likewise never gated. Nested explore and implement `task` /
+/// `spawn_subagent` jobs are refused until Approve. Follow-up to a still
+/// running L2 is not a start. A `plan` type is not explore or implement.
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::plan_mode::PlanModeTracker,
     tool_input: &ToolInput,
     access_kind: &AccessKind,
 ) -> PlanEditGate {
-    if !tracker.is_active() {
+    if !tracker.is_writing_or_presenting() {
         return PlanEditGate::Allow;
     }
-    if matches!(tool_input, ToolInput::Task(_)) {
+    if let ToolInput::Task(task) = tool_input {
+        if task_starts_nested_explore_or_implement(task) {
+            return PlanEditGate::RejectExploreOrImplementUntilApprove;
+        }
         return PlanEditGate::Allow;
     }
     if matches!(tool_input, ToolInput::ApplyPatch(_)) {
@@ -234,6 +241,28 @@ pub(super) fn plan_mode_edit_gate(
         }
         _ => PlanEditGate::Allow,
     }
+}
+/// Explore, general-purpose (the default implement type), and implement.
+fn is_explore_or_implement_subagent_type(subagent_type: &str) -> bool {
+    matches!(
+        subagent_type.trim().to_ascii_lowercase().as_str(),
+        "explore" | "general-purpose" | "implement"
+    )
+}
+/// Follow-up to a still-running nested L2 is not starting a job.
+fn task_starts_nested_explore_or_implement(task: &xai_tool_types::TaskToolInput) -> bool {
+    if task
+        .follow_up
+        .as_deref()
+        .is_some_and(xai_tool_types::is_not_sentinel)
+    {
+        return false;
+    }
+    is_explore_or_implement_subagent_type(&task.subagent_type)
+}
+/// Model-facing refuse when nested explore or implement spawn is blocked.
+pub(super) fn plan_mode_explore_implement_spawn_rejected_message() -> String {
+    "Rejected: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.".to_string()
 }
 /// Typed view of an `exit_plan_mode` approval decision.
 /// The wire type (`ExitPlanModeExtResponse`) carries `outcome` as a string.
@@ -1886,9 +1915,12 @@ impl SessionActor {
                 source = "plan_mode",
                 wait_ms = 0_i64,
             );
-            let msg = match (&tool_input, &access_kind) {
-                (ToolInput::ApplyPatch(_), _) => self.plan_mode_edit_rejected_message(None),
-                (_, AccessKind::Edit(path)) => {
+            let msg = match (&plan_gate, &tool_input, &access_kind) {
+                (PlanEditGate::RejectExploreOrImplementUntilApprove, _, _) => {
+                    plan_mode_explore_implement_spawn_rejected_message()
+                }
+                (_, ToolInput::ApplyPatch(_), _) => self.plan_mode_edit_rejected_message(None),
+                (_, _, AccessKind::Edit(path)) => {
                     self.plan_mode_edit_rejected_message(Some(Path::new(path)))
                 }
                 _ => self.plan_mode_edit_rejected_message(None),
@@ -4117,31 +4149,97 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::RejectNonPlanFile
         );
     }
-    #[test]
-    fn task_not_gated_in_plan_mode() {
+    fn task(subagent_type: &str, follow_up: Option<&str>) -> ToolInput {
         use xai_tool_types::TaskToolInput;
-        let t = active_tracker();
+        ToolInput::Task(TaskToolInput {
+            prompt: "p".into(),
+            description: "d".into(),
+            subagent_type: subagent_type.into(),
+            subagent_type_specified: true,
+            run_in_background: false,
+            capability_mode: None,
+            isolation: None,
+            follow_up: follow_up.map(str::to_string),
+            write_paths: Vec::new(),
+            resume_from: None,
+            cwd: None,
+            model: None,
+            workspace: None,
+            task_id: None,
+        })
+    }
+    /// Operator contract: while `plan_mode_active` is writing or presenting,
+    /// nested explore and implement jobs are not started. Nested research and
+    /// implement start after Approve. The Hierarchical fast path stays.
+    #[test]
+    fn nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting()
+     {
+        const CONTRACT: &str = "While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+        use xai_grok_tools::implementations::BashToolInput;
+        let writing = active_tracker();
+        let mut presenting = active_tracker();
+        presenting.set_awaiting_plan_approval(true);
+        let mut presenting_only =
+            PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
+        presenting_only.set_awaiting_plan_approval(true);
+        for (label, tracker) in [
+            ("writing", &writing),
+            ("presenting", &presenting),
+            ("presenting-only", &presenting_only),
+        ] {
+            for kind in ["explore", "general-purpose", "implement"] {
+                assert_eq!(
+                    gate(tracker, &task(kind, None)),
+                    PlanEditGate::RejectExploreOrImplementUntilApprove,
+                    "{label}: {kind} must not start. {CONTRACT}"
+                );
+            }
+            assert_eq!(
+                gate(tracker, &task("plan", None)),
+                PlanEditGate::Allow,
+                "{label}: a plan type is not explore or implement"
+            );
+            assert_eq!(
+                gate(tracker, &task("explore", Some("running-l2-id"))),
+                PlanEditGate::Allow,
+                "{label}: follow-up to a still-running L2 is not starting a job"
+            );
+            assert_eq!(
+                gate(
+                    tracker,
+                    &ToolInput::Bash(BashToolInput {
+                        command: "echo hi".into(),
+                        timeout: None,
+                        description: "already-named command".into(),
+                        is_background: false,
+                        block_until_ms: None,
+                    })
+                ),
+                PlanEditGate::Allow,
+                "{label}: Hierarchical fast path already-named command stays allowed"
+            );
+        }
+        let after_approve = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
         assert_eq!(
-            gate(
-                &t,
-                &ToolInput::Task(TaskToolInput {
-                    prompt: "p".into(),
-                    description: "d".into(),
-                    subagent_type: "general-purpose".into(),
-                    subagent_type_specified: false,
-                    run_in_background: false,
-                    capability_mode: None,
-                    isolation: None,
-                    follow_up: None,
-                    write_paths: Vec::new(),
-                    resume_from: None,
-                    cwd: None,
-                    model: None,
-                    workspace: None,
-                    task_id: None,
-                })
+            gate(&after_approve, &task("explore", None)),
+            PlanEditGate::Allow,
+            "nested research and implement start after Approve. {CONTRACT}"
+        );
+        assert_eq!(
+            gate(&after_approve, &task("general-purpose", None)),
+            PlanEditGate::Allow,
+            "nested research and implement start after Approve. {CONTRACT}"
+        );
+        let refused = super::plan_mode_explore_implement_spawn_rejected_message();
+        assert!(
+            refused.contains(
+                "while plan_mode_active is writing or presenting, nested explore and implement jobs are not started"
             ),
-            PlanEditGate::Allow
+            "refuse text must quote the Operator contract. Got: {refused}"
+        );
+        assert!(
+            refused.contains("Nested research and implement start after Approve"),
+            "refuse text must say nested research and implement start after Approve. Got: {refused}"
         );
     }
     /// Non-edit tools are never gated; they flow to the normal permission path (where yolo may auto-approve them).

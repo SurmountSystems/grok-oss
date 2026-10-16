@@ -531,6 +531,7 @@ Present is not Approve. Empty Enter never Approves.
 | `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Comment CTA then notes then Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_send_prompt_is_human_turn_not_only_plan_comment` | Isolated Preview SendPrompt is a Human turn. Empty Enter never Approves. |
+| `operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit` | Operator text `Hello? Are you stuck?` during plan present is a soft interject or a present-time comment. It does not freeze the UI, does not paint `Plan: Exit` into an empty transcript, and does not leave `Run Plan: Exit 0.0s` on an empty screen. Empty Enter never Approves and never Exits. |
 | `isolated_preview_human_text_enter_appends_wal` | Isolated Preview Human send appends prompt WAL. |
 | `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot` | After Revise rewrites session plan.md, Isolated Preview paints the current file, not the first-draft snapshot. Opening the panel re-reads the file. |
 | `after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present` | After Plan Exit, idle CTAs must not stay armed. Chrome must not keep Plan ready. Side panel open. |
@@ -582,6 +583,7 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment \
   isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible \
   isolated_preview_send_prompt_is_human_turn_not_only_plan_comment \
+  operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit \
   isolated_preview_human_text_enter_appends_wal \
   isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
   after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
@@ -838,6 +840,32 @@ cargo test -p xai-grok-shell --lib -- \
 cargo test -p xai-grok-pager --lib -- \
   apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks \
   apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run
+```
+
+#### Nested explore and implement start after Approve
+
+While `plan_mode_active` is writing or presenting, nested explore and
+implement jobs are not started. Nested research and implement start after
+Approve. The advertised `spawn_subagent` description says that. Follow-up
+to a still-running L2 is not a start. A `plan` type is not explore or
+implement. Do not fit those tests to a description that still tells the
+model to launch explore during `/plan`.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-shell` `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting` | Gate refuses explore, general-purpose, and implement while writing or presenting |
+| `xai-grok-shell` `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve` | Live `prepare_tool_call` refuses an explore spawn until Approve |
+| `xai-tool-types` `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting` | Advertised `spawn_subagent` / `task` description quotes the refuse |
+| `xai-grok-agent` `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting` | Orchestrator prompt quotes the refuse even when it still names explore after Approve |
+
+```bash
+cargo test -p xai-grok-shell --lib -- \
+  nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting \
+  plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve
+cargo test -p xai-tool-types --lib -- \
+  build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting
+cargo test -p xai-grok-agent --lib -- \
+  orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting
 ```
 
 #### File-level infer-from-path verify

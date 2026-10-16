@@ -182,6 +182,11 @@ impl PlanModeTracker {
     pub fn is_active(&self) -> bool {
         self.state == PlanModeState::Active
     }
+    /// Writing (`Active`) or presenting (`awaiting_plan_approval`). Nested
+    /// explore and implement jobs must not start in this window.
+    pub(crate) fn is_writing_or_presenting(&self) -> bool {
+        self.is_active() || self.awaiting_plan_approval
+    }
     /// The prompt-mode mirrors follow the tracker, never the other way round.
     /// A restored tracker is the only thing that knows a resumed session is still planning.
     /// Seeding a mirror `Agent` under a restored `Active` makes the first prompt resolve `Agent` and reconcile the plan mode away.
@@ -396,7 +401,9 @@ Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
 to present it for approval.
 
-When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.
+
+While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed."
 }
 /// Static string for alternating turns (when `reminder_count` is odd) to save tokens.
 /// No MiniJinja placeholders: plan path and tool names are only in the full reminder.
@@ -406,7 +413,9 @@ Plan mode is still active.
 
 The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
 
-Do not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
+Do not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused.
+
+While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve."
 }
 /// Returns a MiniJinja template string injected when entering plan mode for the second or later time in the same session.
 /// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
@@ -424,7 +433,9 @@ Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
 to present it for approval.
 
-When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.
+
+While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed."
 }
 /// One complete sentence naming the full path plan mode blocked.
 /// The sentence does not shorten the path and does not say the tool
@@ -1191,6 +1202,68 @@ mod tests {
         assert!(
             skill.contains("The Operator's words are the spec"),
             "the plan skill must still say the Operator's words are the spec"
+        );
+    }
+    /// Operator contract: while `plan_mode_active` is writing or presenting,
+    /// nested explore and implement jobs are not started. Nested research and
+    /// implement start after Approve. Plan instructions must say that so L1
+    /// does not spawn explores during `/plan`.
+    #[test]
+    fn plan_instructions_do_not_spawn_explore_until_approve() {
+        const CONTRACT: &str = "While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+        let renderer = test_renderer();
+        let full = render(
+            &renderer,
+            plan_mode_reminder_full_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let sparse = render(
+            &renderer,
+            plan_mode_reminder_sparse_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let reentry = render(
+            &renderer,
+            plan_mode_reentry_reminder_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        let entered = xai_grok_tools::types::output::ToolOutput::EnterPlanMode(
+            xai_grok_tools::types::output::EnterPlanModeOutput::Entered {
+                message: "entered-msg-token".into(),
+                plan_file_path: "/tmp/session/plan.md".into(),
+                tool_hints: xai_grok_tools::types::output::EnterPlanModeToolHints::default(),
+                plan_file_seed: xai_grok_tools::types::output::PlanFileSeedStatus::Empty,
+            },
+        )
+        .to_prompt_format();
+        for (which, loaded) in [
+            ("plan-mode reminder", full.as_str()),
+            ("plan-mode sparse reminder", sparse.as_str()),
+            ("plan-mode reentry reminder", reentry.as_str()),
+            ("bundled plan skill", skill.as_str()),
+            ("enter_plan_mode prompt", entered.as_str()),
+        ] {
+            assert!(
+                loaded.contains(CONTRACT),
+                "{which} must quote the Operator contract: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Got: {loaded}"
+            );
+        }
+        assert!(
+            skill.contains(
+                "Write `plan.md` from Operator evidence, present, wait for Approve, then spawn"
+            ),
+            "the plan skill must tell L1 to write, present, and wait for Approve before spawn. Got: {skill}"
+        );
+        assert!(
+            !skill.contains("Use `explore` subagents"),
+            "the plan skill must not tell L1 to spawn explores during /plan. Got: {skill}"
         );
     }
     /// The first instruction after the title line names Read this first.

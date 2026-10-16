@@ -2669,6 +2669,7 @@ impl AgentView {
         } else {
             self.hit_todo_close.clear();
             self.hit_todo_clear_done.clear();
+            self.todo.clear_row_hit_rects();
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
@@ -7146,6 +7147,215 @@ mod plan_approval_draw_contract_tests {
         );
     }
 
+    /// While plan mode is open, typed text paints at the planning caret
+    /// inside the titled `planning` composer. The transcript does not show
+    /// that draft as an Operator message while the composer is empty.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn planning_composer_typed_text_stays_at_the_caret_and_is_not_an_operator_transcript_row() {
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crate::scrollback::block::RenderBlock;
+        use crate::theme::{Theme, cache};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-live-caret-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let body = theme.text_primary;
+        let rail = theme.accent_user;
+        let owed = "While plan mode is open, typed text paints at the planning caret inside the titled `planning` composer. The transcript does not show that draft as an Operator message while the composer is empty.";
+        let typed = "the planning input is still in the wrong place:";
+
+        fn interior(prompt: Rect) -> Rect {
+            Rect {
+                x: prompt.x.saturating_add(1),
+                y: prompt.y.saturating_add(1),
+                width: prompt.width.saturating_sub(2),
+                height: prompt.height.saturating_sub(2),
+            }
+        }
+
+        fn covers(rect: Rect, x: u16, y: u16) -> bool {
+            x >= rect.x
+                && y >= rect.y
+                && x < rect.x.saturating_add(rect.width)
+                && y < rect.y.saturating_add(rect.height)
+        }
+
+        fn find_run(buf: &Buffer, area: Rect, needle: &str) -> Option<(u16, u16)> {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return None;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched {
+                        return Some((xs[i], y));
+                    }
+                }
+            }
+            None
+        }
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let _ = draw_buf(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "owed: {owed}. live titled planning composer, not Isolated Preview Prompt-focus"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            }),
+            "owed: {owed}. the soft plan pane must open the way live plan mode opens it"
+        );
+
+        let registry = ActionRegistry::non_vscode_for_test();
+        for ch in typed.chars() {
+            let outcome = agent.handle_input(
+                &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &registry,
+            );
+            assert!(
+                !matches!(
+                    outcome,
+                    InputOutcome::Action(Action::SendPrompt(_))
+                        | InputOutcome::Action(Action::SendPromptNow { .. })
+                ),
+                "owed: {owed}. character insert must not send. got {outcome:?}"
+            );
+        }
+        assert!(
+            agent.prompt.text().contains(typed),
+            "owed: {owed}. agent.prompt must hold the draft; composer is not empty. got {:?}",
+            agent.prompt.text()
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: {owed}. planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("prompt stroke");
+        assert_eq!(
+            top_left.symbol(),
+            "\u{250c}",
+            "owed: {owed}. the titled planning composer keeps a white ┌ frame"
+        );
+        assert_eq!(
+            top_left.fg, theme.prompt_border_active,
+            "owed: {owed}. the titled planning composer stroke stays prompt_border_active"
+        );
+        let top_rule = Rect {
+            x: prompt.x,
+            y: prompt.y,
+            width: prompt.width,
+            height: 1,
+        };
+        assert!(
+            find_run(&buf, top_rule, "planning").is_some(),
+            "owed: {owed}. the top rule caption is planning:\n{text}"
+        );
+
+        let box_in = interior(prompt);
+        let Some((x, y)) = find_run(&buf, box_in, typed) else {
+            panic!(
+                "owed: {owed}. typed glyphs are missing from the planning caret inside the prompt interior:\n{text}"
+            );
+        };
+        for (i, ch) in typed.chars().enumerate() {
+            let cell = buf
+                .cell((x.saturating_add(i as u16), y))
+                .unwrap_or_else(|| panic!("owed: {owed}. missing {ch} at the caret"));
+            assert_eq!(
+                cell.symbol(),
+                ch.to_string(),
+                "owed: {owed}. glyph {ch} is missing from the planning caret"
+            );
+            assert_eq!(
+                cell.fg, body,
+                "owed: {owed}. glyph {ch} at the caret is text_primary, got {:?}",
+                cell.fg
+            );
+        }
+
+        let draft_on_scrollback = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::UserPrompt(block)) if block.text.contains(typed)
+            )
+        });
+        assert!(
+            !draft_on_scrollback,
+            "owed: {owed}. scrollback has no UserPrompt whose text is that draft"
+        );
+
+        let screen = Rect::new(0, 0, 100, 40);
+        let chars: Vec<char> = typed.chars().collect();
+        let n = chars.len();
+        for row in screen.y..screen.y.saturating_add(screen.height) {
+            let xs: Vec<u16> = (screen.x..screen.x.saturating_add(screen.width)).collect();
+            if xs.len() < n {
+                continue;
+            }
+            for i in 0..=xs.len() - n {
+                let matched = (0..n).all(|k| {
+                    buf.cell((xs[i + k], row))
+                        .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                });
+                if !matched {
+                    continue;
+                }
+                let start_x = xs[i];
+                if covers(prompt, start_x, row) {
+                    continue;
+                }
+                let rail_left = buf
+                    .cell((start_x.saturating_sub(1), row))
+                    .is_some_and(|cell| cell.symbol() == "\u{2503}" && cell.fg == rail);
+                assert!(
+                    !rail_left,
+                    "owed: {owed}. the glyph run is not on a cell whose left-rail neighbor is accent_user ┃ outside the planning composer ({start_x}, {row}):\n{text}"
+                );
+            }
+        }
+    }
+
     /// While voice is idle no indicator row exists, so the overlay keeps
     /// reaching the prompt as before.
     #[test]
@@ -10177,8 +10387,8 @@ mod plan_turn_row_revising_copy_tests {
     use crate::app::bundle::BundleState;
     use crate::scrollback::render::ScratchBuffer;
     use crate::views::plan_approval_view::{
-        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_WAITING_UPDATED_STATUS,
-        PlanApprovalViewState,
+        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_REWRITE_WAIT_HEADING,
+        PLAN_WAITING_UPDATED_STATUS, PlanApprovalViewState, PlanFeedbackInFlight,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -10569,6 +10779,72 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains(PLAN_REVISING_STATUS),
             "fresh present is not Revising:\n{text}"
+        );
+    }
+
+    /// First `exit_plan_mode` present is review. `"Revising plan..."` is gone
+    /// after that present. Idle after the first present must not keep
+    /// Revising for minutes.
+    #[test]
+    fn first_exit_plan_mode_present_does_not_keep_revising_plan_after_the_turn_goes_idle() {
+        let mut agent = make_agent();
+        agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "present must clear leftover Revising"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "a present must not set plan_decision_resolved"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "first present must open the review park side panel, not Approve"
+        );
+        assert!(
+            !text.contains(PLAN_REVISING_STATUS),
+            "Idle after first present must not keep Revising plan...:\n{text}"
+        );
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "first present must say Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains(PLAN_REWRITE_WAIT_HEADING),
+            "first present must not keep rewriting-wait heading:\n{text}"
+        );
+        assert!(
+            text.contains("approve | comment | revise | exit"),
+            "idle CTAs stay review, not Approve-as-done:\n{text}"
+        );
+
+        // Paint-precedence: live present plus Idle must not paint Revising
+        // even if loading_replay skipped the clear.
+        agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+        agent.session.state = AgentState::Idle;
+        let leftover = draw_screen(&mut agent);
+        assert!(
+            !leftover.contains(PLAN_REVISING_STATUS),
+            "live plan_approval_view plus Idle must not paint Revising plan... even if leftover in-flight is still Some:\n{leftover}"
+        );
+        assert!(
+            leftover.contains("Plan ready. Side panel open"),
+            "paint-precedence leftover Revising must still be Plan ready. Side panel open:\n{leftover}"
+        );
+        assert!(
+            leftover.contains("approve | comment | revise | exit"),
+            "paint-precedence leftover Revising must keep idle review CTAs:\n{leftover}"
+        );
+        assert!(
+            !leftover.contains(PLAN_REWRITE_WAIT_HEADING),
+            "paint-precedence leftover Revising must not keep rewriting-wait heading:\n{leftover}"
         );
     }
 }

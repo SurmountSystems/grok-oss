@@ -2221,3 +2221,102 @@ fn x_on_workflow_row_stops_the_run() {
             if command == "/workflow stop learn-traces-2"
     ));
 }
+
+fn present_new_exit_plan_mode(agent: &mut AgentView, body: &str) {
+    agent.clear_plan_loop_flags_for_new_present();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        session_id: "test-session".into(),
+        tool_call_id: "call-1".into(),
+        plan_content: Some(body.into()),
+    };
+    agent.plan_approval_view = Some(
+        crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            agent.prompt.stash(),
+            tx,
+        ),
+    );
+    agent.plan_mode_active = true;
+    agent.plan_mode_pending = None;
+    agent.show_plan_preview_if_available();
+}
+
+fn insert_running_typed_subagent(
+    agent: &mut AgentView,
+    child_session_id: &str,
+    subagent_type: &str,
+    description: &str,
+) {
+    let mut info = super::test_fixtures::running_subagent_info(child_session_id);
+    info.subagent_type = std::sync::Arc::from(subagent_type);
+    info.description = std::sync::Arc::from(description);
+    agent
+        .subagent_sessions
+        .insert(child_session_id.to_string(), info);
+    agent.insert_test_child(
+        child_session_id.to_string(),
+        Box::new(super::test_fixtures::make_agent()),
+    );
+}
+
+fn dock_row_mentions(agent: &AgentView, child_id: &str, description: &str) -> bool {
+    agent
+        .dock_subagent_rows()
+        .iter()
+        .any(|(id, _, row)| id == child_id || row.description.contains(description))
+}
+
+/// While the plan panel is open for present, the Subagents list does not show
+/// in-flight explore jobs that the Operator must wait on. Nested research and
+/// implement start after Approve.
+#[test]
+fn plan_panel_open_for_present_does_not_show_in_flight_explore_jobs_on_the_subagents_list() {
+    const EXPLORE_ID: &str = "explore-child";
+    const EXPLORE_DESC: &str = "Find API endpoints";
+    const PLAN_ID: &str = "plan-child";
+    const PLAN_DESC: &str = "Draft the plan outline";
+    const PRESENT_CONTRACT: &str = "While the plan panel is open for present, the Subagents list does not show in-flight explore jobs that the Operator must wait on. Nested research and implement start after Approve.";
+
+    let mut agent = make_agent();
+    insert_running_typed_subagent(&mut agent, EXPLORE_ID, "explore", EXPLORE_DESC);
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+    assert!(
+        agent.is_plan_viewer(),
+        "present must dock PlanPreview so is_plan_viewer is true"
+    );
+    assert!(
+        agent.should_arm_plan_decision_chrome(),
+        "present must leave Approve unresolved so should_arm_plan_decision_chrome is true"
+    );
+    assert!(
+        !dock_row_mentions(&agent, EXPLORE_ID, EXPLORE_DESC),
+        "{PRESENT_CONTRACT}"
+    );
+
+    agent.plan_approval_view = None;
+    agent.plan_decision_resolved = true;
+    agent.leave_parked_isolated_preview();
+    assert!(
+        !agent.is_plan_viewer() || !agent.should_arm_plan_decision_chrome(),
+        "closed present is not waiting on Approve"
+    );
+    assert!(
+        dock_row_mentions(&agent, EXPLORE_ID, EXPLORE_DESC),
+        "a running explore row lists again after present is closed"
+    );
+
+    let mut plan_only = make_agent();
+    insert_running_typed_subagent(&mut plan_only, PLAN_ID, "plan", PLAN_DESC);
+    plan_only.dock_shown = true;
+    plan_only.dock_on = true;
+    present_new_exit_plan_mode(&mut plan_only, "# Review me\n\nBody\n");
+    assert!(plan_only.is_plan_viewer());
+    assert!(plan_only.should_arm_plan_decision_chrome());
+    assert!(
+        dock_row_mentions(&plan_only, PLAN_ID, PLAN_DESC),
+        "a running plan-type L2 still lists while present is open"
+    );
+}

@@ -20,6 +20,8 @@ async fn build_gate_actor() -> SessionActor {
         // when plan mode would have stripped it from the advertised list —
         // the hard reject path must still fire.
         ToolConfig::for_tool::<AskUserQuestionTool>(),
+        ToolConfig::from(&xai_grok_tools::implementations::grok_build::TaskTool)
+            .with_name("spawn_subagent"),
     ])
     .await;
     tokio::task::spawn_local(async move {
@@ -68,6 +70,53 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
         })
         .await;
 }
+fn spawn_explore_call(id: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "spawn_subagent",
+            serde_json::json!({
+                "prompt": "map the paint",
+                "description": "explore paint",
+                "subagent_type": "explore",
+            })
+            .to_string(),
+        ),
+    }
+}
+
+/// Operator contract: while plan_mode_active is writing or presenting,
+/// nested explore and implement jobs are not started. The live prepare
+/// loop must refuse an explore spawn so the job does not start.
+#[tokio::test(flavor = "current_thread")]
+async fn plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve() {
+    const CONTRACT: &str = "While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = build_gate_actor().await;
+            activate_plan_mode(&actor);
+            let result = prepare(&actor, spawn_explore_call("call_explore_gate")).await;
+            assert!(
+                matches!(result, Err(ToolLoop::Continue)),
+                "gate must reject explore spawn with Continue (tool not executed); got {result:?}. {CONTRACT}"
+            );
+            let text = tool_result_text(&actor, "call_explore_gate").await;
+            assert!(
+                text.contains(
+                    "while plan_mode_active is writing or presenting, nested explore and implement jobs are not started"
+                ),
+                "refuse text must quote the Operator contract. Got: {text}"
+            );
+            assert!(
+                text.contains("Nested research and implement start after Approve"),
+                "refuse text must say nested research and implement start after Approve. Got: {text}"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn plan_mode_allows_plan_file_edit() {
     let local = tokio::task::LocalSet::new();

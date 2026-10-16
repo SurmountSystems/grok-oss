@@ -364,6 +364,12 @@ impl AgentView {
                         .completed_subagent_is_hidden(info.child_session_id.as_ref())
             })
             .filter(|info| crate::app::subagent::is_l2_list_row(info, &child_ids))
+            .filter(|info| {
+                !(self.is_plan_viewer()
+                    && self.should_arm_plan_decision_chrome()
+                    && info.is_running()
+                    && info.subagent_type.trim().eq_ignore_ascii_case("explore"))
+            })
             .collect();
         if show_done {
             infos.sort_by_key(|info| (!info.is_running(), info.attempt.started_at));

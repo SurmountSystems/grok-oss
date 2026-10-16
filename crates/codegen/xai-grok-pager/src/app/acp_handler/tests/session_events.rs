@@ -803,6 +803,27 @@
         assert_eq!(count_reauth_required(&scrollback), 0);
     }
 
+    /// Nested give-up after recovery claimed success must not paint `/login` while the parent talks.
+    #[test]
+    fn apply_retry_state_nested_auth_give_up_does_not_paint_login() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "nested_auth".into(),
+                message: "Auth recovery succeeded but 4 authenticated inference requests were still rejected (401); giving up after 3 retries. Turn ran 36m57s wall-clock.".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            0,
+            "nested give-up after recovery must not tell the Operator to /login while the parent turn still works"
+        );
+    }
+
     #[test]
     fn apply_retry_state_auth_kind_other_does_not_paint_login() {
         let mut session = make_session(Some("s1"));
