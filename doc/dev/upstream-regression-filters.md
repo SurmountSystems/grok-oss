@@ -820,9 +820,10 @@ cargo test -p xai-grok-shell --lib -- \
 
 Nested spawn must inherit the live parent OIDC session. A missing or
 `"default"` ACP method plus a live Oidc credential becomes `oidc`. Nested
-401 `auth_kind=other` `reason=no auth context` while the parent session
-still talks must not paint `/login`. Real `auth_kind=bearer` expiry still
-paints once. Do not fit those tests to the old nag.
+401 `reason=no auth context` while the parent session still talks must
+not paint `/login`, including the live wire `auth_kind=bearer`
+`upstream=PermissionDenied`. Real `auth_kind=bearer` expiry without that
+reason still paints once. Do not fit those tests to the old nag.
 
 | path::test | Contract |
 |------------|----------|
@@ -830,6 +831,8 @@ paints once. Do not fit those tests to the old nag.
 | `xai-grok-shell` `inherited_session_auth_method_id_keeps_explicit_api_key` | Explicit `xai.api_key` stays that method |
 | `xai-grok-shell` `unspecified_method_with_live_oidc_session_is_session_based` | Missing ACP method plus live Oidc is session-based |
 | `xai-grok-pager` `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks` | Nested `no auth context` does not paint `/login` |
+| `xai-grok-pager` `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks` | Live `auth_kind=bearer` `PermissionDenied` `no auth context` does not paint `/login` |
+| `xai-grok-login` `inherited_session_prepare_for_send_does_not_rotate_when_parent_jwt_is_present` | Nested prepare_for_send does not rotate the parent CLI session when the live parent JWT is already the fallback |
 | `xai-grok-pager` `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run` | Real bearer expiry paints `/login` once |
 | `xai-grok-login` `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token` | Nested POST uses the live parent JWT even when AuthManager has a recovered token |
 | `xai-grok-shell` `nested_request_bearer_falls_back_to_the_inherited_parent_key` | Inherited parent JWT wins over AuthManager recovered `current_wire_valid` |

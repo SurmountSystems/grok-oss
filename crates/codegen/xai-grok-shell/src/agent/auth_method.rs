@@ -300,16 +300,15 @@ pub(crate) fn is_session_based_method_or_inherited_live_session(
 }
 
 /// Bearer for a nested request.
-/// Chat-state credentials are often empty while the parent sampler stamps `AuthManager`'s wire-valid token.
-/// An empty chat key must not win over that token, or the nested request goes out with `X-XAI-Token-Auth` and no `Authorization`.
-/// The inherited parent session key (the JWT the live parent sampler is talking with) wins over a recovered AuthManager token. Recovery can mint a different token that cli-chat-proxy still rejects.
-/// AuthManager wire-valid is last, when chat and inherited are empty.
+/// The inherited parent session key (the JWT the live parent sampler is talking with) wins.
+/// A stale chat-state key must not win over that JWT. Recovery can mint a different AuthManager token that cli-chat-proxy still rejects.
+/// AuthManager wire-valid is last, when inherited and chat are empty.
 pub(crate) fn nested_request_bearer(
     chat_api_key: Option<String>,
     wire_valid_key: Option<String>,
     inherited_key: Option<String>,
 ) -> Option<String> {
-    [chat_api_key, inherited_key, wire_valid_key]
+    [inherited_key, chat_api_key, wire_valid_key]
         .into_iter()
         .find_map(|key| key.filter(|s| !s.is_empty()))
 }
@@ -604,6 +603,16 @@ mod tests {
             .as_deref(),
             Some("inherited-jwt"),
             "the live parent JWT must win over an AuthManager recovered token"
+        );
+        assert_eq!(
+            nested_request_bearer(
+                Some("stale-chat-jwt".into()),
+                Some("recovered-am-token".into()),
+                Some("inherited-jwt".into())
+            )
+            .as_deref(),
+            Some("inherited-jwt"),
+            "the live parent JWT must win over a stale chat-state key"
         );
     }
 

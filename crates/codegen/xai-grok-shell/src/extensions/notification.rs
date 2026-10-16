@@ -1355,14 +1355,18 @@ pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
     error_type == Some("auth") || message.contains(UNAUTHORIZED_NEEDLE)
 }
 
-/// Nested HTTP that reached cli-chat-proxy with the CLI identity header and no Authorization Bearer.
-/// Live wire: `auth_kind=other` … `reason=no auth context`. A parent JWT that actually expired is `auth_kind=bearer`.
+/// Nested HTTP that reached cli-chat-proxy with the CLI identity header and a token the proxy has no session for.
+/// Live wire (Operator 2026-10-16): `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`.
+/// The older empty-Bearer wire is `auth_kind=other`. A parent JWT that actually expired is `auth_kind=bearer` without `reason=no auth context`.
 pub fn is_nested_missing_auth_context(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
+    if lower.contains("no auth context") {
+        return true;
+    }
     if lower.contains("auth_kind=bearer") {
         return false;
     }
-    lower.contains("no auth context") || lower.contains("auth_kind=other")
+    lower.contains("auth_kind=other")
 }
 
 /// Text fallback for 401s that arrive without a typed `error_type`.
