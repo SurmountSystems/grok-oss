@@ -10,7 +10,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, AuthMode, AuthState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
-use acp;
+use agent_client_protocol as acp;
 use xai_grok_config::Capability;
 
 /// `/logout`: ask the shell to clear auth, then return to the login screen.
