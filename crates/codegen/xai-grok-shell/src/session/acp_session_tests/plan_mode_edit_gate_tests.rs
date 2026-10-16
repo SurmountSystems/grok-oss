@@ -20,8 +20,39 @@ async fn build_gate_actor() -> SessionActor {
         // when plan mode would have stripped it from the advertised list —
         // the hard reject path must still fire.
         ToolConfig::for_tool::<AskUserQuestionTool>(),
-        ToolConfig::from(&xai_grok_tools::implementations::grok_build::TaskTool)
-            .with_name("spawn_subagent"),
+    ])
+    .await;
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = gateway_rx.recv().await {
+            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
+                let _ = args.response_tx.send(Ok(()));
+            }
+        }
+    });
+    actor
+}
+/// TaskTool requires get_task_output and kill_task in the same toolset. Keep
+/// that trio off the shared actor so grok-edit gate tests still construct.
+async fn build_gate_actor_with_task() -> SessionActor {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionTool;
+    use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
+    use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
+    use xai_grok_tools::implementations::grok_build::{KillTaskTool, TaskOutputTool, TaskTool};
+    use xai_grok_tools::registry::types::ToolConfig;
+    let (gateway_tx, mut gateway_rx) =
+        tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+    let (persistence_tx, _persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+        ToolConfig::from_id("GrokBuild:read_file"),
+        ToolConfig::from_id("GrokBuild:search_replace"),
+        ToolConfig::for_tool::<EnterPlanModeTool>(),
+        ToolConfig::for_tool::<ExitPlanModeTool>(),
+        ToolConfig::for_tool::<AskUserQuestionTool>(),
+        ToolConfig::from(&TaskTool).with_name("spawn_subagent"),
+        ToolConfig::for_tool::<TaskOutputTool>(),
+        ToolConfig::for_tool::<KillTaskTool>(),
     ])
     .await;
     tokio::task::spawn_local(async move {
@@ -95,7 +126,7 @@ async fn plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let actor = build_gate_actor().await;
+            let actor = build_gate_actor_with_task().await;
             activate_plan_mode(&actor);
             let result = prepare(&actor, spawn_explore_call("call_explore_gate")).await;
             assert!(

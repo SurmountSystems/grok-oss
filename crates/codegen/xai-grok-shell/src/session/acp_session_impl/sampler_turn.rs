@@ -743,7 +743,19 @@ impl SessionActor {
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // inherit stamp. Do not seed an expired AuthManager token: the resolver would
         // send it, and a fail-closed 401 would look authenticated.
-        let mut api_key = if use_bearer_resolver {
+        // Nested turns keep the JWT the live sampler is already talking with.
+        // AuthManager recovery can mint a different token that cli-chat-proxy still rejects.
+        let nested_live = if self.startup_hints.is_subagent {
+            self.sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+        let mut api_key = if let Some(live) = nested_live {
+            Some(live)
+        } else if use_bearer_resolver {
             // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
             // A session from another authority must not seed the default headers either.
             self.auth_manager
@@ -2332,6 +2344,15 @@ impl SessionActor {
     /// Session-token path is best-effort: on success, update credentials and return.
     /// On failure, do not fall through to the JWT/config.toml branch when the session gate was active; that path is for BYOK JWTs only.
     pub(crate) async fn refresh_token_if_expired(&self) {
+        if self.startup_hints.is_subagent
+            && let Some(live) = self.sampler_handle.current_api_key().await
+        {
+            let creds = self.chat_state_handle.get_credentials().await;
+            if creds.api_key.as_deref() != Some(live.as_str()) {
+                self.set_chat_api_key(live).await;
+            }
+            return;
+        }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             // Gate on the stable classifier, not `creds.auth_type`; this also heals a transient `ApiKey` flip by writing the refreshed token into `creds.api_key` below

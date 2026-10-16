@@ -1093,7 +1093,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "Plan mode is still active.\n\nThe first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\nDo not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
+            "Plan mode is still active.\n\nThe first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\nDo not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused.\n\nWhile `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve."
         );
         assert!(!text.contains("/tmp/plan.md"));
         assert!(!text.contains("exit_plan_mode"));
