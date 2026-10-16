@@ -29,7 +29,8 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
     DefaultProductSkillFile {
         relative_path: "skills/polish/SKILL.md",
         content: include_str!("../skills/polish/SKILL.md"),
-        previous_checksums: &[],
+        // Tree body before L2s-do-not-work-by-themselves.
+        previous_checksums: &["fcdd85033ff8e097a2fcf250c8c773eb0d9d2761d2c31f9f6ed729d3da716aba"],
     },
     DefaultProductSkillFile {
         relative_path: "skills/polish/references/incident-classes.md",
@@ -39,8 +40,12 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
     DefaultProductSkillFile {
         relative_path: "skills/subagent/SKILL.md",
         content: include_str!("../skills/subagent/SKILL.md"),
-        // Tree body before output_tokens. Same bytes as the installed cache.
-        previous_checksums: &["ff6b45403003ad75e67c770ab1240a6c61f14001392e57da220499a9de5129c8"],
+        // Tree body before output_tokens, then the later tree body before
+        // L2s-do-not-work-by-themselves.
+        previous_checksums: &[
+            "ff6b45403003ad75e67c770ab1240a6c61f14001392e57da220499a9de5129c8",
+            "5bdda92e159fd04cb92ec0477ac35d242c2362e647e8eef36ed251ad81a74f21",
+        ],
     },
     DefaultProductSkillFile {
         relative_path: "skills/what/SKILL.md",
@@ -411,7 +416,7 @@ the user asked for a project override.
 
 | When | Owns | L1 keeps |
 |------|------|----------|
-| `/subagent` job | One L2 coordinator. That L2 spawns an L3 for the work. | Goal, board id, report path, wait |
+| `/subagent` job | One L2 coordinator. L3 only if that L2 decides the problem is actually hard | Goal, board id, report path, wait |
 | Additive disjoint job | Another L2 (do not kill the first) | Both report paths |
 | Same-file race | Queue the new writer | First L2 stays live |
 | Skill-body file writes | L3 (L2 must spawn) | Path, wait, read the report |
@@ -421,8 +426,8 @@ the user asked for a project override.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status. Board upsert. Spawn one L2. Wait or other tracks. Read the short report. Hierarchical fast path only for named one-liners that are not this job. | Do this job. Diagnose. Implement. Multi-file reads. CI logs |
-| **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. L2s are not to do any kind of work by themselves. Throw context away after. | Grep, diagnose, edit, implement, or review. Spawn L4. Show raw edits as if L1 |
-| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate. Spawn L4 |
+| **L2 coordinator** | Do the job, or parallelize. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Write the report. Throw context away after. | Spawn L4. Show raw edits as if L1 |
+| **L3 specialist** | Tools and work when spawned. Same agency as L2 except no spawn. | Spawn L4 |
 
 **Hierarchical fast path** (L1 only): one-command host question; a
 single known-path read already named; read and quote the asked-for

@@ -110,7 +110,10 @@ async fn span_and_product_row_agree_and_product_gate_is_independent() {
 
     let silent = projected(SILENT, -1);
     xai_grok_telemetry::session_ctx::log_event_now(silent).await;
-    xai_grok_telemetry::otel_layer::flush_otel();
+    // Current-thread runtime hosts the mock OTLP server; force_flush must not park that worker.
+    tokio::task::spawn_blocking(xai_grok_telemetry::otel_layer::flush_otel)
+        .await
+        .expect("flush otel");
     traces
         .recorder()
         .wait_for_spans(Duration::from_secs(5), |spans| {
@@ -125,7 +128,9 @@ async fn span_and_product_row_agree_and_product_gate_is_independent() {
     init_product(&product, TelemetryMode::Enabled);
     let event = projected(ENABLED, -1);
     xai_grok_telemetry::session_ctx::log_event_now(event).await;
-    xai_grok_telemetry::otel_layer::shutdown_otel();
+    tokio::task::spawn_blocking(xai_grok_telemetry::otel_layer::shutdown_otel)
+        .await
+        .expect("shutdown otel");
     let spans = traces
         .recorder()
         .wait_for_spans(Duration::from_secs(5), |spans| {

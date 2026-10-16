@@ -152,13 +152,29 @@ impl From<&ConversationRequest> for rs::CreateResponse {
     }
 }
 
+fn synthesized_reasoning_id(index: usize) -> String {
+    format!("rs_synth_{index}")
+}
+
+fn reasoning_id_is_missing(id: Option<&String>) -> bool {
+    id.is_none_or(|id| id.is_empty())
+}
+
 /// Reasoning items stay top-level siblings rather than folding into the assistant, so the input replays the model's original order.
+/// A missing `id` becomes `rs_synth_{index}` here so `CreateResponse::from` matches the sampler's post-serialize patch.
 pub(super) fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let items: Vec<rs::InputItem> = req
+    let mut items: Vec<rs::InputItem> = req
         .items
         .iter()
         .flat_map(conversation_item_to_input_items)
         .collect();
+    for (index, item) in items.iter_mut().enumerate() {
+        if let rs::InputItem::Item(rs::Item::Reasoning(r)) = item
+            && reasoning_id_is_missing(r.id.as_ref())
+        {
+            r.id = Some(synthesized_reasoning_id(index));
+        }
+    }
     rs::InputParam::Items(items)
 }
 
@@ -181,7 +197,7 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
         if !id_is_string && let Some(obj) = item.as_object_mut() {
             obj.insert(
                 "id".into(),
-                serde_json::Value::String(format!("rs_synth_{index}")),
+                serde_json::Value::String(synthesized_reasoning_id(index)),
             );
         }
         let Some(content) = item.get_mut("content").and_then(|c| c.as_array_mut()) else {
