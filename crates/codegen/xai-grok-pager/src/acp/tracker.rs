@@ -1807,17 +1807,24 @@ impl AcpUpdateTracker {
         if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
             let mut last_id = None;
             for seg in &segments {
+                let painted = operator_visible_prompt_text(seg);
+                if painted.is_empty() {
+                    continue;
+                }
                 last_id = Some(
-                    if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), seg) {
-                        let id = scrollback.push_block(RenderBlock::agent_message(seg.clone()));
+                    if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), &painted) {
+                        let id = scrollback.push_block(RenderBlock::agent_message(painted));
                         scrollback.set_entry_running(id, true);
                         id
                     } else {
                         scrollback.push_block(RenderBlock::UserPrompt(
-                            crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
+                            crate::scrollback::blocks::UserPromptBlock::new(painted),
                         ))
                     },
                 );
+            }
+            if last_id.is_none() {
+                return false;
             }
             if let (Some(pi), Some(id)) = (prompt_index, last_id)
                 && let Some(entry) = scrollback.get_by_id_mut(id)
@@ -1895,6 +1902,14 @@ impl AcpUpdateTracker {
                 crate::scrollback::blocks::UserPromptBlock::new(text)
             }
         };
+        if contains_model_facing_wrap(&block.text) {
+            let visible = operator_visible_prompt_text(&block.text);
+            if visible.is_empty() {
+                return false;
+            }
+            block.text = visible;
+            block.skill_token_ranges.clear();
+        }
         block.prompt_index = prompt_index;
         let entry_id = scrollback.push_block(RenderBlock::UserPrompt(block));
         let ts_ms = meta.turn_start_ms.or(meta.agent_timestamp_ms);
@@ -1967,6 +1982,154 @@ fn agent_chunk_repeats_visible_agent_words(
         return true;
     }
     false
+}
+
+const MODEL_FACING_WRAP_MARKERS: &[&str] = &[
+    "<always_applied_workspace_rules",
+    "<image_files>",
+    "<user_query>",
+    "## Available Skills",
+    "<skill_information>",
+    "<rules>",
+];
+
+/// True when wire or display text is the model envelope, not the Operator bubble.
+fn contains_model_facing_wrap(text: &str) -> bool {
+    text.contains("always_applied_workspace_rules")
+        || text.contains("<user_query>")
+        || text.contains("<image_files>")
+        || text.contains("## Available Skills")
+}
+
+fn first_wrap_marker_index(text: &str) -> Option<usize> {
+    MODEL_FACING_WRAP_MARKERS
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+}
+
+fn collect_image_chips(text: &str) -> Vec<String> {
+    let mut chips = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[Image #") {
+        let from = &rest[start..];
+        let Some(end) = from.find(']') else {
+            break;
+        };
+        let chip = &from[..=end];
+        let num = &chip["[Image #".len()..chip.len().saturating_sub(1)];
+        if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+            let chip = chip.to_string();
+            if !chips.contains(&chip) {
+                chips.push(chip);
+            }
+        }
+        rest = &from[end + 1..];
+    }
+    chips
+}
+
+/// Inner text of the last `<user_query>` that is not nested in workspace rules.
+fn last_operator_user_query(text: &str) -> Option<String> {
+    const OPEN: &str = "<user_query>";
+    const CLOSE: &str = "</user_query>";
+    let mut best = None;
+    let mut search = 0;
+    while let Some(rel) = text.get(search..).and_then(|rest| rest.find(OPEN)) {
+        let open_at = search + rel;
+        let inner_at = open_at + OPEN.len();
+        let Some(end_rel) = text.get(inner_at..).and_then(|rest| rest.find(CLOSE)) else {
+            break;
+        };
+        let inner = text.get(inner_at..inner_at + end_rel).unwrap_or("").trim();
+        let before = text.get(..open_at).unwrap_or("");
+        let rules_open = before.matches("<always_applied_workspace_rules").count();
+        let rules_close = before.matches("</always_applied_workspace_rules>").count();
+        if rules_open <= rules_close && !inner.is_empty() {
+            best = Some(inner.to_string());
+        }
+        search = inner_at + end_rel + CLOSE.len();
+    }
+    best
+}
+
+fn strip_tag_block(s: &mut String, open_prefix: &str, close: &str) {
+    while let Some(start) = s.find(open_prefix) {
+        let after_open = s[start..]
+            .find('>')
+            .map(|i| start + i + 1)
+            .unwrap_or(start + open_prefix.len());
+        if let Some(rel) = s.get(after_open..).and_then(|rest| rest.find(close)) {
+            let end = after_open + rel + close.len();
+            s.replace_range(start..end, "\n");
+        } else {
+            s.replace_range(start.., "");
+            break;
+        }
+    }
+}
+
+fn strip_available_skills_section(s: &mut String) {
+    const HEADING: &str = "## Available Skills";
+    while let Some(start) = s.find(HEADING) {
+        let after = start + HEADING.len();
+        let rest = s.get(after..).unwrap_or("");
+        let rel = ["\n<", "\n## "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        s.replace_range(start..after + rel, "\n");
+    }
+}
+
+fn strip_model_facing_wrap(text: &str) -> String {
+    let mut s = text.to_string();
+    strip_tag_block(
+        &mut s,
+        "<always_applied_workspace_rules",
+        "</always_applied_workspace_rules>",
+    );
+    strip_tag_block(&mut s, "<image_files>", "</image_files>");
+    strip_tag_block(&mut s, "<user_query>", "</user_query>");
+    strip_tag_block(&mut s, "<skill_information>", "</skill_information>");
+    strip_tag_block(&mut s, "<rules>", "</rules>");
+    strip_tag_block(&mut s, "<user_info>", "</user_info>");
+    strip_available_skills_section(&mut s);
+    s.trim().to_string()
+}
+
+/// Typed Operator prompt plus `[Image #N]`. Drops rules, skill catalogs, and query/image envelopes.
+fn operator_visible_prompt_text(text: &str) -> String {
+    if !contains_model_facing_wrap(text) {
+        return text.to_string();
+    }
+    let chips = collect_image_chips(text);
+    let mut visible = if let Some(query) = last_operator_user_query(text) {
+        query
+    } else if let Some(idx) = first_wrap_marker_index(text) {
+        let prefix = text[..idx].trim();
+        if prefix.is_empty() {
+            strip_model_facing_wrap(text)
+        } else {
+            prefix.to_string()
+        }
+    } else {
+        strip_model_facing_wrap(text)
+    };
+    if contains_model_facing_wrap(&visible) {
+        visible = strip_model_facing_wrap(&visible);
+    }
+    visible = visible.trim().to_string();
+    for chip in chips {
+        if !visible.contains(&chip) {
+            if !visible.is_empty() {
+                visible.push(' ');
+            }
+            visible.push_str(&chip);
+        }
+    }
+    visible
 }
 
 /// Per-prompt display strings from combine ([`user_prompt_meta::COMBINED_DISPLAY_TEXTS`]).

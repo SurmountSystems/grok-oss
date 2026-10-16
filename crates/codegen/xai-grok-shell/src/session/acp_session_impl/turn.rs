@@ -1328,8 +1328,25 @@ impl SessionActor {
                 PromptOrigin::ParentAgentMessage { .. } | PromptOrigin::PlanResume
             );
             if !skip_duplicate_user_query {
+                let mut display_stamped = false;
                 for block in prompt_blocks.iter() {
-                    let chunk = acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone());
+                    let mut block = block.clone();
+                    // Operator bubble paints content-block displayText. Do not echo assembled wrap.
+                    if !agent_spoken
+                        && !display_stamped
+                        && !text.trim().is_empty()
+                        && let acp::ContentBlock::Text(tb) = &mut block
+                    {
+                        let map = tb.meta.get_or_insert_with(acp::Meta::new);
+                        if !map.contains_key("displayText") {
+                            map.insert(
+                                "displayText".into(),
+                                serde_json::Value::String(text.clone()),
+                            );
+                        }
+                        display_stamped = true;
+                    }
+                    let chunk = acp::ContentChunk::new(block).meta(user_chunk_meta.clone());
                     // Agent words, plan reminders, and the implement paraphrase
                     // are not an Operator message.
                     let update = if agent_spoken {

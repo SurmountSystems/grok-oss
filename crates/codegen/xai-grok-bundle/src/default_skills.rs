@@ -411,7 +411,7 @@ the user asked for a project override.
 
 | When | Owns | L1 keeps |
 |------|------|----------|
-| `/subagent` job | One L2 coordinator. L3 only if that L2 decides the problem is actually hard | Goal, board id, report path, wait |
+| `/subagent` job | One L2 coordinator. That L2 spawns an L3 for the work. | Goal, board id, report path, wait |
 | Additive disjoint job | Another L2 (do not kill the first) | Both report paths |
 | Same-file race | Queue the new writer | First L2 stays live |
 | Skill-body file writes | L3 (L2 must spawn) | Path, wait, read the report |
@@ -421,8 +421,8 @@ the user asked for a project override.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status. Board upsert. Spawn one L2. Wait or other tracks. Read the short report. Hierarchical fast path only for named one-liners that are not this job. | Do this job. Diagnose. Implement. Multi-file reads. CI logs |
-| **L2 coordinator** | Do the job, or parallelize. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Write the report. Throw context away after. | Spawn L4. Show raw edits as if L1 |
-| **L3 specialist** | Tools and work when spawned. Same agency as L2 except no spawn. | Spawn L4 |
+| **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. L2s are not to do any kind of work by themselves. Throw context away after. | Grep, diagnose, edit, implement, or review. Spawn L4. Show raw edits as if L1 |
+| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate. Spawn L4 |
 
 **Hierarchical fast path** (L1 only): one-command host question; a
 single known-path read already named; read and quote the asked-for

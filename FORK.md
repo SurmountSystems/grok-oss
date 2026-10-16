@@ -2030,6 +2030,22 @@ composer named Human box.
   Do not claim repo `.agents/reports/` is the live home. Fold helper
   `first_report_path` matches any `.agents/reports/` substring (home or
   leftover repo path). That is implementation, not a land class.
+- [x] **L2s do not work by themselves (pinned 2026-10-15).** The
+  Operator said L2s are not to do any kind of work by themselves. The
+  main session is L1. L1 spawns an L2 for implement, diagnosis, and
+  multi-file work. L1 does not do that work. Hierarchical fast path
+  stays on L1. L1 must not edit product code. An L2 coordinates only:
+  spawn L3, wait, read the L3 short report, write one L2 report, and
+  board upsert. An L2 does not grep, diagnose, edit, implement, or
+  review product or docs itself. An L3 implements, researches, or
+  reviews. An L3 does not coordinate and does not spawn. There is no
+  L4. Do not keep "easy work stays on the L2" as the spawn rule. Do
+  not keep "an L2 spawns an L3 only when that slice is hard" as the
+  spawn rule. The 2026-10-10 pin stays as evidence: an L2 that
+  compacts before 10 minutes did the edit itself, and the file edit
+  is an L3. Dual-pin: [`AGENTS.md`](AGENTS.md) and host
+  `~/.grok/AGENTS.md` heading *L2s do not work by themselves (pinned
+  2026-10-15)*.
 - [x] **Kill a think-only L3 after about 15 minutes (pinned 2026-09-09).**
   L2 must kill an L3 that is still on turn 1 with no useful file or
   test progress after about 15 minutes of think-only work or stalled
@@ -2760,6 +2776,8 @@ postpaid Billing Credits.
 - The Operator's message body stays white. On DOGE that is `text_primary`, not `accent_user`. The left accent rail (`┃`) is Operator green, `accent_user` (`Rgb(0, 255, 0)` on DOGE). That rail stays present, including when the prompt is collapsed, because the body is still on screen. The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. Do not paint the caret magenta. Do not change that blink rule. Named test: `operator_message_text_stays_white_and_the_left_accent_is_green`. `doge_accent_user_is_pure_green_for_human` stays the palette proof that `accent_user` is pure green. `user_prompt_block_accent_is_static_human_rail` and `user_prompt_block_accent_is_green_rail_under_doge_default` stay.
 - Chain of thought body stays white (`text_primary`). Its left accent, when the thought is open, is cyan, `accent_system` (`Rgb(0, 255, 255)` on DOGE). `accent_thinking` stays magenta (`Rgb(255, 0, 255)`) and is not that left accent. No new theme key was added. Named test: `chain_of_thought_text_stays_white_and_the_left_accent_is_cyan`.
 - The Agent's response body stays white (`text_primary`). Its left accent, while the turn is active, is magenta, `accent_running` (`Rgb(255, 0, 255)` on DOGE). A finished turn does not keep a permanent rail. Named test: `agent_response_text_stays_white_and_the_left_accent_is_magenta`.
+
+**Operator transcript wrap (pinned 2026-10-15).** These sentences say what the Operator bubble must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The Operator transcript must show only the typed Operator text plus the image chip (`[Image #1]`). It must not paint `always_applied_workspace_rules`, skill catalogs, or other model-facing wrap. Named test: `operator_message_does_not_paint_injected_workspace_rules`.
 
 **Use limits click and header figure (pinned 2026-10-07).** These sentences say what the screen must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct.
 

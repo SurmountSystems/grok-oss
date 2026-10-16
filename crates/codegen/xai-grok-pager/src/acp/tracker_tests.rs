@@ -4773,6 +4773,77 @@ fn replay_without_display_text_uses_legacy_detection() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
+/// The Operator transcript must show only the typed Operator text plus the image chip (`[Image #1]`).
+/// It must not paint `always_applied_workspace_rules`, skill catalogs, or other model-facing wrap.
+#[test]
+fn operator_message_does_not_paint_injected_workspace_rules() {
+    let typed = "Can you figure out why this is happening? [Image #1]";
+    let owed = "The Operator transcript must show only the typed Operator text plus the image chip (`[Image #1]`). It must not paint `always_applied_workspace_rules`, skill catalogs, or other model-facing wrap.";
+    let wrap = format!(
+        "{typed}\n\n\
+         <always_applied_workspace_rules>\n\
+         # AGENTS.md\n\
+         Never paint workspace rules in the Operator transcript.\n\
+         </always_applied_workspace_rules>\n\n\
+         ## Available Skills\n\
+         - demo-skill: listed for the model, not the Operator bubble\n\n\
+         <image_files>\n\
+         /tmp/assets/image-6983f7d0.jpg\n\
+         </image_files>\n\n\
+         <user_query>\n\
+         {typed}\n\
+         </user_query>"
+    );
+    let wrap_without_query_tags = format!(
+        "{typed}\n\n\
+         <always_applied_workspace_rules>\n\
+         # AGENTS.md\n\
+         body\n\
+         </always_applied_workspace_rules>\n\n\
+         ## Available Skills\n\
+         - demo-skill: catalog"
+    );
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    let assert_typed_plus_chip = |sb: &ScrollbackState| {
+        assert_eq!(sb.len(), 1, "{owed}");
+        match &sb.get(0).unwrap().block {
+            RenderBlock::UserPrompt(block) => {
+                assert_eq!(block.text, typed, "{owed}");
+                assert!(
+                    !block.text.contains("always_applied_workspace_rules"),
+                    "{owed}"
+                );
+                assert!(!block.text.contains("Available Skills"), "{owed}");
+                assert!(!block.text.contains("<user_query>"), "{owed}");
+                assert!(block.text.contains("[Image #1]"), "{owed}");
+            }
+            other => panic!("expected UserPrompt, got {other:?}"),
+        }
+    };
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(
+        !tracker.skip_next_user_echo,
+        "replay with skip unset paints this chunk"
+    );
+    tracker.handle_update(user_message(&wrap), &replay, &mut sb);
+    assert_typed_plus_chip(&sb);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        user_message_with_display_text(&wrap, typed, false),
+        &replay,
+        &mut sb,
+    );
+    assert_typed_plus_chip(&sb);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(user_message(&wrap_without_query_tags), &replay, &mut sb);
+    assert_typed_plus_chip(&sb);
+}
 fn user_message_with_chunk_meta(text: &str, chunk_meta: acp::Meta) -> acp::SessionUpdate {
     acp::SessionUpdate::UserMessageChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(

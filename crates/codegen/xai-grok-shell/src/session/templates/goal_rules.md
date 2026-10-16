@@ -1,10 +1,10 @@
 A goal has been set: {OBJECTIVE}
 
-L1 coordinates. The L2 does the work. An L3 runs tools when the slice is hard. L1 must spawn L2. That L2 MUST spawn L3 for tools. L3 does the tools. Do not spawn L4. Do not fill this parent with tool work. Deliver everything the user asked for: no follow-up questions, no manual steps left for the user.
+L1 coordinates. L1 must spawn L2. That L2 MUST spawn L3 for tools. L2 coordinates only and does not do the work itself. L3 does the tools. Do not spawn L4. Do not fill this parent with tool work. Deliver everything the user asked for: no follow-up questions, no manual steps left for the user.
 
 {PLAN_BLOCK}{BLOCK_RECAP}{DISCIPLINE_BLOCK}TRACKING: use {TODO_TOOL} to break the objective into concrete steps; keep ≥1 `in_progress` with a present-tense `activeForm`, and mark each done immediately (do not batch).
 
-WORKING: the L2 does the work and L3 tests it on the real user path. Where a behavior cannot be driven end-to-end here, cover it with a static / structural check (assert the artifact exists in the source) plus a unit test of the real shipped function — not a flaky end-to-end run.
+WORKING: L3 does the work and tests it on the real user path. L2 coordinates only. Where a behavior cannot be driven end-to-end here, cover it with a static / structural check (assert the artifact exists in the source) plus a unit test of the real shipped function — not a flaky end-to-end run.
 
 NO TEST THEATER: a passing test must prove the SHIPPED code works on the real path. Never hard-code the expected value, start past the thing under test, re-implement the code under test inside the test, or report success without driving the real entry point. A test that passes while the program is broken is worse than none.
 

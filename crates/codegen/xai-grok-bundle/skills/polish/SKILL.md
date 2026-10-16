@@ -49,9 +49,10 @@ user asked for a project override.
    unless this process was launched as `grok` from downloads. Probe
    this turn if stating which binary this window is. Do not reuse a
    leftover Grok Build version as grok-oss.
-4. **Fan out.** For each disjoint slice, L1 spawns L2. L2 spawns L3
-   only if the problem is actually hard. Easy work can stay on L2. No
-   L4. The product tool is `spawn_subagent`.
+4. **Fan out.** For each disjoint slice, L1 spawns L2. That L2
+   coordinates only and spawns an L3 for the work. L2s are not to do
+   any kind of work by themselves. No L4. The product tool is
+   `spawn_subagent`.
 5. **Fix.** Behavior changes: red/green TDD (observed fail, then the
    same test green). After a structured `.rs` edit, file-level
    infer-from-path verify. Do not prove product work with crate-wide
@@ -73,10 +74,10 @@ user asked for a project override.
 
 | When | Owns | L1 keeps |
 |------|------|----------|
-| Inventory too large for L1 | L2 (spawn L3 only if the inventory is actually hard) | Goal, remaining-report path, wait |
-| Disjoint polish slice (bug or feat) | L2 implementer; L3 only if hard | Slice goal, report path, board id |
+| Inventory too large for L1 | L2 coordinator (spawn L3 for the inventory) | Goal, remaining-report path, wait |
+| Disjoint polish slice (bug or feat) | L2 coordinator; L3 implements | Slice goal, report path, board id |
 | Skill-body file writes | L3 (L2 must spawn) | Path, wait, read the report |
-| Review after a slice | One L2 reviewer; L3 only if hard | One reviewer unless the user asked for more |
+| Review after a slice | One L2 reviewer coordinator; L3 reviews | One reviewer unless the user asked for more |
 
 Prompts are self-contained. Each L2 writes a short report under
 `~/.agents/reports/` on this machine. L1 reads that file only.
@@ -86,8 +87,8 @@ Prompts are self-contained. Each L2 writes a short report under
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Throw context away after the report. | Spawn L4. Show raw edits as if L1. |
-| **L3 specialist** | Tools and work when spawned. Same agency as L2 except no spawn. | Spawn L4 |
+| **L2 subagent** | Coordinates only. Spawns L3 for the work. Throw context away after the report. | Grep, diagnose, edit, implement, or review. Spawn L4. Show raw edits as if L1. |
+| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate. Spawn L4 |
 
 **Hierarchical fast path** (L1 only): one-command host question; a
 single known-path read already named; read and quote the asked-for
