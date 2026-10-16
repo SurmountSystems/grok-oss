@@ -795,13 +795,16 @@ fn session_bearer_resolver(
     ctx: &SubagentSpawnContext,
     byok: crate::agent::auth_method::ModelByok,
     base_url: &str,
+    ranked_key: Option<String>,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     use crate::agent::auth_method;
     let manager_auth = ctx
         .auth_manager
         .current_wire_valid()
         .or_else(|| ctx.auth_manager.current_or_expired());
-    let fallback = ctx.inherited_fallback_key();
+    let fallback = ranked_key
+        .filter(|key| !key.is_empty())
+        .or_else(|| ctx.inherited_fallback_key());
     let gated = auth_method::session_token_auth_gate(
         auth_method::is_session_based_method_or_inherited_live_session(
             Some(&ctx.auth_method_id),
@@ -831,11 +834,12 @@ fn inherited_bearer_resolver(
     ctx: &SubagentSpawnContext,
     model: &str,
     base_url: &str,
+    ranked_key: Option<String>,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     let byok = crate::agent::config::resolve_model_auth_facts_and_provider(model)
         .0
         .byok;
-    session_bearer_resolver(ctx, byok, base_url)
+    session_bearer_resolver(ctx, byok, base_url, ranked_key)
 }
 fn parent_catalog_model_id(ctx: &SubagentSpawnContext, routing_model: &str) -> acp::ModelId {
     let models = ctx.models_manager.models();
@@ -863,7 +867,10 @@ async fn read_parent_sampling_config(
                 .unwrap_or_default();
             let inherited_base_url = cfg.base_url.clone();
             let api_key = crate::agent::auth_method::nested_request_bearer(
-                creds.api_key,
+                cfg.api_key
+                    .clone()
+                    .filter(|key| !key.is_empty())
+                    .or(creds.api_key),
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
                 ctx.inherited_fallback_key(),
             );
@@ -913,7 +920,12 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url),
+                bearer_resolver: inherited_bearer_resolver(
+                    ctx,
+                    &cfg.model,
+                    &inherited_base_url,
+                    api_key.clone(),
+                ),
                 supports_backend_search,
                 compactions_remaining: ctx
                     .models_manager
@@ -968,7 +980,12 @@ async fn read_parent_sampling_config(
         ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
         ctx.inherited_fallback_key(),
     );
-    fallback.bearer_resolver = inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url);
+    fallback.bearer_resolver = inherited_bearer_resolver(
+        ctx,
+        &fallback.model,
+        &fallback.base_url,
+        fallback.api_key.clone(),
+    );
     let catalog_model_id = parent_catalog_model_id(ctx, &fallback.model);
     fallback.supports_backend_search = ctx
         .models_manager
@@ -1113,6 +1130,7 @@ fn resolve_model_override_to_config(
                 crate::agent::auth_method::ModelByok::NotByok
             },
             &config.base_url,
+            config.api_key.clone(),
         )
     } else {
         None

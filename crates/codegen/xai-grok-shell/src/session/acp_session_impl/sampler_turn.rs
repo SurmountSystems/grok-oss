@@ -860,6 +860,7 @@ impl SessionActor {
             session_bearer_resolver: None,
         };
         if use_bearer_resolver
+            && !self.startup_hints.is_subagent
             && let Some(am) = self.auth_manager.as_ref()
             && am.grok_com_config().auto_use_included_limits
             && am.grok_com_config().preferred_method
@@ -1713,9 +1714,10 @@ impl SessionActor {
                 } else {
                     None
                 };
-                self.prepare_sampler_for_turn().await;
                 if let Some(key) = nested_live.filter(|key| !key.is_empty()) {
                     self.set_chat_api_key(key).await;
+                    self.prepare_sampler_for_turn().await;
+                } else {
                     self.prepare_sampler_for_turn().await;
                 }
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
