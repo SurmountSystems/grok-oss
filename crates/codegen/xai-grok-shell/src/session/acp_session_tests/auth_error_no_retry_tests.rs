@@ -2062,6 +2062,76 @@ async fn missing_auth_context_401_does_not_resubmit_the_same_key() {
         .await;
 }
 
+/// After auth recovery claims success, a nested turn resumes with the live sampler JWT
+/// the parent is talking with. It does not give up after 3 retries while that JWT is available.
+#[tokio::test(flavor = "current_thread")]
+async fn nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let live = xai_grok_sampler::SamplerConfig {
+                api_key: Some("live-parent-jwt".into()),
+                base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                model: "test".into(),
+                context_window: 256_000,
+                ..Default::default()
+            };
+            let handle = xai_grok_sampler::SamplerActor::spawn(
+                live,
+                xai_grok_sampler::RetryPolicy::default(),
+                event_tx,
+            );
+            let (dir, am) = auth_manager_with_refresher(Arc::new(AlwaysSucceedRefresher {
+                called: Arc::new(AtomicBool::new(false)),
+            }));
+            let _dir = dir;
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "recovered-wrong".into(),
+            )
+            .await;
+            let mut hints = actor.startup_hints.clone();
+            hints.is_subagent = true;
+            actor.startup_hints = hints;
+            actor.sampler_handle = handle;
+            let actor = Arc::new(actor);
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Sent),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        credential: xai_grok_sampling_types::SentCredential::Sent,
+                    })
+                ),
+                "a nested 401 after recovery must resume, not give up"
+            );
+            let creds = actor.chat_state_handle.get_credentials().await;
+            assert_eq!(
+                creds.api_key.as_deref(),
+                Some("live-parent-jwt"),
+                "nested resume must use the JWT the live sampler is talking with"
+            );
+            assert_ne!(
+                creds.api_key.as_deref(),
+                Some("refreshed-test-token"),
+                "AuthManager recovery must not replace the live parent JWT"
+            );
+        })
+        .await;
+}
+
 /// Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty,
 /// copy the JWT the live sampler still talks with.
 #[tokio::test(flavor = "current_thread")]

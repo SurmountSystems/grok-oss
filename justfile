@@ -2816,9 +2816,10 @@ install:
     # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
     # this workspace. Unset encoded rustflags and pin mold only.
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
-    echo "==> cargo build --release -p xai-grok-pager-bin (no wild linker)"
+    echo "==> nice -n 19 cargo build --release -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
       RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}" \
+      nice -n 19 \
       cargo build --release -p xai-grok-pager-bin --locked \
       --config 'build.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]' \
       --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]' \

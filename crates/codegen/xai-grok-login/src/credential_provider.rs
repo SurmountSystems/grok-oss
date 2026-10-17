@@ -136,14 +136,27 @@ impl std::fmt::Debug for InheritedSessionBearerResolver {
 
 impl xai_grok_sampler::BearerResolver for InheritedSessionBearerResolver {
     fn current_bearer(&self) -> Option<String> {
-        self.inner
-            .current_bearer()
-            .or_else(|| self.fallback.clone())
+        // Nested POST stamps this resolver, not SamplingConfig.api_key.
+        // AuthManager recovery can mint a different token that cli-chat-proxy still rejects
+        // while the parent sampler JWT still talks. That fallback must win on the wire.
+        self.fallback
+            .clone()
+            .or_else(|| self.inner.current_bearer())
     }
 
     fn prepare_for_send(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        // A nested refresh rotates the CLI session. Then current_bearer still
+        // sends the spawn-time fallback, and cli-chat-proxy returns
+        // auth_kind=bearer … reason=no auth context while the parent talks.
+        if self
+            .fallback
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            return Box::pin(async {});
+        }
         self.inner.prepare_for_send()
     }
 }
@@ -784,6 +797,57 @@ mod tests {
         let mgr = make_manager(&dir, None);
         let resolver = InheritedSessionBearerResolver::shared(mgr, Some("buffered-oidc".into()));
         assert_eq!(resolver.current_bearer().as_deref(), Some("buffered-oidc"));
+    }
+
+    /// Operator contract: after auth recovery claims success, a nested turn
+    /// resumes with the live sampler JWT the parent is talking with. A
+    /// wire-valid AuthManager recovered token must not win on the nested wire.
+    #[test]
+    fn inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token() {
+        use xai_grok_sampler::BearerResolver;
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("recovered-am-token", ChronoDuration::hours(1))),
+        );
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("live-parent-jwt".into()));
+        assert_eq!(
+            resolver.current_bearer().as_deref(),
+            Some("live-parent-jwt"),
+            "the live parent JWT must ride the nested wire even when AuthManager has a different wire-valid recovered token"
+        );
+    }
+
+    /// Nested prepare_for_send must not refresh when the parent JWT is already the fallback.
+    /// That refresh rotates the CLI session, then current_bearer still sends the spawn-time JWT.
+    #[tokio::test]
+    async fn inherited_session_prepare_for_send_does_not_rotate_when_parent_jwt_is_present() {
+        use xai_grok_sampler::BearerResolver;
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(GrokAuth {
+                auth_mode: crate::AuthMode::Oidc,
+                refresh_token: Some("rt".into()),
+                ..make_auth("hard-expired", ChronoDuration::hours(-1))
+            }),
+        );
+        let refresher = Arc::new(MintingRefresher(std::sync::atomic::AtomicU32::new(0)));
+        mgr.set_refresher(refresher.clone());
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("live-parent-jwt".into()));
+
+        resolver.prepare_for_send().await;
+        assert_eq!(
+            refresher.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nested send must not rotate the parent CLI session when the live parent JWT is already the fallback"
+        );
+        assert_eq!(
+            resolver.current_bearer().as_deref(),
+            Some("live-parent-jwt")
+        );
     }
 
     /// The wait is bounded by the cached bearer's remaining life, so a slow mint cannot outlive the token it was protecting.

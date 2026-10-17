@@ -531,6 +531,7 @@ Present is not Approve. Empty Enter never Approves.
 | `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Comment CTA then notes then Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_send_prompt_is_human_turn_not_only_plan_comment` | Isolated Preview SendPrompt is a Human turn. Empty Enter never Approves. |
+| `operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit` | Operator text `Hello? Are you stuck?` during plan present is a soft interject or a present-time comment. It does not freeze the UI, does not paint `Plan: Exit` into an empty transcript, and does not leave `Run Plan: Exit 0.0s` on an empty screen. Empty Enter never Approves and never Exits. |
 | `isolated_preview_human_text_enter_appends_wal` | Isolated Preview Human send appends prompt WAL. |
 | `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot` | After Revise rewrites session plan.md, Isolated Preview paints the current file, not the first-draft snapshot. Opening the panel re-reads the file. |
 | `after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present` | After Plan Exit, idle CTAs must not stay armed. Chrome must not keep Plan ready. Side panel open. |
@@ -582,6 +583,7 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment \
   isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible \
   isolated_preview_send_prompt_is_human_turn_not_only_plan_comment \
+  operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit \
   isolated_preview_human_text_enter_appends_wal \
   isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
   after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
@@ -818,9 +820,10 @@ cargo test -p xai-grok-shell --lib -- \
 
 Nested spawn must inherit the live parent OIDC session. A missing or
 `"default"` ACP method plus a live Oidc credential becomes `oidc`. Nested
-401 `auth_kind=other` `reason=no auth context` while the parent session
-still talks must not paint `/login`. Real `auth_kind=bearer` expiry still
-paints once. Do not fit those tests to the old nag.
+401 `reason=no auth context` while the parent session still talks must
+not paint `/login`, including the live wire `auth_kind=bearer`
+`upstream=PermissionDenied`. Real `auth_kind=bearer` expiry without that
+reason still paints once. Do not fit those tests to the old nag.
 
 | path::test | Contract |
 |------------|----------|
@@ -828,7 +831,12 @@ paints once. Do not fit those tests to the old nag.
 | `xai-grok-shell` `inherited_session_auth_method_id_keeps_explicit_api_key` | Explicit `xai.api_key` stays that method |
 | `xai-grok-shell` `unspecified_method_with_live_oidc_session_is_session_based` | Missing ACP method plus live Oidc is session-based |
 | `xai-grok-pager` `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks` | Nested `no auth context` does not paint `/login` |
+| `xai-grok-pager` `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks` | Live `auth_kind=bearer` `PermissionDenied` `no auth context` does not paint `/login` |
+| `xai-grok-login` `inherited_session_prepare_for_send_does_not_rotate_when_parent_jwt_is_present` | Nested prepare_for_send does not rotate the parent CLI session when the live parent JWT is already the fallback |
 | `xai-grok-pager` `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run` | Real bearer expiry paints `/login` once |
+| `xai-grok-login` `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token` | Nested POST uses the live parent JWT even when AuthManager has a recovered token |
+| `xai-grok-shell` `nested_request_bearer_falls_back_to_the_inherited_parent_key` | Inherited parent JWT wins over AuthManager recovered `current_wire_valid` |
+| `xai-grok-pager` `auth_complete_resumes_nested_l2s_that_401d` | After `/login`, a 401'd nested L2 is un-finished and its last prompt is resent; the parent session stays bound |
 
 ```bash
 cargo test -p xai-grok-shell --lib -- \
@@ -838,6 +846,61 @@ cargo test -p xai-grok-shell --lib -- \
 cargo test -p xai-grok-pager --lib -- \
   apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks \
   apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run
+cargo test -p xai-grok-login --lib -- \
+  inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token
+cargo test -p xai-grok-shell --lib -- \
+  nested_request_bearer_falls_back_to_the_inherited_parent_key
+```
+
+#### Nested explore and implement start after Approve
+
+While `plan_mode_active` is writing or presenting, nested explore and
+implement jobs are not started. Nested research and implement start after
+Approve. The advertised `spawn_subagent` description says that. Follow-up
+to a still-running L2 is not a start. A `plan` type is not explore or
+implement. Do not fit those tests to a description that still tells the
+model to launch explore during `/plan`.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-shell` `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting` | Gate refuses explore, general-purpose, and implement while writing or presenting |
+| `xai-grok-shell` `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve` | Live `prepare_tool_call` refuses an explore spawn until Approve |
+| `xai-tool-types` `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting` | Advertised `spawn_subagent` / `task` description quotes the refuse |
+| `xai-grok-agent` `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting` | Orchestrator prompt quotes the refuse even when it still names explore after Approve |
+
+```bash
+cargo test -p xai-grok-shell --lib -- \
+  nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting \
+  plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve
+cargo test -p xai-tool-types --lib -- \
+  build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting
+cargo test -p xai-grok-agent --lib -- \
+  orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting
+```
+
+#### Wayland doctor finding when wl-copy is present
+
+If `wl-copy` is already on PATH, `grok doctor` / `/doctor` must not emit
+`terminal.wayland-data-control`. There is no Issue and no install note.
+If `wl-copy` is missing on Wayland without data-control, doctor keeps a
+real Issue and a package install hint that names more than one distro
+family. Do not hardcode only apt. Data-control present stays quiet. Do
+not fit these tests to a finding that still warns when `wl-copy` is
+present.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `wayland_no_data_control_warns` | `diagnose_wayland_data_control(true, false, true)` returns None |
+| `xai-grok-pager` `wayland_no_data_control_missing_wl_copy_suggests_install` | Missing `wl-copy` is an Issue with a multi-distro install hint, not apt-only |
+| `xai-grok-pager` `wayland_with_data_control_is_quiet` | Data-control present stays quiet even when `wl-copy` is missing |
+| `xai-grok-pager` `standalone_wayland_with_wl_copy_is_not_an_issue` | Doctor report path does not emit `terminal.wayland-data-control` when `wl-copy` is on PATH |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  wayland_no_data_control_warns \
+  wayland_no_data_control_missing_wl_copy_suggests_install \
+  wayland_with_data_control_is_quiet \
+  standalone_wayland_with_wl_copy_is_not_an_issue
 ```
 
 #### File-level infer-from-path verify

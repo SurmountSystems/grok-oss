@@ -2130,6 +2130,12 @@ mod tests {
                     !task.contains("Agent types:"),
                     "[{label}] task description must not list agent types: {task}"
                 );
+                assert!(
+                    task.contains(
+                        "While plan_mode_active is writing or presenting, nested explore and implement jobs are not started"
+                    ),
+                    "[{label}] spawn_subagent must not tell the model to launch explore while writing or presenting: {task}"
+                );
             }
             assert_eq!(
                 Vec::<(String, String)>::new(),

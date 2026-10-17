@@ -200,6 +200,9 @@ pub struct TodoPane {
     /// Isolated grok_oss.db path for fixture tests. Live paint uses Token
     /// Economy config when this is unset.
     exec_metrics_database_path: Option<PathBuf>,
+    /// Full painted session-board row hit targets. A left click opens that
+    /// task, including completed rows, so the Operator can review the board.
+    pub row_hit_rects: Vec<(u64, Rect)>,
 }
 
 impl Default for TodoPane {
@@ -233,6 +236,56 @@ impl TodoPane {
             last_theme: crate::theme::Theme::current_kind(),
             exec_metrics_chrome: HashMap::new(),
             exec_metrics_database_path: None,
+            row_hit_rects: Vec::new(),
+        }
+    }
+
+    /// Bound subagent / background-task id from `meta.taskId`.
+    pub fn bound_task_id(item: &TodoItem) -> Option<&str> {
+        item.meta
+            .as_ref()
+            .and_then(|m| m.get("taskId"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Todo at the ListPane stable id (original index in `todos`).
+    pub fn item_for_stable_id(&self, id: u64) -> Option<&TodoItem> {
+        self.todos.get(id as usize)
+    }
+
+    /// Drop last-frame row hits when the session board is not painted.
+    pub fn clear_row_hit_rects(&mut self) {
+        self.row_hit_rects.clear();
+    }
+
+    /// Store one hit rect per visible painted row. Width is the full pane so
+    /// the accent column the inner content rect omits still opens the task.
+    fn record_row_hit_rects(&mut self, pane: Rect, inner: Rect) {
+        self.row_hit_rects.clear();
+        if pane.width == 0 || inner.height == 0 {
+            return;
+        }
+        let scroll = self.list_state.scroll_offset();
+        let layout = self.list_state.layout();
+        let view_h = inner.height as usize;
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let item_y = layout.virtual_y(idx);
+            let item_h = layout.item_height(idx) as usize;
+            let item_bottom = item_y.saturating_add(item_h);
+            if item_bottom <= scroll {
+                continue;
+            }
+            if item_y >= scroll.saturating_add(view_h) {
+                continue;
+            }
+            let vis_start = item_y.saturating_sub(scroll);
+            let vis_end = item_bottom.saturating_sub(scroll).min(view_h);
+            let height = (vis_end.saturating_sub(vis_start) as u16).max(1);
+            let y = inner.y.saturating_add(vis_start as u16);
+            self.row_hit_rects
+                .push((entry.id, Rect::new(pane.x, y, pane.width, height)));
         }
     }
 
@@ -460,6 +513,7 @@ impl TodoPane {
         self.rebuild_entries();
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
+            self.row_hit_rects.clear();
             if inner.height > 0 && inner.width > 0 {
                 let msg = empty_placeholder_message(self.todos.is_empty(), self.counts());
                 let theme = crate::theme::Theme::current();
@@ -477,6 +531,7 @@ impl TodoPane {
             .focused(focused)
             .style(self.list_style)
             .render(inner, buf, &mut self.list_state);
+        self.record_row_hit_rects(area, inner);
     }
 }
 

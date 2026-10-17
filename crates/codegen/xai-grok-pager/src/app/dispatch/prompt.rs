@@ -1816,7 +1816,11 @@ pub(super) fn dispatch_send_prompt_submission(
             let submitted = text.trim();
             let typed_enter = !composer_trim.is_empty()
                 && (composer_trim == submitted || composer_trim.contains(submitted));
-            if (typed_enter || named_live_l2) && !defer_to_send_now {
+            // try_send already emptied the composer. A new SendPrompt would
+            // start a turn and cancel the live exit_plan_mode waiter
+            // (Plan: Exit at 0.0s, empty transcript).
+            let plan_present_freeform = plan_present_running_turn_freeform_interjects(agent, &text);
+            if (typed_enter || named_live_l2 || plan_present_freeform) && !defer_to_send_now {
                 let images = agent.prompt.drain_images();
                 return enqueue_if_interject_dropped(app, id, text, images);
             }
@@ -2112,6 +2116,25 @@ fn hold_parked_plan_follow_up(agent: &mut AgentView, text: &str) -> bool {
         pav.comment_held_from_enter = true;
     }
     agent.prompt.set_text(text);
+    true
+}
+
+/// Running-turn freeform on a parked plan present must interject.
+///
+/// Isolated Preview idle still SendPrompt. Revise Prompt idle still
+/// asks the model. Commenting stays a line-comment save. Empty and
+/// slash text are not this path.
+fn plan_present_running_turn_freeform_interjects(agent: &AgentView, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return false;
+    }
+    let Some(pav) = agent.plan_approval_view.as_ref() else {
+        return false;
+    };
+    if pav.focus == crate::views::plan_approval_view::PlanApprovalFocus::Commenting {
+        return false;
+    }
     true
 }
 

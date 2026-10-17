@@ -2046,6 +2046,20 @@ composer named Human box.
   is an L3. Dual-pin: [`AGENTS.md`](AGENTS.md) and host
   `~/.grok/AGENTS.md` heading *L2s do not work by themselves (pinned
   2026-10-15)*.
+- [x] **Nested explore and implement start after Approve (pinned
+  2026-10-16).** Jumping the gun is spawning nested research during
+  plan write and present. While `plan_mode_active` is writing or
+  presenting, nested explore and implement jobs are not started. L1
+  writes `plan.md` from Operator evidence, presents, and waits for
+  Approve. Nested research and implement start after Approve. The
+  plan skill, the hierarchical skill, and [`AGENTS.md`](AGENTS.md)
+  say that same thing. A sentence that tells L1 to spawn explores
+  during `/plan` is the miss. The Hierarchical fast path stays (one
+  already-named command, one already-named file read, the asked-for
+  report, one already-named one-line edit). Dual-pin:
+  [`AGENTS.md`](AGENTS.md) heading *Nested explore and implement
+  start after Approve (pinned 2026-10-16)*; host `~/.grok/AGENTS.md`
+  same heading.
 - [x] **Kill a think-only L3 after about 15 minutes (pinned 2026-09-09).**
   L2 must kill an L3 that is still on turn 1 with no useful file or
   test progress after about 15 minutes of think-only work or stalled
@@ -2571,7 +2585,7 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 **Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. GitHub issue 203.
 
 - Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
-- Nested 401 `reason=no auth context` with `auth_kind=other` while the parent session still talks does not paint `Authentication required: … Run /login`. Named test: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`.
+- Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
 - A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
 - Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`.
 - A `"default"` ACP method with a live parent session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.
@@ -2583,11 +2597,25 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`.
 - An empty `Bearer` is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`.
 - Compact wrappers that keep `auth_kind=other` and drop `reason=no auth context` still do not paint `/login`. Named test: `apply_retry_state_auth_kind_other_does_not_paint_login`.
-- After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`.
+- After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`. Nested L2s that 401'd resume the same way a dropped network does. The parent session stays bound. Named test: `auth_complete_resumes_nested_l2s_that_401d`.
 - A no-auth-context 401 stamps a new parent JWT once. The same key is not resubmitted as an uncharged park (50 paced retries). Named tests: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`, `missing_auth_context_401_does_not_resubmit_the_same_key`.
 - A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
+- After auth recovery claims success, a nested turn resumes with the live sampler JWT the parent is talking with. It does not give up after 3 retries while that JWT is available. Named tests: `nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt`, `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token`. Nested POST stamps `InheritedSessionBearerResolver`, not `SamplingConfig.api_key`. A recovered AuthManager token must not win on that wire. The inherited parent JWT wins over `current_wire_valid` in `nested_request_bearer`.
+- Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the parent session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. A parent JWT that actually expired still paints that sentence once.
 
 **Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
+
+**Session board row click (pinned 2026-10-16).** These sentences say what a painted session-board row must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A left click on a painted session board row (the Ctrl+T todo list, not only the Tasks overlay) opens that task so the Operator can review it. Completed rows are clickable. Named test: `clicking_a_painted_session_board_row_opens_that_task`. Keep `clicking_a_painted_in_progress_tasks_row_opens_that_task` for the Tasks overlay. That overlay test is not this board.
+
+**Plan present Hello? (pinned 2026-10-16).** These sentences say what plan present must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. Operator text `Hello? Are you stuck?` during plan present does not freeze the UI, does not paint `Plan: Exit` into an empty transcript, and does not leave `Run Plan: Exit 0.0s` on an empty screen. That text is a soft interject or a present-time comment. Named test: `operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit`. Isolated Preview idle Human Enter still sends (`isolated_preview_send_prompt_is_human_turn_not_only_plan_comment`). Revise Prompt idle still asks the model (`revise_prompt_send_prompt_still_asks_the_model`). Empty Enter never Approves and never Exits. Click Exit / `q` still abandon.
+
+**Nested explore spawn while writing or presenting (pinned 2026-10-16).** These sentences say what nested spawn must do while plan mode is writing or presenting. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. The advertised `spawn_subagent` description says that. Named tests: `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting`, `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve`, `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`, `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`. Follow-up to a still-running L2 is not a start. A `plan` type is not explore or implement.
+
+**Wayland doctor finding when wl-copy is present (pinned 2026-10-16).** These sentences say what `grok doctor` / `/doctor` must do for `terminal.wayland-data-control`. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint.
+
+- If `wl-copy` is already on PATH, doctor must not emit this finding. `diagnose_wayland_data_control(true, false, true)` returns None. There is no Issue and no "install wl-clipboard" note. Named test: `wayland_no_data_control_warns`. Doctor report path: `standalone_wayland_with_wl_copy_is_not_an_issue`.
+- If `wl-copy` is missing on a Wayland session that does not expose data-control, doctor keeps a real Issue and a package install hint that names more than one distro family (pacman, dnf, and apt). Do not hardcode only apt as if every Linux is Debian. Named test: `wayland_no_data_control_missing_wl_copy_suggests_install`.
+- If the compositor exposes data-control, stay quiet even when `wl-copy` is missing. Named test: `wayland_with_data_control_is_quiet`.
 
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not
@@ -2599,6 +2627,15 @@ this screen.
   They do not use `bg_base`. Ask mode and commenting keep that same white
   stroke. This is not the plan side panel. Named test:
   `plan_mode_prompt_input_keeps_a_white_outline`.
+- While plan mode is open and a planning turn is running (the agent is
+  writing session `plan.md`), the prompt outline stays
+  `prompt_border_active` white. The running-turn activity color
+  `accent_running` stays on the agent message left accent. Named test:
+  `plan_mode_prompt_outline_stays_white_while_a_planning_turn_is_running`.
+- An active planning turn's magenta rail is the agent message left
+  accent. Title, shortcuts, and the composer ring stay off that rail.
+  Named test:
+  `active_planning_turn_magenta_rail_is_the_agent_message_accent_not_a_full_window_stripe`.
 - While plan mode is open, the screen offers a Limits and Credits control
   when the next request does not draw included SuperGrok period limits.
   Opening it shows Limits before Credits. The control does not say
@@ -2609,6 +2646,10 @@ this screen.
   `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`.
 - While plan mode is open, an image the operator provides is kept on that
   plan turn. Named test: `plan_mode_keeps_an_image_the_operator_provides`.
+- While plan mode is open, typed text paints at the planning caret inside
+  the titled `planning` composer. The transcript does not show that draft
+  as an Operator message while the composer is empty. Named test:
+  `planning_composer_typed_text_stays_at_the_caret_and_is_not_an_operator_transcript_row`.
 
 Differences from tests that do not cover this screen:
 
@@ -2783,6 +2824,14 @@ postpaid Billing Credits.
 
 - A left click on the painted words Use limits changes the card. The hit rect is the footer control that paints those letters, stored from the last paint. Esc, the close control, Exit, comment, and revise stay their own actions. The click writes MeterSource::Included and does not set use_console. It does not hop to the console API key. On a live personal session, and on a hard-expired personal session beside a Team JWT, the next request draws included SuperGrok period limits. The card shows Using limits. The Use limits control is gone because the choice was accepted. The card does not say included limits are not being drawn for the next request. When that meter's usage reading exists, the header shows percent used (`limits 28%` in the personal fixture and in the Team JWT click fixture). When that usage reading does not exist, the header does not invent `limits 0%`, `limits N%`, or `$0`. Named test: `clicking_use_limits_on_the_limits_card_is_handled`. The screen where the operator has not clicked Use limits stays `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`.
 - While the next request spends a credit meter that has a remaining, the header shows those dollars. The words Limits and Credits are only the missing-reading label. The open Limits card and the header use the same remaining for that meter. The header does not invent $0 or limits 0%. Team postpaid Billing Credits, SuperGrok dollar credits, and console team prepaid / console API credits stay distinct. Named test: `header_shows_the_same_team_postpaid_figure_the_open_card_shows`. The fixture figure is `$442.97` when the next request is not drawing included SuperGrok period limits. `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows` stays. These sentences are not a claim that the tests already passed.
+
+**Limits card Personal and Business SuperGrok Heavy rows (pinned 2026-10-16).** These sentences say what the Limits card must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct. Matching day counts are not a shared pool.
+
+The Business tab paints only the Business SuperGrok Heavy row. It does not paint Personal SuperGrok Heavy. Remaining percent on that row is that business identity's included Heavy weekly pool. SuperGrok dollar credits on that row are that identity's prepaid remaining, including known zero as `$0.00`. The reset line names days and hours from that business meter's own `nextReset` / `period_end`. Named test: `business_tab_paints_only_the_business_supergrok_heavy_row`.
+
+The Personal tab paints only the Personal SuperGrok Heavy row. It does not paint Business SuperGrok Heavy. Remaining percent on that row is that personal identity's included Heavy weekly pool. When personal used is 100% and that reading is known, remaining is 0%. The reset line names days and hours from that personal meter's own `nextReset` / `period_end`. Named test: `personal_tab_paints_only_the_personal_supergrok_heavy_row`.
+
+Each Heavy reset line names days and hours from that meter's own nextReset. Personal `Resets in: 6d 3h` and Business `Resets in: 6d 11h` are not the same clock. `earliest_reset_at` is not the Business tab's painted countdown. Named test: `each_heavy_reset_line_names_days_and_hours_from_that_meters_next_reset`. Keep `modal_content_includes_countdown_d_h_m_s`. Do not weaken it to days only. Do not reshape Use limits, team JWT, header credits, or Accounts list tests. A new Heavy row must not invent `$0` or `limits 0%` on unread Personal-tab fixtures.
 
 **Plan reminder and plan-mode paths (pinned 2026-10-12).** These sentences say what those checks must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's code.
 

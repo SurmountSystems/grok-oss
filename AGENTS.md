@@ -882,7 +882,7 @@ less than product code and tests. Do not invent long essays or git nags.
     **Use limits click and header figure (pinned 2026-10-07).** These sentences say what the screen must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct.
     - A left click on the painted words Use limits changes the card. The hit rect is the footer control that paints those letters, stored from the last paint. Esc, the close control, Exit, comment, and revise stay their own actions. The click writes MeterSource::Included and does not set use_console. It does not hop to the console API key. On a live personal session, and on a hard-expired personal session beside a Team JWT, the next request draws included SuperGrok period limits. The card shows Using limits. The Use limits control is gone because the choice was accepted. The card does not say included limits are not being drawn for the next request. When that meter's usage reading exists, the header shows percent used (`limits 28%` in the personal fixture and in the Team JWT click fixture). When that usage reading does not exist, the header does not invent `limits 0%`, `limits N%`, or `$0`. Named test: `clicking_use_limits_on_the_limits_card_is_handled`. The screen where the operator has not clicked Use limits stays `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`.
     - While the next request spends a credit meter that has a remaining, the header shows those dollars. The words Limits and Credits are only the missing-reading label. The open Limits card and the header use the same remaining for that meter. The header does not invent $0 or limits 0%. Team postpaid Billing Credits, SuperGrok dollar credits, and console team prepaid / console API credits stay distinct. Named test: `header_shows_the_same_team_postpaid_figure_the_open_card_shows`. The fixture figure is `$442.97` when the next request is not drawing included SuperGrok period limits. `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows` stays. These sentences are not a claim that the tests already passed.
-    **Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`. Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`. The nested bearer resolver returns that inherited key when AuthManager has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`. A wired resolver that returns `None` does not send `X-XAI-Token-Auth` without a Bearer. Named test: `bearer_resolver_none_strips_token_auth_when_authorization_is_absent`. A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`. Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`. An empty Bearer is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`. Nested 401 `reason=no auth context` with `auth_kind=other` while the parent session still talks does not paint `Authentication required: … Run /login`. Named test: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`. A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`. A later send after a PreRequest already ran while unusable does not refresh again. Parked credential-less 401s keep the pre-park preflight count. Named tests: `deferred_recovery_credential_less_401_parks_and_survives`, `park_disabled_recovered_401_still_resubmits`. Dual-pin: [`FORK.md`](FORK.md) **Named tests are contracts** § *Nested L2 inherit and Authentication required nag*.
+    **Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`. Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`. The nested bearer resolver returns that inherited key when AuthManager has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`. A wired resolver that returns `None` does not send `X-XAI-Token-Auth` without a Bearer. Named test: `bearer_resolver_none_strips_token_auth_when_authorization_is_absent`. A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`. Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`. An empty Bearer is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`. Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`. A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401) without `reason=no auth context`) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`. A later send after a PreRequest already ran while unusable does not refresh again. Parked credential-less 401s keep the pre-park preflight count. Named tests: `deferred_recovery_credential_less_401_parks_and_survives`, `park_disabled_recovered_401_still_resubmits`. Dual-pin: [`FORK.md`](FORK.md) **Named tests are contracts** § *Nested L2 inherit and Authentication required nag*.
 16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
     Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
     bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules
@@ -1235,6 +1235,7 @@ An L3 implements, researches, or reviews. An L3 does not coordinate and does not
 Do not call an L3 an L2. Do not spawn "two L2 agents" from inside an L2.
 The plan skill, the implement skill, and the hierarchical skill do not override this. If a skill still says spawn an L3 only when the slice is hard, or that easy work stays on the L2, change that skill so it matches § *L2s do not work by themselves*.
 Do not teach the old half-window rule ("spawn L3 when many greps / half the window") as the spawn rule.
+The plan skill, the hierarchical skill, and this file say the same thing about `/plan`: write `plan.md` from Operator evidence, present, wait for Approve, then spawn. A sentence that tells L1 to spawn explores during `/plan` is the miss. See § *Nested explore and implement start after Approve*.
 
 This pin does not weaken § *An L3 is not a coordinator*. Superseded 2026-10-15: the older sentence that easy work can stay on L2 is not the spawn rule. Dual-pin: host `~/.grok/AGENTS.md` same heading.
 
@@ -1357,7 +1358,7 @@ goes up. Do not go deeper than L3.
 
 L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. An L3 does the grep, diagnose, edit, implement, or review. An L2 does not keep that work.
 
-Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. See § *L1 resumes an early L2 exit*. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
+Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. While `plan_mode_active` is writing or presenting, do not spawn those nested explore or implement jobs. Write `plan.md` from Operator evidence, present, wait for Approve, then spawn. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. See § *L1 resumes an early L2 exit*. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
 
 L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 
@@ -1377,7 +1378,7 @@ must not compact itself and continue.
 
 ### L1 interactions are spawn and report (pinned 2026-09-26)
 
-An Operator message that asks for a fix, a diagnosis, a multi-file change, or a plan follow-through is an L2 job. L1 spawns that L2 and reports. L1 does not grep, edit, or run the suite to do the job. The Hierarchical fast path stays narrow: one already-named command, one already-named file read, the asked-for short report, one already-named one-line edit. "Just a quick look" is not that path. That work does not stay on L1. An L2 coordinates only. An L3 does the grep, diagnose, edit, implement, or review.
+An Operator message that asks for a fix, a diagnosis, a multi-file change, or a plan follow-through is an L2 job. L1 spawns that L2 and reports, except while `plan_mode_active` is writing or presenting. In that window L1 writes `plan.md` from Operator evidence, presents, and waits for Approve. Nested explore and implement start after Approve. L1 does not grep, edit, or run the suite to do the job. The Hierarchical fast path stays narrow: one already-named command, one already-named file read, the asked-for short report, one already-named one-line edit. "Just a quick look" is not that path. That work does not stay on L1. An L2 coordinates only. An L3 does the grep, diagnose, edit, implement, or review.
 
 L1 may still use `spawn_subagent`, `todo_write`,
 `get_command_or_subagent_output` / wait, and read the short on-disk report it
@@ -1386,6 +1387,10 @@ asked for. That is coordination, not work. **Do not go deeper than L3.**
 This section is project **D1** law and must survive recon. Host dual-pin:
 `~/.grok/AGENTS.md` § *Regressions and deep diagnosis* + § *Hard stop — parent
 is coordinator only*.
+
+### Nested explore and implement start after Approve (pinned 2026-10-16)
+
+Jumping the gun is spawning nested research during plan write and present. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. L1 writes `plan.md` from Operator evidence, presents, and waits for Approve. Nested research and implement start after Approve. The plan skill, the hierarchical skill, and this file say that same thing. A sentence that tells L1 to spawn explores during `/plan` is the miss. The Hierarchical fast path stays (one already-named command, one already-named file read, the asked-for report, one already-named one-line edit). Dual-pin: [`FORK.md`](FORK.md) Process same heading; host `~/.grok/AGENTS.md` same heading.
 
 ### Kill a think-only L3 after about 15 minutes (pinned 2026-09-09)
 
@@ -1497,7 +1502,9 @@ Host: § *Hard stop* default loop.
   claims:** L1’s first tool turn is `spawn_subagent`, not L1 `grep` / `gh`
   log pull / unnamed test-file reads / “I’ll check the docs.” An L2
   coordinates only. An L3 does that work.
-  Hierarchical fast path stays on L1.
+  Hierarchical fast path stays on L1. That first-turn spawn does not run
+  while `plan_mode_active` is writing or presenting. Nested explore and
+  implement start after Approve.
 - L1 may: spawn, wait, board upsert, read the **short on-disk report**
   it asked for, and give brief user status. An L2 coordinates only. An L3 does the work. Git handoff only when asked
   for complex git/recon work.
@@ -1550,6 +1557,10 @@ dual-pin: `~/.grok/AGENTS.md` § *Grok OSS screenshots are this product*.
 
 ### After Approve, implement mentioned work (pinned 2026-08-19; no plan-block 2026-08-21)
 
+While `plan_mode_active` is writing or presenting, nested explore and
+implement jobs are not started. Nested research and implement start after
+Approve. See § *Nested explore and implement start after Approve*.
+
 When a plan is already Approved and implement is in flight (or clearly
 next), operator-mentioned work and "let's do that" / continue-the-approved-work
 is in scope: board upsert and spawn (or keep the healthy implementer
@@ -1577,7 +1588,9 @@ intent, or recon survival from prose alone.
 
 - First tool turn for multi-file / CI / regression / “where do skills live?” is
   **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
-  L2. An L2 coordinates only. An L3 does the research.
+  L2. An L2 coordinates only. An L3 does the research. That first-turn spawn
+  does not run while `plan_mode_active` is writing or presenting. Nested
+  explore and implement start after Approve.
 - Verify against **code and load paths** (and live trees) before asserting
   (the L3 does that work; L1 reads the short report; the L2 coordinates only).
 - Read short on-disk reports; do not re-prove the subagent in the parent.

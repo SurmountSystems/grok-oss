@@ -268,8 +268,10 @@ fn read_zed_os_keychain(url: &str) -> Option<String> {
 fn read_zed_secret_service(url: &str) -> Option<String> {
     fn password(service: &str, account: &str) -> Option<String> {
         let entry = keyring::Entry::new(service, account).ok()?;
+        crate::credentials_store::note_keyring_search_items(service, account);
         match entry.get_password() {
             Ok(secret) => {
+                crate::credentials_store::note_keyring_get_secret(service, account);
                 let key = secret.trim();
                 if key.is_empty() {
                     None

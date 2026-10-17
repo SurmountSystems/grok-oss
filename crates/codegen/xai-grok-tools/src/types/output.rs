@@ -930,14 +930,15 @@ impl ToolOutput {
                      The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\n\
                      {plan_status}\n\n\
                      In plan mode, you should:\n\
-                     1. Thoroughly explore the codebase to understand existing patterns\n\
-                     2. Identify similar features, codebase architecture, and understand trade-offs\n\
+                     1. Write plan.md from Operator evidence. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed\n\
+                     2. Identify similar features, codebase architecture, and understand trade-offs from that evidence\n\
                      3. Design a concrete implementation strategy\n\
                      4. Write your plan to the plan file above. Put open questions as plain \
                      bullets in the plan file or freeform chat; do not use {ask} multi-choice \
                      questionnaires for plan clarifications\n\
                      5. When ready, use {exit} to present your plan to the user.\n\n\
-                     When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
+                     When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.\n\n\
+                     While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {

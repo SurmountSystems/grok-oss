@@ -730,6 +730,11 @@
             Some("auth"),
             "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)"
         ));
+        // Live nested 401 (Operator 2026-10-16). A Bearer rode the wire. The proxy still has no session. Parent talks.
+        assert!(!is_reauthable_failure(
+            Some("auth"),
+            "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+        ));
         // Compact wrappers sometimes drop `reason=no auth context` and keep `auth_kind=other`.
         assert!(!is_reauthable_failure(
             Some("auth"),
@@ -801,6 +806,52 @@
             "nested spawn 401 with no auth context must not tell the Operator to /login while the parent turn still works"
         );
         assert_eq!(count_reauth_required(&scrollback), 0);
+    }
+
+    /// Live nested 401: auth_kind=bearer, PermissionDenied, reason=no auth context.
+    /// Operator: Authentication required /login painted while the parent still talks.
+    #[test]
+    fn apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            !matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::ReAuthRequired)
+            ),
+            "live nested 401 with a Bearer and no auth context must not tell the Operator to /login while the parent turn still works"
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
+    }
+
+    /// Nested give-up after recovery claimed success must not paint `/login` while the parent talks.
+    #[test]
+    fn apply_retry_state_nested_auth_give_up_does_not_paint_login() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "nested_auth".into(),
+                message: "Auth recovery succeeded but 4 authenticated inference requests were still rejected (401); giving up after 3 retries. Turn ran 36m57s wall-clock.".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            0,
+            "nested give-up after recovery must not tell the Operator to /login while the parent turn still works"
+        );
     }
 
     #[test]

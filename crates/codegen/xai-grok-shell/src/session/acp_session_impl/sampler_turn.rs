@@ -743,7 +743,19 @@ impl SessionActor {
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // inherit stamp. Do not seed an expired AuthManager token: the resolver would
         // send it, and a fail-closed 401 would look authenticated.
-        let mut api_key = if use_bearer_resolver {
+        // Nested turns keep the JWT the live sampler is already talking with.
+        // AuthManager recovery can mint a different token that cli-chat-proxy still rejects.
+        let nested_live = if self.startup_hints.is_subagent {
+            self.sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+        let mut api_key = if let Some(live) = nested_live {
+            Some(live)
+        } else if use_bearer_resolver {
             // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
             // A session from another authority must not seed the default headers either.
             self.auth_manager
@@ -848,6 +860,7 @@ impl SessionActor {
             session_bearer_resolver: None,
         };
         if use_bearer_resolver
+            && !self.startup_hints.is_subagent
             && let Some(am) = self.auth_manager.as_ref()
             && am.grok_com_config().auto_use_included_limits
             && am.grok_com_config().preferred_method
@@ -1185,13 +1198,18 @@ impl SessionActor {
     /// `RetryState::Failed` (the pager's re-auth prompt keys off it).
     pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
         const STATUS: Option<u16> = Some(401);
-        let (error_type, message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) => self.apply_auth_remedy(
-                &auth_manager.auth_remedy().after_retries_exhausted(),
-                message,
-                STATUS,
-            ),
-            None => ("auth", message),
+        // Nested give-up while the parent sampler still talks is an inherit miss, not Operator /login.
+        let (error_type, message) = if self.startup_hints.is_subagent {
+            ("nested_auth", message)
+        } else {
+            match self.auth_manager.as_ref() {
+                Some(auth_manager) => self.apply_auth_remedy(
+                    &auth_manager.auth_remedy().after_retries_exhausted(),
+                    message,
+                    STATUS,
+                ),
+                None => ("auth", message),
+            }
         };
         self.log_terminal_failure(error_type, STATUS, &message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
@@ -1241,8 +1259,19 @@ impl SessionActor {
         }
     }
 
-    /// Parent JWT that a missing-auth 401 can stamp: wire-valid, then expired session, then chat key, then the live sampler.
+    /// Parent JWT that a missing-auth 401 can stamp.
+    /// Nested turns prefer the JWT the live sampler is already talking with. AuthManager recovery
+    /// can mint a different token that cli-chat-proxy still rejects.
     async fn stampable_nested_parent_bearer(&self) -> Option<String> {
+        if self.startup_hints.is_subagent
+            && let Some(key) = self
+                .sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.is_empty())
+        {
+            return Some(key);
+        }
         if let Some(am) = self.auth_manager.as_ref()
             && let Some(key) = am
                 .current_wire_valid()
@@ -1278,19 +1307,34 @@ impl SessionActor {
         true
     }
 
-    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the parent JWT once and resubmit.
-    /// Do not resubmit the same key. Do not report the old send as uncharged (that parks 50 paced retries).
+    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer, or a nested 401 after
+    /// recovery claimed success. Stamp the live sampler JWT and resubmit.
+    /// A parent (not nested) missing-auth stamp still fails closed on the same key.
+    /// Parent `auth_kind=bearer` plus `reason=no auth context` does not stamp; that 401 keeps
+    /// the WebLogin and OIDC hints. Nested still stamps. Empty-Bearer parent still stamps.
+    /// Nested same-key 401 prepares the sampler again (reconstruct can drop Authorization) and
+    /// resubmits as Sent so the charged budget can still exhaust.
     async fn try_stamp_parent_bearer_on_missing_auth(
         &self,
         message: &str,
         _credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
-        if !crate::extensions::notification::is_nested_missing_auth_context(message) {
+        let nested = self.startup_hints.is_subagent;
+        if !crate::extensions::notification::should_stamp_parent_bearer_on_missing_auth(
+            message, nested,
+        ) {
             return None;
         }
         let bearer = self.stampable_nested_parent_bearer().await?;
         let already = self.chat_state_handle.get_credentials().await.api_key;
         if already.as_deref() == Some(bearer.as_str()) {
+            if nested {
+                self.prepare_sampler_for_turn().await;
+                return Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                    credential: xai_grok_sampling_types::SentCredential::Sent,
+                    store: RecoveredStore::SessionToken,
+                });
+            }
             return None;
         }
         tracing::info!(
@@ -1524,8 +1568,12 @@ impl SessionActor {
             error.message.clone()
         };
 
-        // Token-Auth without Bearer. Stamp a new parent JWT once. Do not park 50 uncharged resubmits.
-        if crate::extensions::notification::is_nested_missing_auth_context(&detailed_message) {
+        // Nested missing-auth, or parent empty-Bearer missing-auth. Stamp the live sampler JWT.
+        // Do not park 50 uncharged resubmits. Do not stamp a parent `auth_kind=bearer` 401.
+        if crate::extensions::notification::should_stamp_parent_bearer_on_missing_auth(
+            &detailed_message,
+            self.startup_hints.is_subagent,
+        ) {
             if let Some(recovery) = self
                 .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
                 .await
@@ -1666,7 +1714,17 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     None,
                 );
-                self.prepare_sampler_for_turn().await;
+                let nested_live = if self.startup_hints.is_subagent {
+                    self.sampler_handle.current_api_key().await
+                } else {
+                    None
+                };
+                if let Some(key) = nested_live.filter(|key| !key.is_empty()) {
+                    self.set_chat_api_key(key).await;
+                    self.prepare_sampler_for_turn().await;
+                } else {
+                    self.prepare_sampler_for_turn().await;
+                }
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                     credential: error.credential,
                     store: RecoveredStore::SessionToken,
@@ -2293,6 +2351,15 @@ impl SessionActor {
     /// Session-token path is best-effort: on success, update credentials and return.
     /// On failure, do not fall through to the JWT/config.toml branch when the session gate was active; that path is for BYOK JWTs only.
     pub(crate) async fn refresh_token_if_expired(&self) {
+        if self.startup_hints.is_subagent
+            && let Some(live) = self.sampler_handle.current_api_key().await
+        {
+            let creds = self.chat_state_handle.get_credentials().await;
+            if creds.api_key.as_deref() != Some(live.as_str()) {
+                self.set_chat_api_key(live).await;
+            }
+            return;
+        }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             // Gate on the stable classifier, not `creds.auth_type`; this also heals a transient `ApiKey` flip by writing the refreshed token into `creds.api_key` below

@@ -227,6 +227,35 @@ fn session_refresh_url(account: &str) -> String {
     format!("supergrok-session:{account}#refresh_token")
 }
 
+/// Re-read this account's session secrets from the keyring once.
+///
+/// Header paint may call [`read_auth_json`] on every frame. That path uses
+/// the process cache inside `CredentialsStore::read` and must not touch
+/// Secret Service again. Refresh is the exception: when `drop_cache` is set
+/// (rejected token, or a token inside the early-invalidation window) the
+/// cache entries are dropped first, then each URL is probed once. A sibling
+/// process that already wrote a new token is adopted into the cache before
+/// this process mints another one. File-only stores used by unit tests do
+/// not touch the keyring.
+pub(crate) fn reread_session_secrets_before_refresh(
+    auth_file: &Path,
+    account: &str,
+    drop_cache: bool,
+) {
+    if account.is_empty() {
+        return;
+    }
+    let store = session_credential_store(auth_file);
+    let key_url = session_key_url(account);
+    let refresh_url = session_refresh_url(account);
+    if drop_cache {
+        store.invalidate_cached_secret(&key_url);
+        store.invalidate_cached_secret(&refresh_url);
+    }
+    let _ = store.reread_keyring_before_refresh(&key_url);
+    let _ = store.reread_keyring_before_refresh(&refresh_url);
+}
+
 fn session_credential_store(auth_file: &Path) -> crate::credentials_store::CredentialsStore {
     #[cfg(test)]
     {
@@ -320,14 +349,21 @@ fn restore_session_secrets(auth_file: &Path, map: &mut AuthStore) {
         }
         if auth.key.is_empty() {
             if let Ok(Some((username, secret))) = store.read(&session_key_url(account)) {
-                if username == "key" {
+                // Keyring reports "Bearer"; the file mirror keeps "key".
+                if (username == "key" || username == crate::credentials_store::BEARER_USERNAME)
+                    && !secret.is_empty()
+                {
                     auth.key = secret;
                 }
             }
         }
         if auth.refresh_token.is_none() {
             if let Ok(Some((username, secret))) = store.read(&session_refresh_url(account)) {
-                if username == "refresh_token" {
+                // Keyring reports "Bearer"; the file mirror keeps "refresh_token".
+                // An empty secret is still Some("") after a successful store write.
+                if username == "refresh_token"
+                    || username == crate::credentials_store::BEARER_USERNAME
+                {
                     auth.refresh_token = Some(secret);
                 }
             }
