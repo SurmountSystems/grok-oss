@@ -193,6 +193,62 @@ fn seal_prompt_bottom_rule(
     }
 }
 
+/// Recolor the composer's outer box-drawing ring to `fg`.
+///
+/// Plan mode keeps `prompt_border_active` on this ring while a planning
+/// turn is running. Title letters and the info-line model name stay.
+/// A stolen running `┃` on this ring becomes `│`.
+fn seal_prompt_outline(
+    buf: &mut Buffer,
+    area: Rect,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let left = area.x;
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let top = area.y;
+    let bottom = area.y.saturating_add(area.height).saturating_sub(1);
+    let style = Style::default().fg(fg).bg(bg);
+    let mut y = top;
+    loop {
+        let mut x = left;
+        loop {
+            let on_ring = x == left || x == right || y == top || y == bottom;
+            if on_ring && let Some(cell) = buf.cell_mut((x, y)) {
+                let sym = cell.symbol().to_string();
+                let (ch, rewrite) = match sym.as_str() {
+                    "\u{250c}" | "\u{2510}" | "\u{2514}" | "\u{2518}" | "\u{2500}" | "\u{2502}" => {
+                        (None, true)
+                    }
+                    "\u{2503}" if x == left || x == right => (Some('\u{2502}'), true),
+                    "\u{256d}" if y == top && x == left => (Some('\u{250c}'), true),
+                    "\u{256e}" if y == top && x == right => (Some('\u{2510}'), true),
+                    "\u{2570}" if y == bottom && x == left => (Some('\u{2514}'), true),
+                    "\u{256f}" if y == bottom && x == right => (Some('\u{2518}'), true),
+                    _ => (None, false),
+                };
+                if rewrite {
+                    if let Some(ch) = ch {
+                        cell.set_char(ch);
+                    }
+                    cell.set_style(style);
+                }
+            }
+            if x == right {
+                break;
+            }
+            x = x.saturating_add(1);
+        }
+        if y == bottom {
+            break;
+        }
+        y = y.saturating_add(1);
+    }
+}
+
 /// Session wrap width while the soft plan pane covers the right side.
 ///
 /// A long session line wraps in the columns left of the pane. It does not
@@ -1269,13 +1325,22 @@ impl AgentView {
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         self.show_active_resolved_plan_file_if_hidden();
         let casual_commenting = self.is_casual_commenting();
+        let ask_mode = self.effective_session_mode() == xai_grok_tools::types::SessionMode::Ask;
         let mode_accent = if effective_plan || casual_commenting {
             Some(theme.accent_plan)
-        } else if self.effective_session_mode() == xai_grok_tools::types::SessionMode::Ask {
+        } else if ask_mode {
             Some(theme.accent_success)
         } else {
             None
         };
+        // Plan, comment, and Ask keep a white prompt outline. A live
+        // `plan_mode_active` keeps that stroke while a planning turn is
+        // running, even when `plan_mode_pending` is `Some(false)`.
+        let plan_stroke_white = effective_plan
+            || self.plan_mode_active
+            || casual_commenting
+            || ask_mode
+            || self.plan_approval_view.is_some();
         let prompt_focused = if self.plan_approval_view.is_some() {
             self.plan_approval_view
                 .as_ref()
@@ -1301,7 +1366,12 @@ impl AgentView {
             },
             // Plan, comment, and Ask keep the prompt outline on
             // `prompt_border_active`. A 0.4 blend of `bg_base` is black on DOGE.
-            border_color_override: mode_accent.map(|_| theme.prompt_border_active),
+            // A running planning turn keeps this white stroke.
+            border_color_override: if plan_stroke_white {
+                Some(theme.prompt_border_active)
+            } else {
+                None
+            },
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -3735,6 +3805,14 @@ impl AgentView {
             );
             let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
             self.set_composer_copy_button(copy_button);
+            if plan_stroke_white && voice_overlay.is_none() {
+                seal_prompt_outline(
+                    buf,
+                    layout.prompt,
+                    theme.prompt_border_active,
+                    theme.bg_base,
+                );
+            }
             if self.plan_approval_view.is_some() {
                 seal_prompt_bottom_rule(
                     buf,
@@ -6586,6 +6664,194 @@ mod plan_approval_draw_contract_tests {
             right,
             top,
             bottom,
+        }
+    }
+
+    /// While plan mode is open and a planning turn is running, the prompt
+    /// outline stays `prompt_border_active` white. The running-turn activity
+    /// color `accent_running` stays off that composer ring.
+    #[test]
+    fn plan_mode_prompt_outline_stays_white_while_a_planning_turn_is_running() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::app::agent::AgentState;
+        use crate::theme::{Theme, cache};
+        use agent_client_protocol as acp;
+        use ratatui::style::Color;
+        use std::sync::Arc;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt outline is white"
+        );
+        assert_eq!(
+            theme.accent_running,
+            Color::Rgb(255, 0, 255),
+            "DOGE accent_running is magenta"
+        );
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("hello?");
+        let meta = NotificationMeta::default();
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("tc-write")),
+                    "Write `.grok/sessions/.../plan.md`",
+                )
+                .kind(acp::ToolKind::Edit)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut agent.scrollback,
+        );
+        agent
+            .scrollback
+            .push(crate::scrollback::entry::ScrollbackEntry::running(
+                crate::scrollback::RenderBlock::agent_message("writing the plan"),
+            ));
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "owed: the planning turn is still running"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        for (x, y, label) in [
+            (stroke.left, stroke.top, "top-left ┌"),
+            (stroke.right, stroke.top, "top-right ┐"),
+            (stroke.left, stroke.bottom, "bottom-left └"),
+        ] {
+            let cell = buf
+                .cell((x, y))
+                .unwrap_or_else(|| panic!("{label} must exist at ({x},{y})"));
+            assert_eq!(
+                cell.fg, white,
+                "owed: while plan_mode_active and a planning turn is running, \
+                 the composer {label} is prompt_border_active white; got {:?}",
+                cell.fg
+            );
+            assert_ne!(
+                cell.fg, theme.accent_running,
+                "owed: accent_running must stay off the composer {label}"
+            );
+        }
+        let mid_y = stroke.top.saturating_add(1);
+        if mid_y < stroke.bottom {
+            let side = buf.cell((stroke.left, mid_y)).expect("composer left side");
+            assert_eq!(
+                side.fg, white,
+                "owed: the composer left │ stays white while the planning turn is running; got {:?}",
+                side.fg
+            );
+            assert_ne!(
+                side.fg, theme.accent_running,
+                "owed: accent_running must stay off the composer left │"
+            );
+        }
+    }
+
+    /// An active planning turn's magenta rail is the agent message left
+    /// accent. Title, shortcuts, and the composer ring stay off that rail.
+    #[test]
+    fn active_planning_turn_magenta_rail_is_the_agent_message_accent_not_a_full_window_stripe() {
+        use crate::app::agent::AgentState;
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_running, magenta);
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("hello?");
+        agent
+            .scrollback
+            .push(crate::scrollback::entry::ScrollbackEntry::running(
+                crate::scrollback::RenderBlock::agent_message("writing the plan"),
+            ));
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let rail = "\u{2503}";
+        let area = Rect::new(0, 0, 100, 40);
+
+        fn magenta_rail_at(buf: &Buffer, x: u16, y: u16, magenta: Color, rail: &str) -> bool {
+            buf.cell((x, y)).is_some_and(|cell| {
+                cell.fg == magenta && (cell.symbol() == rail || cell.symbol() == "\u{2502}")
+            })
+        }
+
+        if let Some(cell) = buf.cell((stroke.left, 0)) {
+            assert!(
+                !(cell.fg == magenta && cell.symbol() == rail),
+                "owed: the title row is not a magenta agent rail; got fg={:?} symbol={:?}",
+                cell.fg,
+                cell.symbol()
+            );
+        }
+        let footer_y = area.height.saturating_sub(1);
+        if let Some(cell) = buf.cell((stroke.left, footer_y)) {
+            assert!(
+                !(cell.fg == magenta && cell.symbol() == rail),
+                "owed: the shortcuts row is not a magenta agent rail; got fg={:?} symbol={:?}",
+                cell.fg,
+                cell.symbol()
+            );
+        }
+        for y in stroke.top..=stroke.bottom {
+            let cell = buf.cell((stroke.left, y)).expect("composer left ring");
+            assert_ne!(
+                cell.fg,
+                magenta,
+                "owed: the composer left ring at y={y} stays off accent_running; symbol={:?}",
+                cell.symbol()
+            );
+        }
+        for y in area.y..area.y.saturating_add(area.height) {
+            let in_scrollback =
+                y >= scrollback.y && y < scrollback.y.saturating_add(scrollback.height);
+            if in_scrollback {
+                continue;
+            }
+            if y >= stroke.top && y <= stroke.bottom {
+                continue;
+            }
+            assert!(
+                !magenta_rail_at(&buf, stroke.left, y, magenta, rail),
+                "owed: a magenta ┃ at x={} y={y} is outside the running agent message; that rail is not a full-window stripe",
+                stroke.left
+            );
         }
     }
 

@@ -2129,7 +2129,7 @@ impl UnpromotedChildDisposition {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn cancel_pending_shell_child(
     child_cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
-    child_thread: crate::session::SessionThread,
+    child_thread: &crate::session::SessionThread,
     workspace_ops: &xai_grok_workspace::WorkspaceOps,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
@@ -2146,7 +2146,7 @@ async fn cancel_pending_shell_child(
     let _ = child_cmd_tx.send(SessionCommand::Shutdown(
         crate::session::ShutdownKind::Graceful,
     ));
-    let thread_exited = await_session_thread_exit(&child_thread, thread_exit_timeout).await;
+    let thread_exited = await_session_thread_exit(child_thread, thread_exit_timeout).await;
     let fate = UnpromotedResourceFate::from_thread_exit(thread_exited);
     let result = disposition.result(subagent_id, child_session_id.0.as_ref(), duration_ms);
     if may_persist_terminal {

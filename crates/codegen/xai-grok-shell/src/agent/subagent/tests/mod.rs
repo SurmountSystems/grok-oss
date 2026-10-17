@@ -2358,7 +2358,7 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
     let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
-            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &SessionThread::from_handle(std::thread::spawn(|| {})),
             &ctx.workspace_ops,
             &request.id,
             &acp::SessionId::new(request.id.clone()),
@@ -2436,7 +2436,7 @@ async fn run_promote_cancel_with_worktree(
     let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
-            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &SessionThread::from_handle(std::thread::spawn(|| {})),
             &ctx.workspace_ops,
             "worktree-cancel",
             &acp::SessionId::new("worktree-cancel"),
@@ -2527,7 +2527,7 @@ async fn unproven_thread_exit_preserves_fresh_worktree() {
     );
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
-            thread,
+            &thread,
             &ctx.workspace_ops,
             "unproven-exit",
             &acp::SessionId::new("unproven-exit"),
@@ -2574,7 +2574,7 @@ async fn startup_admission_timeout_is_failed_not_cancelled() {
         .expect("write running meta");
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
-            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &SessionThread::from_handle(std::thread::spawn(|| {})),
             &ctx.workspace_ops,
             &request.id,
             &acp::SessionId::new(request.id.clone()),

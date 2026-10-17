@@ -2627,6 +2627,15 @@ this screen.
   They do not use `bg_base`. Ask mode and commenting keep that same white
   stroke. This is not the plan side panel. Named test:
   `plan_mode_prompt_input_keeps_a_white_outline`.
+- While plan mode is open and a planning turn is running (the agent is
+  writing session `plan.md`), the prompt outline stays
+  `prompt_border_active` white. The running-turn activity color
+  `accent_running` stays on the agent message left accent. Named test:
+  `plan_mode_prompt_outline_stays_white_while_a_planning_turn_is_running`.
+- An active planning turn's magenta rail is the agent message left
+  accent. Title, shortcuts, and the composer ring stay off that rail.
+  Named test:
+  `active_planning_turn_magenta_rail_is_the_agent_message_accent_not_a_full_window_stripe`.
 - While plan mode is open, the screen offers a Limits and Credits control
   when the next request does not draw included SuperGrok period limits.
   Opening it shows Limits before Credits. The control does not say
