@@ -5451,7 +5451,7 @@ pub(crate) fn sampling_config_for_model(
     }
 }
 /// Fold URL-derived headers into `extra_headers`. The sampler crate is intentionally URL-agnostic: it does not inspect `base_url` to decide which auth or staging headers to add.
-/// Replicate the URL-derived header logic at the shell boundary so callers downstream see a single homogenous header bag. cli-chat-proxy bases get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.
+/// Replicate the URL-derived header logic at the shell boundary so callers downstream see a single homogenous header bag. cli-chat-proxy bases (grok.com and `cli-chat-proxy.x.ai`) get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.
 /// This mirrors the inline match in the legacy `sampling::Client::new` on `is_cli_chat_proxy_url`. Existing entries are never overwritten so callers can pre-set a value.
 pub fn inject_url_derived_headers(
     headers: &mut IndexMap<String, String>,

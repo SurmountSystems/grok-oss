@@ -2355,6 +2355,57 @@ async fn default_method_stamps_parent_chat_jwt_when_auth_manager_is_empty() {
         "the nested request must carry Authorization, not Token-Auth alone"
     );
 }
+
+/// Operator live paste after grok-oss 1.0.45 (`fe6a62885ad4`):
+/// `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)`
+/// Nested spawn POST Authorization is the parent sampler JWT. A recovered AuthManager snapshot must not win.
+#[tokio::test]
+async fn nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recovered() {
+    use reqwest::header::{AUTHORIZATION, HeaderName};
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.auth = Some(xai_grok_login::GrokAuth {
+        key: "recovered-am-token".into(),
+        auth_mode: xai_grok_login::AuthMode::Oidc,
+        ..xai_grok_login::GrokAuth::test_default()
+    });
+    ctx.auth_method_id = crate::agent::auth_method::inherited_session_auth_method_id(
+        Some(&acp::AuthMethodId::new("default")),
+        ctx.auth.as_ref().map(|auth| auth.auth_mode),
+    );
+    ctx.sampling_config.api_key = Some("live-parent-jwt".into());
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://cli-chat-proxy.x.ai/v1".to_string();
+    let chat = spawn_test_parent_chat_state("grok-4.5");
+    chat.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("stale-chat-jwt".to_string()),
+        failover_api_keys: Vec::new(),
+        auth_type: xai_chat_state::AuthType::SessionToken,
+        alpha_test_key: None,
+        client_version: None,
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
+    });
+    let mut parent_sampling = test_sampling_config("grok-4.5");
+    parent_sampling.base_url = "https://cli-chat-proxy.x.ai/v1".to_string();
+    chat.update_sampling_config(parent_sampling);
+    ctx.parent_chat_state = Some(chat);
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+    let headers = client.post_headers();
+    assert_eq!(
+        headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+        Some("Bearer live-parent-jwt"),
+        "nested spawn POST Authorization must be the parent sampler JWT. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-xai-token-auth"))
+            .and_then(|v| v.to_str().ok()),
+        Some("xai-grok-cli"),
+        "Token-Auth stays when Authorization is the live parent JWT"
+    );
+}
 /// Every subagent config path must carry the live bearer resolver.
 /// A config frozen at spawn 401s for the rest of the subagent's life once the parent rotates its token (the wake-from-sleep failure mode).
 /// The test uses a first-party base URL so the assertion holds whether the catalog memo reports `NotByok` or `Unknown`.

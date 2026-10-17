@@ -727,7 +727,13 @@ impl SessionActor {
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         // Refresh the session token before the sampler reads it; gated to sessions that use it.
-        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+        // Nested reconstruct must not rotate the parent CLI session. That rotation leaves the
+        // spawn-time JWT as Authorization while the parent talks with the new one, which is
+        // cli-chat-proxy `auth_kind=bearer` … `reason=no auth context`.
+        if use_bearer_resolver
+            && !self.startup_hints.is_subagent
+            && let Some(am) = self.auth_manager.as_ref()
+        {
             let _ = am.auth().await;
             // SamplingClient::post stamps bearer_resolver, not the ranked api_key.
             // When limits mode is on, align that bearer to the included

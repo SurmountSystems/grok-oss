@@ -850,6 +850,52 @@ mod tests {
         );
     }
 
+    /// Operator live paste after grok-oss 1.0.45 (`fe6a62885ad4`):
+    /// `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)`
+    /// Nested POST Authorization is the inherited parent sampler JWT. Token-Auth stays because that Bearer is a session.
+    #[test]
+    fn nested_post_uses_inherited_parent_jwt_as_authorization_bearer() {
+        use reqwest::header::{AUTHORIZATION, HeaderName};
+        use xai_grok_sampler::{AuthScheme, SamplerConfig, SamplingClient};
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("recovered-am-token", ChronoDuration::hours(1))),
+        );
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("live-parent-jwt".into()));
+        let mut extra_headers = indexmap::IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: Some("recovered-am-token".into()),
+            extra_headers,
+            bearer_resolver: Some(resolver),
+            auth_scheme: AuthScheme::Bearer,
+            base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+            model: "test".into(),
+            context_window: 256_000,
+            ..Default::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let headers = client.post_headers();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer live-parent-jwt"),
+            "nested POST Authorization must be the inherited parent sampler JWT, not a recovered AuthManager token. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+        );
+        assert_eq!(
+            headers
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .and_then(|v| v.to_str().ok()),
+            Some("xai-grok-cli"),
+            "Token-Auth stays when Authorization is the live parent JWT"
+        );
+    }
+
     /// The wait is bounded by the cached bearer's remaining life, so a slow mint cannot outlive the token it was protecting.
     #[test]
     fn pre_send_budget_never_outlives_the_cached_bearer() {

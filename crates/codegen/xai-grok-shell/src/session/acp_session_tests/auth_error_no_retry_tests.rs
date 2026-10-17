@@ -2178,6 +2178,89 @@ async fn reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_man
         .await;
 }
 
+/// Nested reconstruct must not rotate the parent CLI session when the live sampler JWT is present.
+/// Operator live paste: `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)`
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_nested_does_not_rotate_parent_session_when_live_jwt_is_present() {
+    use reqwest::header::AUTHORIZATION;
+    use xai_grok_sampler::BearerResolver;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let live = xai_grok_sampler::SamplerConfig {
+                api_key: Some("live-parent-jwt".into()),
+                base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                model: "test".into(),
+                context_window: 256_000,
+                ..Default::default()
+            };
+            let handle = xai_grok_sampler::SamplerActor::spawn(
+                live,
+                xai_grok_sampler::RetryPolicy::default(),
+                event_tx,
+            );
+            let called = Arc::new(AtomicBool::new(false));
+            let (dir, am) = auth_manager_with_refresher(Arc::new(AlwaysSucceedRefresher {
+                called: called.clone(),
+            }));
+            let _dir = dir;
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "recovered-am-token".into(),
+            )
+            .await;
+            actor
+                .chat_state_handle
+                .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+                    base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                    model: "test".into(),
+                    context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+                    ..Default::default()
+                });
+            actor
+                .chat_state_handle
+                .update_credentials(xai_chat_state::Credentials {
+                    api_key: Some("recovered-am-token".into()),
+                    failover_api_keys: Vec::new(),
+                    auth_type: xai_chat_state::AuthType::SessionToken,
+                    ..Default::default()
+                });
+            let mut hints = actor.startup_hints.clone();
+            hints.is_subagent = true;
+            actor.startup_hints = hints;
+            actor.sampler_handle = handle;
+            let reconstructed = actor.reconstruct_full_config().await;
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "nested reconstruct must not rotate the parent CLI session when the live parent JWT is present"
+            );
+            assert_eq!(
+                reconstructed
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.current_bearer())
+                    .as_deref()
+                    .or(reconstructed.api_key.as_deref()),
+                Some("live-parent-jwt"),
+                "nested reconstruct POST must use the live sampler JWT, not a recovered AuthManager token"
+            );
+            let client =
+                xai_grok_sampler::SamplingClient::new(reconstructed).expect("client should build");
+            assert_eq!(
+                client
+                    .post_headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer live-parent-jwt"),
+                "nested follow-up POST Authorization must be the inherited parent JWT. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+            );
+        })
+        .await;
+}
+
 /// When limits mode is on, the next model request draws included SuperGrok
 /// period limits. `SamplingClient::post` stamps `bearer_resolver`, not the
 /// ranked `api_key`. A live Team JWT stays on that session when no live

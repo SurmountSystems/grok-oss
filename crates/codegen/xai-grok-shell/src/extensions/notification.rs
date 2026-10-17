@@ -1626,7 +1626,7 @@ mod tests {
     #[test]
     fn parent_bearer_no_auth_context_does_not_stamp_and_nested_still_stamps() {
         let parent_bearer_no_auth = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: {\"error\":\"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)\"}";
-        let live_nested_paste = "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        let live_nested_paste = "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
         let parent_empty_bearer = "Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
         assert!(
             is_nested_missing_auth_context(parent_bearer_no_auth),

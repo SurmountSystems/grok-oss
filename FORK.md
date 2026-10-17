@@ -2586,6 +2586,10 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 
 - Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
 - Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
+- Nested spawn POST Authorization Bearer is the parent sampler JWT when AuthManager has a recovered snapshot. Named test: `nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recovered`.
+- Nested reconstruct keeps the live sampler JWT as Authorization Bearer. Named test: `reconstruct_full_config_nested_does_not_rotate_parent_session_when_live_jwt_is_present`.
+- Nested POST Authorization Bearer is the inherited parent sampler JWT. Named test: `nested_post_uses_inherited_parent_jwt_as_authorization_bearer`.
+- The Operator live paste `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)` is the nested missing-auth banner. Named test: `nested_missing_auth_formats_the_operator_live_paste`.
 - A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
 - Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`.
 - A `"default"` ACP method with a live parent session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.

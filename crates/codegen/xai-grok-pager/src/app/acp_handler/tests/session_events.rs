@@ -733,7 +733,7 @@
         // Live nested 401 (Operator 2026-10-16). A Bearer rode the wire. The proxy still has no session. Parent talks.
         assert!(!is_reauthable_failure(
             Some("auth"),
-            "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+            "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
         ));
         // Compact wrappers sometimes drop `reason=no auth context` and keep `auth_kind=other`.
         assert!(!is_reauthable_failure(
@@ -817,7 +817,7 @@
         apply_retry_state(
             &RetryState::Failed {
                 error_type: "auth".into(),
-                message: "Request failed (401): Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+                message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
             },
             &mut session,
             &mut scrollback,

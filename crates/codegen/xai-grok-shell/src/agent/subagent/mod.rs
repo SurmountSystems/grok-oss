@@ -391,24 +391,25 @@ const _: () = {
     assert_send::<SubagentSpawnContext>()
 };
 impl SubagentSpawnContext {
-    /// Parent JWT to stamp when `AuthManager.current_wire_valid` is empty.
-    /// The parent turn often keeps that JWT on `sampling_config` or in `current_or_expired` while ACP method is still `"default"`.
+    /// JWT the live parent sampler is talking with.
+    /// `sampling_config.api_key` is that JWT. `auth.key` and AuthManager can be a recovered
+    /// CLI session the proxy still rejects (`auth_kind=bearer` … `reason=no auth context`).
     fn inherited_fallback_key(&self) -> Option<String> {
-        self.auth
-            .as_ref()
-            .map(|auth| auth.key.clone())
+        self.sampling_config
+            .api_key
+            .clone()
             .filter(|key| !key.is_empty())
+            .or_else(|| {
+                self.auth
+                    .as_ref()
+                    .map(|auth| auth.key.clone())
+                    .filter(|key| !key.is_empty())
+            })
             .or_else(|| {
                 self.auth_manager
                     .current_wire_valid()
                     .or_else(|| self.auth_manager.current_or_expired())
                     .map(|auth| auth.key)
-                    .filter(|key| !key.is_empty())
-            })
-            .or_else(|| {
-                self.sampling_config
-                    .api_key
-                    .clone()
                     .filter(|key| !key.is_empty())
             })
     }
@@ -841,6 +842,21 @@ fn inherited_bearer_resolver(
         .byok;
     session_bearer_resolver(ctx, byok, base_url, ranked_key)
 }
+
+/// Token-Auth on a cli-chat-proxy URL when the nested Bearer is non-empty.
+/// A recovered AuthManager snapshot must not drop it. Empty Bearer still strips it.
+fn apply_nested_cli_chat_proxy_headers(
+    extra_headers: &mut indexmap::IndexMap<String, String>,
+    alpha_test_key: Option<&str>,
+    base_url: &str,
+    sendable_bearer: Option<&str>,
+) {
+    crate::agent::config::inject_url_derived_headers(extra_headers, alpha_test_key, base_url);
+    if sendable_bearer.is_none_or(|key| key.is_empty()) {
+        extra_headers.shift_remove("X-XAI-Token-Auth");
+        extra_headers.shift_remove("x-authenticateresponse");
+    }
+}
 fn parent_catalog_model_id(ctx: &SubagentSpawnContext, routing_model: &str) -> acp::ModelId {
     let models = ctx.models_manager.models();
     resolve_catalog_key(&models, &ctx.model_id)
@@ -857,11 +873,6 @@ async fn read_parent_sampling_config(
         if let Some(cfg) = chat_state.get_sampling_config().await {
             let creds = chat_state.get_credentials().await;
             let mut extra_headers = cfg.extra_headers;
-            crate::agent::config::inject_url_derived_headers(
-                &mut extra_headers,
-                creds.alpha_test_key.as_deref(),
-                &cfg.base_url,
-            );
             let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
@@ -876,10 +887,12 @@ async fn read_parent_sampling_config(
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
                 ctx.inherited_fallback_key(),
             );
-            if api_key.as_ref().is_none_or(|key| key.is_empty()) {
-                extra_headers.shift_remove("X-XAI-Token-Auth");
-                extra_headers.shift_remove("x-authenticateresponse");
-            }
+            apply_nested_cli_chat_proxy_headers(
+                &mut extra_headers,
+                creds.alpha_test_key.as_deref(),
+                &cfg.base_url,
+                api_key.as_deref(),
+            );
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
             let supports_backend_search = ctx
                 .models_manager
@@ -981,6 +994,12 @@ async fn read_parent_sampling_config(
         fallback.api_key.clone(),
         ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
         ctx.inherited_fallback_key(),
+    );
+    apply_nested_cli_chat_proxy_headers(
+        &mut fallback.extra_headers,
+        ctx.alpha_test_key.as_deref(),
+        &fallback.base_url,
+        fallback.api_key.as_deref(),
     );
     fallback.bearer_resolver = inherited_bearer_resolver(
         ctx,
