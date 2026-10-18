@@ -1290,6 +1290,7 @@ pub(super) fn make_test_handle(
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
     }
 }
 #[tokio::test]

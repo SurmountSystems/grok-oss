@@ -5485,6 +5485,45 @@ pub fn inject_url_derived_headers(
     }
     let _ = (alpha_test_key, base_url);
 }
+
+fn extra_header_ci<'a>(
+    headers: &'a IndexMap<String, String>,
+    name: &str,
+) -> Option<(&'a str, &'a str)> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+}
+
+fn extra_header_remove_ci(headers: &mut IndexMap<String, String>, name: &str) {
+    let keys: Vec<String> = headers
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case(name))
+        .cloned()
+        .collect();
+    for key in keys {
+        headers.shift_remove(&key);
+    }
+}
+
+/// Nested spawn and nested reconstruct copy `X-XAI-Token-Auth` and
+/// `x-authenticateresponse` from the live parent sampler extra headers.
+/// Injecting Token-Auth when that bag omits it is the live 401:
+/// `auth_kind=bearer, x_xai_token_auth=xai-grok-cli, ... reason=no auth context`.
+pub(crate) fn match_cli_chat_proxy_identity_headers_to_parent(
+    extra_headers: &mut IndexMap<String, String>,
+    parent_extra_headers: Option<&IndexMap<String, String>>,
+) {
+    for name in ["X-XAI-Token-Auth", "x-authenticateresponse"] {
+        extra_header_remove_ci(extra_headers, name);
+        if let Some(parent) = parent_extra_headers
+            && let Some((key, value)) = extra_header_ci(parent, name)
+        {
+            extra_headers.insert(key.to_string(), value.to_string());
+        }
+    }
+}
 fn resolve_hidden_default_web_search_sampling_config(
     model_id: &str,
     session_key: Option<&str>,

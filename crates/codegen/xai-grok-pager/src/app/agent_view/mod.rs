@@ -947,6 +947,10 @@ pub struct AgentView {
     pub credit_limit_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Complete prompt stashed from a turn that failed because the login expired (401 / re-auth). Used by the `AuthComplete` handler to auto-resubmit the prompt after a successful mid-session re-auth so the user doesn't have to retype it.
     pub reauth_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
+    /// Prompt ids of nested `UnstickResendPrompt` sends after AuthComplete.
+    /// The "Re-authenticated. Resuming nested work" copy waits until one of these
+    /// sends is in flight or succeeded. A nested 401 with no auth context clears them.
+    pub(crate) nested_resume_prompt_ids: Vec<String>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

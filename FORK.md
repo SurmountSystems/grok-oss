@@ -2708,6 +2708,13 @@ Rebuild IPC is already wired. This wave does not rewrite
   `plan_mode_prompt_input_keeps_a_white_outline` stays. It draws the
   white outline on the plan-mode prompt input. It does not draw this
   approval screen.
+- Idle plan approval (four CTAs, focus Preview) does not paint a titled
+  Grok OSS composer under the panel and does not paint
+  `Type a revision...`. That placeholder is only after Revise. Tab:prompt
+  focuses the in-panel plan prompt, not a second composer. Named tests:
+  `plan_approval_does_not_paint_the_main_grok_oss_composer_under_the_plan_panel`,
+  `plan_approval_idle_does_not_show_type_a_revision_while_approve_comment_revise_exit_are_idle`,
+  `tab_prompt_on_plan_approval_focuses_the_plan_prompt_not_a_second_composer`.
 - While planning, the Operator can view an attached image. Named test:
   `planning_opens_an_attached_image_for_viewing`.
   `plan_mode_keeps_an_image_the_operator_provides` stays the send path.

@@ -432,6 +432,22 @@ pub(super) fn handle_session_notification_with_origin(
                 is_api_key_auth,
                 nested_implementers_running,
             );
+            let nested_missing_auth = match &retry {
+                xai_grok_shell::extensions::notification::RetryState::Failed {
+                    message, ..
+                } => xai_grok_shell::extensions::notification::is_nested_missing_auth_context(
+                    message,
+                ),
+                xai_grok_shell::extensions::notification::RetryState::Exhausted {
+                    reason, ..
+                } => {
+                    xai_grok_shell::extensions::notification::is_nested_missing_auth_context(reason)
+                }
+                _ => false,
+            };
+            if nested_missing_auth {
+                agent.nested_resume_prompt_ids.clear();
+            }
             true
         }
         XaiSessionUpdate::ImageCompressed {
@@ -2524,6 +2540,9 @@ pub(super) fn apply_retry_state_with_nested(
             reason,
             is_rate_limited: rate_limited,
         } => {
+            if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(reason) {
+                crate::app::dispatch::strip_resuming_nested_work_copy(scrollback);
+            }
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
             if *rate_limited {
@@ -2568,6 +2587,9 @@ pub(super) fn apply_retry_state_with_nested(
             error_type,
             message,
         } => {
+            if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(message) {
+                crate::app::dispatch::strip_resuming_nested_work_copy(scrollback);
+            }
             session.set_retry_activity(None);
             let wire = crate::app::error_display::WireErrorType::parse(Some(error_type.as_str()));
             if wire == crate::app::error_display::WireErrorType::EncryptedContentMismatch {

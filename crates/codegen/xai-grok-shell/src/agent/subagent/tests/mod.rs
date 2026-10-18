@@ -310,6 +310,7 @@ fn wedged_child_handle() -> (
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
     };
     (handle, cmd_rx, signals_actor)
 }
@@ -2941,9 +2942,9 @@ fn subagent_override_auth_rank_flags_fail_closed_when_config_missing_and_session
 /// Named contract: subagent model override uses parent agent_config auto_use
 /// rank (omit console while SuperGrok included has headroom). Must not fall
 /// back to bare resolve when agent_config is present.
-#[test]
+#[tokio::test]
 #[serial_test::serial]
-fn resolve_model_override_agent_config_auto_use_omits_console() {
+async fn resolve_model_override_agent_config_auto_use_omits_console() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::agent::config::{Config, ModelEntry, ModelInfo};
     use crate::auth::{AuthMode, GrokAuth, GrokComConfig};
@@ -3014,6 +3015,7 @@ fn resolve_model_override_agent_config_auto_use_omits_console() {
         .insert("override-model".to_string(), entry);
 
     let (sc, mid) = super::resolve_model_override_to_config("override-model", &ctx)
+        .await
         .expect("override model must resolve");
     assert_eq!(mid.0.as_ref(), "override-model");
     // Host GROK_HOME OnceLock may rank a real SuperGrok JWT; contract is
@@ -3036,9 +3038,9 @@ fn resolve_model_override_agent_config_auto_use_omits_console() {
 
 /// Config/agent_config missing, parent sampling SuperGrok-session-only, session
 /// live + console env key → override must not re-queue console.
-#[test]
+#[tokio::test]
 #[serial_test::serial]
-fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
+async fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::agent::config::{ModelEntry, ModelInfo};
     use crate::auth::{AuthMode, GrokAuth};
@@ -3105,6 +3107,7 @@ fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
         .insert("override-model".to_string(), entry);
 
     let (sc, _) = super::resolve_model_override_to_config("override-model", &ctx)
+        .await
         .expect("override model must resolve");
     assert_ne!(
         sc.api_key.as_deref(),
@@ -3124,9 +3127,9 @@ fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
 }
 
 /// preferred_method=api_key pin on agent_config: console primary on model override.
-#[test]
+#[tokio::test]
 #[serial_test::serial]
-fn resolve_model_override_api_key_pin_keeps_console_primary() {
+async fn resolve_model_override_api_key_pin_keeps_console_primary() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::agent::config::{Config, ModelEntry, ModelInfo};
     use crate::auth::{AuthMode, GrokAuth, GrokComConfig, PreferredAuthMethod};
@@ -3178,6 +3181,7 @@ fn resolve_model_override_api_key_pin_keeps_console_primary() {
         .insert("override-model".to_string(), entry);
 
     let (sc, _) = super::resolve_model_override_to_config("override-model", &ctx)
+        .await
         .expect("override model must resolve");
     assert_eq!(
         sc.api_key.as_deref(),

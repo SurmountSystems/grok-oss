@@ -294,10 +294,92 @@ fn nested_l2_needs_auth_resume(info: &crate::app::subagent::SubagentInfo) -> boo
     !matches!(status, Some("completed") | Some("cancelled"))
 }
 
+/// Operator 2026-10-17: this sentence is true only after a nested POST with the
+/// live parent sampler JWT is in flight or succeeded. Parent `/login` is not that.
+pub(crate) const RESUMING_NESTED_WORK_COPY: &str = "Re-authenticated. Resuming nested work";
+
+pub(crate) fn is_resuming_nested_work_copy(text: &str) -> bool {
+    let rest = text.trim().strip_prefix(RESUMING_NESTED_WORK_COPY);
+    matches!(rest, Some("") | Some("\u{2026}") | Some("..."))
+}
+
+pub(crate) fn strip_resuming_nested_work_copy(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+) {
+    let ids: Vec<_> = (0..scrollback.len())
+        .filter_map(|idx| {
+            let entry = scrollback.entry(idx)?;
+            match &entry.block {
+                RenderBlock::System(block) if is_resuming_nested_work_copy(&block.text) => {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for id in ids {
+        scrollback.remove_entry(id);
+    }
+}
+
+fn paint_resuming_nested_work_copy(scrollback: &mut crate::scrollback::state::ScrollbackState) {
+    let already = (0..scrollback.len()).any(|idx| {
+        matches!(
+            scrollback.entry(idx).map(|e| &e.block),
+            Some(RenderBlock::System(block)) if is_resuming_nested_work_copy(&block.text)
+        )
+    });
+    if already {
+        return;
+    }
+    scrollback.push_block(RenderBlock::system(format!(
+        "{RESUMING_NESTED_WORK_COPY}\u{2026}"
+    )));
+}
+
+/// Paint the nested-resume copy only after that UnstickResendPrompt resolved ok.
+/// A nested 401 with `auth_kind=bearer` plus `reason=no auth context` must not
+/// leave the sentence up as if nested work re-authenticated and resumed.
+pub(crate) fn apply_nested_resume_copy_outcome(
+    agent: &mut AgentView,
+    prompt_id: Option<&str>,
+    response_pid: Option<&str>,
+    succeeded: bool,
+    error: Option<&str>,
+) {
+    let matched = [prompt_id, response_pid]
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            agent
+                .nested_resume_prompt_ids
+                .iter()
+                .position(|id| id == candidate)
+                .map(|index| agent.nested_resume_prompt_ids.remove(index))
+        })
+        .is_some();
+    let nested_missing_auth = error.is_some_and(|message| {
+        xai_grok_shell::extensions::notification::is_nested_missing_auth_context(message)
+    });
+    if nested_missing_auth || (matched && !succeeded) {
+        strip_resuming_nested_work_copy(&mut agent.scrollback);
+        return;
+    }
+    if matched && succeeded {
+        paint_resuming_nested_work_copy(&mut agent.scrollback);
+    }
+}
+
 /// After re-auth, resend the nested L2's last prompt the same way a dropped
 /// network does. The parent session stays bound. `LoadSession` of the nested
 /// id would replace the parent chat.
+///
+/// AuthComplete may un-finish those L2s and emit `UnstickResendPrompt`. The
+/// "Re-authenticated. Resuming nested work" copy waits until that resend's
+/// PromptResponse succeeds. Painting it here after parent `/login` is a lie
+/// when nested still 401s.
 fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
+    strip_resuming_nested_work_copy(&mut agent.scrollback);
     let agent_id = agent.session.id;
     let mut resumes = Vec::new();
     for info in agent.subagent_sessions.values_mut() {
@@ -312,22 +394,18 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
         info.status = None;
         info.attempt.status = None;
     }
-    if resumes.is_empty() {
-        return Vec::new();
-    }
-    agent.scrollback.push_block(RenderBlock::system(
-        "Re-authenticated. Resuming nested work\u{2026}".to_string(),
-    ));
     let mut effects = Vec::new();
     for (child_sid, text) in resumes {
         if text.is_empty() {
             continue;
         }
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        agent.nested_resume_prompt_ids.push(prompt_id.clone());
         effects.push(Effect::UnstickResendPrompt {
             agent_id,
             session_id: acp::SessionId::new(child_sid),
             text,
-            prompt_id: uuid::Uuid::new_v4().to_string(),
+            prompt_id,
             images: Vec::new(),
             images_dir: None,
         });

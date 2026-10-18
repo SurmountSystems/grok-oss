@@ -782,6 +782,13 @@ impl SessionActor {
             creds.alpha_test_key.as_deref(),
             &cfg.base_url,
         );
+        if self.startup_hints.is_subagent {
+            let live_headers = self.sampler_handle.current_extra_headers().await;
+            crate::agent::config::match_cli_chat_proxy_identity_headers_to_parent(
+                &mut extra_headers,
+                Some(&live_headers),
+            );
+        }
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
         if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
@@ -889,10 +896,10 @@ impl SessionActor {
             sampling.api_key = self.sampler_handle.current_api_key().await;
         }
         if sampling.api_key.as_ref().is_none_or(|key| key.is_empty()) {
-            sampling.extra_headers.shift_remove("X-XAI-Token-Auth");
-            sampling
-                .extra_headers
-                .shift_remove("x-authenticateresponse");
+            crate::agent::config::match_cli_chat_proxy_identity_headers_to_parent(
+                &mut sampling.extra_headers,
+                None,
+            );
         }
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             sampling.bearer_resolver = Some(

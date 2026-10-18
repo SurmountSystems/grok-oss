@@ -921,7 +921,7 @@ async fn run_shell_child_body(
         && let Some(ref source_model) = source.model_id
         && effective_model_id.0.as_ref() != source_model.as_str()
     {
-        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
+        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx).await {
             tracing::info!(
                 subagent_id = %request.id,
                 resolved_model = %effective_model_id.0,

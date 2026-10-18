@@ -603,6 +603,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // Tab:prompt focuses the in-panel plan prompt, not a second composer.
+        if in_plan_approval && key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            return self.focus_plan_prompt(PlanPromptIntent::Revise);
+        }
+
         // Accepted plan search: n/N jump hits. They must not type into the
         // Operator box and must not RowWalk focus.
         if matches!(key.code, KeyCode::Char('n' | 'N'))

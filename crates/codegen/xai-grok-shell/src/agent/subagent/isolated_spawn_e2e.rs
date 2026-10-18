@@ -86,6 +86,7 @@ fn spawn_ctx(parent_cwd: PathBuf) -> SubagentSpawnContext {
         subagent_roles: HashMap::new(),
         subagent_personas: HashMap::new(),
         parent_chat_state: None,
+        parent_sampler_handle: None,
         available_models: indexmap::IndexMap::new(),
         subagent_model_overrides: HashMap::new(),
         subagent_toggle: HashMap::new(),

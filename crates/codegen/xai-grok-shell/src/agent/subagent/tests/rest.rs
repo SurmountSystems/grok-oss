@@ -2356,13 +2356,34 @@ async fn default_method_stamps_parent_chat_jwt_when_auth_manager_is_empty() {
     );
 }
 
-/// Operator live paste after grok-oss 1.0.45 (`fe6a62885ad4`):
+/// Operator live paste after grok-oss 1.0.45 (`b422b0ac9ea4`):
 /// `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)`
-/// Nested spawn POST Authorization is the parent sampler JWT. A recovered AuthManager snapshot must not win.
+/// Nested spawn POST Authorization equals `parent_sampler_handle.current_api_key()` byte for byte.
+/// Token-Auth is present if and only if that live sampler extra headers already send it.
+/// A recovered AuthManager snapshot, a stale chat JWT, and a stale spawn snapshot must not win.
 #[tokio::test]
 async fn nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recovered() {
     use reqwest::header::{AUTHORIZATION, HeaderName};
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let parent_sampler = xai_grok_sampler::SamplerActor::spawn(
+        xai_grok_sampler::SamplerConfig {
+            api_key: Some("live-parent-jwt".into()),
+            base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+            model: "grok-4.5".into(),
+            context_window: 256_000,
+            extra_headers: indexmap::IndexMap::new(),
+            ..Default::default()
+        },
+        xai_grok_sampler::RetryPolicy::default(),
+        event_tx,
+    );
+    let live_jwt = parent_sampler
+        .current_api_key()
+        .await
+        .expect("parent sampler JWT");
+    assert_eq!(live_jwt.as_str(), "live-parent-jwt");
     let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_sampler_handle = Some(parent_sampler);
     ctx.auth = Some(xai_grok_login::GrokAuth {
         key: "recovered-am-token".into(),
         auth_mode: xai_grok_login::AuthMode::Oidc,
@@ -2372,7 +2393,76 @@ async fn nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recover
         Some(&acp::AuthMethodId::new("default")),
         ctx.auth.as_ref().map(|auth| auth.auth_mode),
     );
-    ctx.sampling_config.api_key = Some("live-parent-jwt".into());
+    ctx.sampling_config.api_key = Some("stale-spawn-snapshot".into());
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://cli-chat-proxy.x.ai/v1".to_string();
+    let chat = spawn_test_parent_chat_state("grok-4.5");
+    chat.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("stale-chat-jwt".to_string()),
+        failover_api_keys: Vec::new(),
+        auth_type: xai_chat_state::AuthType::SessionToken,
+        alpha_test_key: None,
+        client_version: None,
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
+    });
+    let mut parent_sampling = test_sampling_config("grok-4.5");
+    parent_sampling.base_url = "https://cli-chat-proxy.x.ai/v1".to_string();
+    chat.update_sampling_config(parent_sampling);
+    ctx.parent_chat_state = Some(chat);
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+    let headers = client.post_headers();
+    let expected = format!("Bearer {live_jwt}");
+    assert_eq!(
+        headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+        Some(expected.as_str()),
+        "nested spawn POST Authorization must equal sampler_handle.current_api_key() byte for byte. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-xai-token-auth"))
+            .and_then(|v| v.to_str().ok()),
+        None,
+        "Token-Auth is present on nested if and only if the parent live extra headers send it. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+    );
+}
+/// Companion: parent live extra headers already send Token-Auth, so nested POST keeps it.
+#[tokio::test]
+async fn nested_spawn_post_sends_token_auth_when_parent_live_headers_have_it() {
+    use reqwest::header::{AUTHORIZATION, HeaderName};
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut extra_headers = indexmap::IndexMap::new();
+    extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+    extra_headers.insert(
+        "x-authenticateresponse".to_string(),
+        "authenticate-response".to_string(),
+    );
+    let parent_sampler = xai_grok_sampler::SamplerActor::spawn(
+        xai_grok_sampler::SamplerConfig {
+            api_key: Some("live-parent-jwt".into()),
+            base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+            model: "grok-4.5".into(),
+            context_window: 256_000,
+            extra_headers,
+            ..Default::default()
+        },
+        xai_grok_sampler::RetryPolicy::default(),
+        event_tx,
+    );
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_sampler_handle = Some(parent_sampler);
+    ctx.auth = Some(xai_grok_login::GrokAuth {
+        key: "recovered-am-token".into(),
+        auth_mode: xai_grok_login::AuthMode::Oidc,
+        ..xai_grok_login::GrokAuth::test_default()
+    });
+    ctx.auth_method_id = crate::agent::auth_method::inherited_session_auth_method_id(
+        Some(&acp::AuthMethodId::new("default")),
+        ctx.auth.as_ref().map(|auth| auth.auth_mode),
+    );
+    ctx.sampling_config.api_key = Some("stale-spawn-snapshot".into());
     ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.sampling_config.base_url = "https://cli-chat-proxy.x.ai/v1".to_string();
     let chat = spawn_test_parent_chat_state("grok-4.5");
@@ -2403,7 +2493,7 @@ async fn nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recover
             .get(HeaderName::from_static("x-xai-token-auth"))
             .and_then(|v| v.to_str().ok()),
         Some("xai-grok-cli"),
-        "Token-Auth stays when Authorization is the live parent JWT"
+        "Token-Auth stays when the parent live extra headers already send it"
     );
 }
 /// Every subagent config path must carry the live bearer resolver.
@@ -2501,8 +2591,8 @@ async fn read_parent_sampling_config_fallback_no_resolver_for_api_key_method() {
 }
 /// The override path wires the resolver for a session key regardless of freshness. Hard-expired (the post-sleep 401 window) is the case that matters.
 /// Gating on whether the key is still valid would freeze the subagent for life. The sampler strips the dead seeded key at request time instead.
-#[test]
-fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys() {
+#[tokio::test]
+async fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys() {
     for auth in [
         xai_grok_login::GrokAuth {
             key: "session-jwt".into(),
@@ -2523,21 +2613,21 @@ fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys
         ctx.auth = Some(auth);
         ctx.available_models
             .insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
-        let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
+        let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).await.unwrap();
         assert!(config.bearer_resolver.is_some(), "key={key}");
     }
 }
 /// `would_strip_fallback_key` on the override path.
 /// `XAI_API_KEY`'s presence varies by environment, so assert the rule itself rather than one branch of it.
-#[test]
-fn resolve_model_override_to_config_never_strips_a_fallback_key() {
+#[tokio::test]
+async fn resolve_model_override_to_config_never_strips_a_fallback_key() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.auth_method_id = acp::AuthMethodId::new(
         crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
     );
     ctx.auth = None;
     ctx.available_models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
-    let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
+    let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).await.unwrap();
     if let Some(key) = config.api_key.as_deref() {
         assert_eq!(
             config
@@ -2555,8 +2645,8 @@ fn resolve_model_override_to_config_never_strips_a_fallback_key() {
     }
 }
 /// A wired resolver is the sampler's sole auth source, so it must never displace a per-model key.
-#[test]
-fn resolve_model_override_to_config_no_resolver_for_byok_model() {
+#[tokio::test]
+async fn resolve_model_override_to_config_no_resolver_for_byok_model() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.auth_method_id = acp::AuthMethodId::new(
         crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
@@ -2564,7 +2654,7 @@ fn resolve_model_override_to_config_no_resolver_for_byok_model() {
     let mut byok = test_model_entry("byok-model");
     byok.api_key = Some("sk-byok".to_string());
     ctx.available_models.insert("byok-model".to_string(), byok);
-    let (config, _) = resolve_model_override_to_config("byok-model", &ctx).unwrap();
+    let (config, _) = resolve_model_override_to_config("byok-model", &ctx).await.unwrap();
     assert!(config.bearer_resolver.is_none());
     assert_eq!(config.api_key.as_deref(), Some("sk-byok"));
 }

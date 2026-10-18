@@ -3,8 +3,9 @@
 use crate::slash::commands::doctor as doctor_src;
 
 use super::auth::{
-    scrollback_has_recent_context_too_large, scrollback_has_recent_disk_full,
-    scrollback_has_recent_reauth_prompt, scrollback_has_recent_request_failed,
+    apply_nested_resume_copy_outcome, scrollback_has_recent_context_too_large,
+    scrollback_has_recent_disk_full, scrollback_has_recent_reauth_prompt,
+    scrollback_has_recent_request_failed,
 };
 use super::billing::is_credit_limit_error;
 use super::ctx::{get_active_agent_mut, visible_agent_mut, with_active_agent};
@@ -2345,6 +2346,13 @@ pub(super) fn handle_prompt_response(
                 .map(str::to_string),
             Err(_) => prompt_id.clone(),
         };
+        apply_nested_resume_copy_outcome(
+            agent,
+            prompt_id.as_deref(),
+            response_pid.as_deref(),
+            result.is_ok(),
+            result.as_ref().err().map(String::as_str),
+        );
         // Success, error, and cancel all write prompt_exec_metrics. A
         // response that never became the running turn still closes its
         // own live task. Missing grok_oss.db stays fail-open.

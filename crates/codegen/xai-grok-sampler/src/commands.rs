@@ -1,6 +1,7 @@
 //! `SamplerCommand` is `pub(crate)` because it is the wire between [`SamplerHandle`](crate::handle::SamplerHandle) and the actor task.
 //! External callers always go through `SamplerHandle`.
 
+use indexmap::IndexMap;
 use tokio::sync::oneshot;
 
 use xai_grok_sampling_types::ConversationRequest;
@@ -45,5 +46,10 @@ pub(crate) enum SamplerCommand {
     /// Query: the live actor config's `api_key` (the JWT the parent turn still talks with).
     CurrentApiKey {
         reply: oneshot::Sender<Option<String>>,
+    },
+
+    /// Query: the live actor config's extra headers (Token-Auth present or absent).
+    CurrentExtraHeaders {
+        reply: oneshot::Sender<IndexMap<String, String>>,
     },
 }

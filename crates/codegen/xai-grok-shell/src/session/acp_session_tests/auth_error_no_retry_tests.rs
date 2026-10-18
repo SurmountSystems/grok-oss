@@ -2249,13 +2249,20 @@ async fn reconstruct_full_config_nested_does_not_rotate_parent_session_when_live
             );
             let client =
                 xai_grok_sampler::SamplingClient::new(reconstructed).expect("client should build");
+            let headers = client.post_headers();
             assert_eq!(
-                client
-                    .post_headers()
+                headers
                     .get(AUTHORIZATION)
                     .and_then(|v| v.to_str().ok()),
                 Some("Bearer live-parent-jwt"),
                 "nested follow-up POST Authorization must be the inherited parent JWT. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+            );
+            assert_eq!(
+                headers
+                    .get(reqwest::header::HeaderName::from_static("x-xai-token-auth"))
+                    .and_then(|v| v.to_str().ok()),
+                None,
+                "nested reconstruct must not inject Token-Auth when the live sampler extra headers omit it"
             );
         })
         .await;

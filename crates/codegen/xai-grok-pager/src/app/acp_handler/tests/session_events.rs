@@ -833,6 +833,49 @@
         assert_eq!(count_reauth_required(&scrollback), 0);
     }
 
+    /// Operator: "This is a fucking lie btw: Re-authenticated. Resuming nested work…"
+    /// A nested retry that still 401s with auth_kind=bearer plus reason=no auth context
+    /// must strip that success sentence and keep the 401 visible.
+    #[test]
+    fn apply_retry_state_nested_bearer_no_auth_context_does_not_leave_resuming_nested_work_copy() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        scrollback.push_block(RenderBlock::system(
+            "Re-authenticated. Resuming nested work\u{2026}".to_string(),
+        ));
+        scrollback.push_block(RenderBlock::system(
+            "Re-authenticated. Resuming nested work...".to_string(),
+        ));
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        let still_painted = (0..scrollback.len()).any(|i| {
+            matches!(
+                scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::System(sys))
+                    if crate::app::dispatch::is_resuming_nested_work_copy(&sys.text)
+            )
+        });
+        assert!(
+            !still_painted,
+            "owed outcome: the product does not paint Re-authenticated. Resuming nested work when the nested retry still 401s with auth_kind=bearer plus reason=no auth context"
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
+        assert!(
+            matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::RequestFailed { .. })
+            ),
+            "keep the nested 401 visible"
+        );
+    }
+
     /// Nested give-up after recovery claimed success must not paint `/login` while the parent talks.
     #[test]
     fn apply_retry_state_nested_auth_give_up_does_not_paint_login() {
