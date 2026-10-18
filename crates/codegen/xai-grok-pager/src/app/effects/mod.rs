@@ -2480,21 +2480,33 @@ pub(crate) fn execute(
                                 .expect("serialize auth_url params")
                                 .into(),
                         );
-                        if let Ok(resp) = acp_send(req, &tx).await {
-                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
-                                .unwrap_or_default();
-                            external = v
-                                .get("external_provider")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            mode = v
-                                .get("mode")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            auth_url = v
-                                .get("auth_url")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
+                        match tokio::time::timeout(
+                            crate::app::app_view::CONNECTING_SPLASH_WAIT,
+                            acp_send(req, &tx),
+                        )
+                        .await
+                        {
+                            Ok(Ok(resp)) => {
+                                let v: serde_json::Value = serde_json::from_str(resp.0.get())
+                                    .unwrap_or_default();
+                                external = v
+                                    .get("external_provider")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                mode = v
+                                    .get("mode")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                auth_url = v
+                                    .get("auth_url")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                            Ok(Err(_)) => {}
+                            Err(_) => {
+                                // Hung get_url (or last-session restore occupying the agent).
+                                break;
+                            }
                         }
                         if auth_url.is_some() {
                             break;

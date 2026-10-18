@@ -493,6 +493,28 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     }
 }
 
+/// Connecting... splash wait ended: show a real auth error. Last-session restore stays deferred.
+pub(super) fn dispatch_connecting_splash_timeout(app: &mut AppView) -> Vec<Effect> {
+    if !app.auth_state.is_connecting_splash() {
+        return vec![];
+    }
+    let cancel_seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => Some(*request_seq),
+        _ => None,
+    };
+    abort_prior_auth(app);
+    app.next_auth_request_seq += 1;
+    app.auth_state = AuthState::Pending {
+        error: Some(crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR.to_string()),
+    };
+    app.auth_show_raw_url = false;
+    app.auth_code_input.reset();
+    match cancel_seq {
+        Some(request_seq) => vec![Effect::CancelAuth { request_seq }],
+        None => vec![],
+    }
+}
+
 /// User submitted a manually-pasted auth token in loopback mode.
 pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<Effect> {
     let request_seq = match &app.auth_state {
@@ -588,6 +610,18 @@ pub(super) fn handle_auth_url_ready(
     external: bool,
     mode: Option<String>,
 ) -> Vec<Effect> {
+    let splash_miss = matches!(
+        &app.auth_state,
+        AuthState::Authenticating {
+            request_seq: current_seq,
+            mode: AuthMode::Pending,
+            auth_url: None,
+            ..
+        } if *current_seq == request_seq
+    ) && auth_url.is_none();
+    if splash_miss {
+        return dispatch_connecting_splash_timeout(app);
+    }
     if let AuthState::Authenticating {
         request_seq: current_seq,
         auth_url: current_url,

@@ -1277,6 +1277,137 @@ fn cancel_login_restores_view() {
     assert!(matches!(app.auth_state, AuthState::Done));
 }
 
+/// Named contract: a new grok-oss must leave Connecting... and show a real
+/// auth error without hanging forever on last-session restore.
+#[test]
+fn connecting_splash_timeout_leaves_connecting_without_last_session_restore() {
+    let mut app = test_app();
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    assert!(
+        app.auth_state.is_connecting_splash(),
+        "precondition: Connecting... splash"
+    );
+    let load = dispatch(
+        Action::LoadSession("huge-last-session".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        load.is_empty(),
+        "must not start last-session restore while Connecting..., got {load:?}"
+    );
+    assert!(
+        matches!(
+            app.deferred_startup.session,
+            Some(crate::app::session_startup::DeferredSessionStartup::Load { ref session_id, .. })
+                if session_id == "huge-last-session"
+        ),
+        "last-session stays deferred, got {:?}",
+        app.deferred_startup.session
+    );
+
+    let effects = dispatch(Action::ConnectingSplashTimeout, &mut app);
+    assert!(
+        !app.auth_state.is_connecting_splash(),
+        "must leave Connecting..., got {:?}",
+        app.auth_state
+    );
+    match &app.auth_state {
+        AuthState::Pending { error: Some(e) } => {
+            assert_eq!(e, crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR)
+        }
+        other => panic!("expected a real auth error, got {other:?}"),
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelAuth { request_seq: 1 })),
+        "must cancel the hung authenticate, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. })),
+        "must not hang on last-session restore to leave Connecting..., got {effects:?}"
+    );
+    assert!(
+        app.deferred_startup.session.is_some(),
+        "last-session stays deferred until a real AuthComplete"
+    );
+}
+
+#[test]
+fn auth_url_ready_without_url_leaves_connecting_splash() {
+    let mut app = test_app();
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthUrlReady {
+            request_seq: 1,
+            auth_url: None,
+            external: false,
+            mode: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        !app.auth_state.is_connecting_splash(),
+        "a finished URL poll with no URL must leave Connecting..., got {:?}",
+        app.auth_state
+    );
+    match &app.auth_state {
+        AuthState::Pending { error: Some(e) } => {
+            assert_eq!(e, crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR)
+        }
+        other => panic!("expected a real auth error, got {other:?}"),
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelAuth { request_seq: 1 })),
+        "got {effects:?}"
+    );
+}
+
+#[test]
+fn auth_url_ready_with_url_keeps_authenticating() {
+    let mut app = test_app();
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthUrlReady {
+            request_seq: 1,
+            auth_url: Some("https://accounts.x.ai/oauth2/device?user_code=ABCD".into()),
+            external: false,
+            mode: Some("device".into()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    match &app.auth_state {
+        AuthState::Authenticating {
+            auth_url: Some(url),
+            mode: AuthMode::Device,
+            ..
+        } => {
+            assert!(url.contains("accounts.x.ai"));
+        }
+        other => panic!("device URL must leave Connecting... for Device, got {other:?}"),
+    }
+}
+
 /// `CancelLogin` outside a mid-session login is a no-op (must not move off the welcome screen or panic).
 #[test]
 fn cancel_login_noop_without_stashed_view() {

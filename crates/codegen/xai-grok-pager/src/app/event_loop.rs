@@ -1708,6 +1708,7 @@ pub(crate) async fn run(
     let mut presenter = Presenter::new();
     let mut suspend_retry_after: Option<Instant> = None;
     let mut suspend_wait_reports = SuspendWaitReports::default();
+    let mut connecting_splash_started = app.auth_state.is_connecting_splash().then(Instant::now);
     presenter.request_presentation(&mut app, terminal, false);
     if matches!(app.auth_state, AuthState::Done) {
         let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
@@ -2125,6 +2126,13 @@ pub(crate) async fn run(
                 None => std::future::pending().await,
             }
         };
+        let connecting_splash_at = connecting_splash_wakeup(&app, &mut connecting_splash_started);
+        let connecting_splash = async {
+            match connecting_splash_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         let load_barrier_tick = async {
             match session_load_barrier.next_wakeup() {
                 Some(deadline) => {
@@ -2237,6 +2245,19 @@ pub(crate) async fn run(
 
             // These self-limiting timers sit above ACP: during heavy streaming acp_rx is ready on
             // nearly every `biased` pass and starves everything below it
+
+            // Connecting... must yield even when last-session restore floods ACP and starves JoinSet.
+            _ = connecting_splash => {
+                connecting_splash_started = None;
+                if app.auth_state.is_connecting_splash() {
+                    let effs =
+                        dispatch::dispatch(Action::ConnectingSplashTimeout, &mut app);
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request_presentation(&mut app, terminal, false);
+                }
+            }
 
             // Gated: an overdue gap tick must not end the scroll stream while a wheel event waits
             _ = scroll_tick, if input_rx.is_empty() => {
@@ -3146,6 +3167,17 @@ fn after_task_complete_dispatch(
     }
     presenter.request(false);
 }
+/// Deadline for leaving the Connecting... splash. Last-session ACP traffic must not starve this.
+fn connecting_splash_wakeup(app: &AppView, started: &mut Option<Instant>) -> Option<Instant> {
+    if app.auth_state.is_connecting_splash() {
+        let started = started.get_or_insert_with(Instant::now);
+        Some(*started + crate::app::app_view::CONNECTING_SPLASH_WAIT)
+    } else {
+        *started = None;
+        None
+    }
+}
+
 /// Schedule the next animation tick when demanded and none is pending.
 pub(crate) fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duration) {
     if tick_at.is_none() {
@@ -4184,6 +4216,39 @@ mod tests {
             nonce, 0,
             "background billing poll is not a usage-modal fetch"
         );
+    }
+    #[test]
+    fn connecting_splash_wakeup_arms_only_while_connecting_ellipsis_is_up() {
+        let mut app = crate::app::app_view::tests::test_app();
+        let mut started = None;
+        assert!(
+            connecting_splash_wakeup(&app, &mut started).is_none(),
+            "Done auth must not arm the Connecting... wait"
+        );
+        app.auth_state = crate::app::app_view::AuthState::Authenticating {
+            request_seq: 1,
+            handle: None,
+            auth_url: None,
+            mode: crate::app::app_view::AuthMode::Pending,
+        };
+        let first = connecting_splash_wakeup(&app, &mut started)
+            .expect("Connecting... splash must arm a deadline");
+        let started_at = started.expect("splash start is recorded");
+        assert_eq!(
+            first,
+            started_at + crate::app::app_view::CONNECTING_SPLASH_WAIT
+        );
+        let second = connecting_splash_wakeup(&app, &mut started)
+            .expect("the same splash must keep one start time");
+        assert_eq!(first, second, "do not restart the splash wait on each loop");
+        app.auth_state = crate::app::app_view::AuthState::Pending {
+            error: Some(crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR.to_string()),
+        };
+        assert!(
+            connecting_splash_wakeup(&app, &mut started).is_none(),
+            "after leaving Connecting..., drop the deadline"
+        );
+        assert!(started.is_none());
     }
 
     #[test]
