@@ -145,6 +145,9 @@ impl SamplerActor {
                     });
                 let _ = reply.send(key);
             }
+            SamplerCommand::CurrentExtraHeaders { reply } => {
+                let _ = reply.send(self.state.config.extra_headers.clone());
+            }
         }
     }
 }

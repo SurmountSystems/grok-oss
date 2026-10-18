@@ -722,14 +722,13 @@ impl SamplingClient {
         }
     }
 
-    /// The credential tail is captured at build time — see [`SentRequest`] for
-    /// why a record-time re-read would race the recovery a 401 triggers.
-    fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
-        if !self.first_use_noted.load(Ordering::Relaxed)
-            && !self.first_use_noted.swap(true, Ordering::Relaxed)
-        {
-            crate::prewarm::note_first_sampling_use(&self.base_url);
-        }
+    /// Headers the next POST would send, including live `Authorization` and `X-XAI-Token-Auth`.
+    /// Nested inherit tests assert the parent sampler JWT rides `Authorization`.
+    pub fn post_headers(&self) -> HeaderMap {
+        self.stamped_headers()
+    }
+
+    fn stamped_headers(&self) -> HeaderMap {
         let mut headers = self.default_headers.clone();
         if let Some(resolver) = &self.bearer_resolver {
             // Sole auth source: without a live bearer, send no credential rather than a stale seed key.
@@ -759,6 +758,18 @@ impl SamplingClient {
         if !credential_headers_are_sendable(&headers) {
             strip_cli_chat_proxy_identity_headers(&mut headers);
         }
+        headers
+    }
+
+    /// The credential tail is captured at build time — see [`SentRequest`] for
+    /// why a record-time re-read would race the recovery a 401 triggers.
+    fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
+        if !self.first_use_noted.load(Ordering::Relaxed)
+            && !self.first_use_noted.swap(true, Ordering::Relaxed)
+        {
+            crate::prewarm::note_first_sampling_use(&self.base_url);
+        }
+        let mut headers = self.stamped_headers();
         {
             let auth_prefix = headers
                 .get(AUTHORIZATION)

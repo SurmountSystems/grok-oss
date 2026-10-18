@@ -1058,6 +1058,24 @@ mod tests {
         assert!(!message.contains("/login"), "{message}");
     }
 
+    /// Operator live paste after grok-oss 1.0.45 (`fe6a62885ad4`).
+    /// Nested missing-auth banner is `Request failed` plus the proxy body.
+    #[test]
+    fn nested_missing_auth_formats_the_operator_live_paste() {
+        let live = "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        let proxy_body = "Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        let from_body = format_request_failure(None, Some(WireErrorType::Auth), proxy_body);
+        assert_eq!(from_body.message(), live);
+        assert!(!from_body.message().contains("/login"));
+        assert!(!from_body.message().contains("Authentication required"));
+        let from_url = format_request_failure(
+            None,
+            Some(WireErrorType::Auth),
+            "Unauthorized (401) from https://cli-chat-proxy.x.ai/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)",
+        );
+        assert_eq!(from_url.message(), live);
+    }
+
     #[test]
     fn formats_401_dump_without_triggering_reauth_copy() {
         // Re-auth is a dedicated banner; this helper only pretty-prints.

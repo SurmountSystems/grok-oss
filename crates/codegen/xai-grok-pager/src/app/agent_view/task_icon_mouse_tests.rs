@@ -6,7 +6,7 @@
 //! and drives hover and click through `handle_mouse` at those exact cells. This
 //! is the paint-vs-hit-test agreement the user exercises.
 use super::test_fixtures::make_agent;
-use super::{AgentView, BannerSlotParams};
+use super::{AgentPane, AgentView, BannerSlotParams};
 use crate::actions::ActionRegistry;
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::InputOutcome;
@@ -15,6 +15,7 @@ use crate::views::tasks_pane::TaskEntryId;
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
 fn cell_symbol(buf: &Buffer, x: u16, y: u16) -> String {
     buf.cell((x, y))
         .map(|c| c.symbol().to_string())
@@ -418,6 +419,149 @@ fn clicking_a_painted_in_progress_tasks_row_opens_that_task() {
         agent.active_subagent.as_deref(),
         Some("l2-sampler"),
         "{owed}"
+    );
+}
+
+/// A left click on a painted session-board row (the Ctrl+T todo list, not
+/// the Tasks overlay) opens that task so the Operator can review it.
+/// Completed rows are clickable. Hit the painted cells. Do not use a
+/// keyboard stand-in.
+#[test]
+fn clicking_a_painted_session_board_row_opens_that_task() {
+    let owed = "a left click on a painted session board row (todo list, Ctrl+T style, not only the Tasks/Subagents overlay) opens that task so the Operator can review it. Completed rows are clickable.";
+    let mut agent = make_agent();
+    agent.tasks.overlay.visible = false;
+    agent.todo.update_todos(vec![
+        TodoItem {
+            content: "session-board-pending-row".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        },
+        TodoItem {
+            content: "session-board-still-running".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::InProgress,
+            meta: None,
+            size: None,
+        },
+        TodoItem {
+            content: "session-board-review-me".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        },
+    ]);
+    agent.todo.overlay.visible = true;
+    agent.todo.overlay.focused = true;
+    agent.set_active_pane(AgentPane::Todo, true);
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("session-board-review-me"),
+        "{owed} painted:\n{painted}"
+    );
+    assert!(
+        !agent.todo.row_hit_rects.is_empty(),
+        "{owed} session-board rows must be hit targets"
+    );
+    let (column, row) = find_phrase(&buf, "session-board-review-me").expect(owed);
+    assert!(
+        agent
+            .pane_areas
+            .todo
+            .contains(ratatui::layout::Position::new(column, row)),
+        "{owed}"
+    );
+    assert!(
+        agent.pane_areas.tasks.area() == 0
+            || !agent
+                .pane_areas
+                .tasks
+                .contains(ratatui::layout::Position::new(column, row)),
+        "{owed} the click must be the session board, not the Tasks overlay"
+    );
+    assert!(
+        agent
+            .todo
+            .row_hit_rects
+            .iter()
+            .any(|(_, rect)| rect.contains(ratatui::layout::Position::new(column, row))),
+        "{owed}"
+    );
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::KillBgTask(_))
+                | InputOutcome::Action(Action::KillSubagent(_))
+                | InputOutcome::Action(Action::ClearCompletedTodos)
+        ),
+        "{owed} got {outcome:?}"
+    );
+    let viewer = agent.line_viewer.as_ref().expect(owed);
+    assert_eq!(
+        viewer.path.file_name().and_then(|n| n.to_str()),
+        Some("session-board.md"),
+        "{owed}"
+    );
+    let review = viewer.markdown_content_for_test().expect(owed);
+    assert!(
+        review.contains("session-board-review-me"),
+        "{owed} review:\n{review}"
+    );
+    assert!(
+        review.contains("Status: completed"),
+        "{owed} review:\n{review}"
+    );
+    agent.line_viewer = None;
+    let pad_x = agent.pane_areas.todo.x;
+    assert_ne!(pad_x, column, "{owed}");
+    let outcome = click_left(&mut agent, pad_x, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} accent-column click got {outcome:?}"
+    );
+    let review = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|viewer| viewer.markdown_content_for_test())
+        .expect(owed);
+    assert!(
+        review.contains("session-board-review-me"),
+        "{owed} accent-column review:\n{review}"
+    );
+    assert!(
+        review.contains("Status: completed"),
+        "{owed} accent-column review:\n{review}"
+    );
+    agent.line_viewer = None;
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "session-board-still-running").expect(owed);
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} in_progress click got {outcome:?}"
+    );
+    let review = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|viewer| viewer.markdown_content_for_test())
+        .expect(owed);
+    assert!(
+        review.contains("session-board-still-running"),
+        "{owed} in_progress review:\n{review}"
+    );
+    assert!(
+        review.contains("Status: in_progress"),
+        "{owed} in_progress review:\n{review}"
     );
 }
 

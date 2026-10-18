@@ -10,10 +10,13 @@ use super::agent_view::{
 use super::app_view::InputOutcome;
 use crate::scrollback::block::BlockContent;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
+use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::prompt_widget::PromptEvent;
 use crate::views::tasks_pane::TaskEntryId;
+use crate::views::todo_pane::TodoPane;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
+use xai_grok_shell::tools::{TodoItem, TodoStatus};
 
 #[cfg(test)]
 thread_local! {
@@ -283,6 +286,70 @@ impl AgentView {
         .map(str::to_owned)
     }
 
+    /// Painted session-board row is the hit target. Stored rects span the
+    /// full pane, including the accent column the inner content rect omits.
+    fn session_board_row_id_at(&self, column: u16, row: u16) -> Option<u64> {
+        let point = (column, row).into();
+        if let Some((id, _)) = self
+            .todo
+            .row_hit_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+        {
+            return Some(*id);
+        }
+        let pane = self.pane_areas.todo;
+        if pane.area() == 0 || !pane.contains(point) {
+            return None;
+        }
+        self.todo
+            .row_hit_rects
+            .iter()
+            .find(|(_, rect)| row >= rect.y && row < rect.y.saturating_add(rect.height.max(1)))
+            .map(|(id, _)| *id)
+    }
+
+    /// Left click on a painted session-board row opens that task for review.
+    /// Completed rows are clickable.
+    fn try_session_board_row_click(&mut self, column: u16, row: u16) -> Option<InputOutcome> {
+        let id = self.session_board_row_id_at(column, row)?;
+        self.open_session_board_row(id)
+    }
+
+    /// Open the session-board todo. Bound `meta.taskId` opens that subagent
+    /// or background task. Unbound or missing views still open a review of
+    /// the row so a click is not a no-op.
+    fn open_session_board_row(&mut self, todo_id: u64) -> Option<InputOutcome> {
+        let item = self.todo.item_for_stable_id(todo_id)?.clone();
+        if let Some(task_id) = TodoPane::bound_task_id(&item) {
+            if let Some(child_sid) = self.resolve_listed_agent_child_sid(task_id) {
+                self.open_subagent_fullscreen(child_sid);
+                return Some(InputOutcome::Changed);
+            }
+            if self.show_bg_task_viewer(task_id) {
+                return Some(InputOutcome::Changed);
+            }
+        }
+        self.open_session_board_todo_review(&item)
+    }
+
+    fn open_session_board_todo_review(&mut self, item: &TodoItem) -> Option<InputOutcome> {
+        let status = match item.status {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+            TodoStatus::Cancelled => "cancelled",
+        };
+        let body = format!("{}\n\nStatus: {status}", item.content);
+        let viewer = LineViewerState::open_markdown_content(
+            std::path::PathBuf::from("session-board.md"),
+            body,
+            None,
+        )?;
+        self.line_viewer = Some(viewer);
+        Some(InputOutcome::Changed)
+    }
+
     /// Open the task whose row was clicked. Does not kill and does not close
     /// a viewer that is already showing that task.
     fn open_task_row(&mut self, entry_id: TaskEntryId) -> Option<InputOutcome> {
@@ -346,6 +413,13 @@ impl AgentView {
                         self.set_active_pane(AgentPane::Scrollback, false);
                     }
                     return InputOutcome::Changed;
+                }
+                // Session board (Ctrl+T todo list): a left click on a painted
+                // row opens that task, including completed rows, so the
+                // Operator can review the board. Distinct from the Tasks
+                // overlay chrome above.
+                if let Some(out) = self.try_session_board_row_click(mouse.column, mouse.row) {
+                    return out;
                 }
                 if self.hit_queue_close.contains(mouse.column, mouse.row) {
                     self.queue.overlay.escape();

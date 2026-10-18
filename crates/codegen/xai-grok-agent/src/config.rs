@@ -89,6 +89,9 @@ and execute. Use them aggressively and liberally \u{2014} spawn subagents early 
 - Managing task lists and tracking progress (${{ tools.by_kind.plan }})
 - Reviewing subagent results and synthesizing responses for the user
 
+### Plan mode:
+- While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. Do not spawn explore or general-purpose jobs during that window. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.
+
 ### ALWAYS delegate to subagents:
 - **ALL file modifications** \u{2014} creating, editing, deleting files (`general-purpose`)
 - **ALL builds, tests, and verification** \u{2014} running test suites, linters, compilers (`general-purpose`)
@@ -1620,6 +1623,22 @@ mod tests {
             .name_override
             .expect("task tool is renamed");
         assert!(xai_grok_tools::is_task_tool_id(&name));
+    }
+    /// Operator contract: while plan_mode_active is writing or presenting,
+    /// nested explore and implement jobs are not started. The orchestrator
+    /// prompt must say that even though it still names explore after Approve.
+    #[test]
+    fn orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting() {
+        const CONTRACT: &str = "While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+        assert!(
+            ORCHESTRATOR_PROMPT_BODY.contains(CONTRACT),
+            "orchestrator prompt must quote the Operator contract so it does not tell the model to launch explore while writing or presenting. Got: {ORCHESTRATOR_PROMPT_BODY}"
+        );
+        assert!(
+            ORCHESTRATOR_PROMPT_BODY
+                .contains("Do not spawn explore or general-purpose jobs during that window"),
+            "orchestrator prompt must forbid explore and general-purpose spawn while writing or presenting. Got: {ORCHESTRATOR_PROMPT_BODY}"
+        );
     }
     /// Pins the `run_terminal_command` rename to the writing-phase taxonomy so a future rename can't silently degrade the spinner label.
     #[test]

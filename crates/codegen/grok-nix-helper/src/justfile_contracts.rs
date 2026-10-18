@@ -344,6 +344,10 @@ fn just_install_does_not_cargo_install_ripgrep() {
         "just install is cargo build --release of the pager:\n{install}"
     );
     assert!(
+        install.contains("nice -n 19") && install.contains("cargo build --release"),
+        "just install nices the cargo build so it yields the machine:\n{install}"
+    );
+    assert!(
         !install.contains("github.com/BurntSushi"),
         "just install must not curl GitHub for ripgrep:\n{install}"
     );

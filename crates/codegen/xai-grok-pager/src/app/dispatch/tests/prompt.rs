@@ -7988,6 +7988,185 @@ fn isolated_preview_human_text_enter_appends_wal() {
     );
 }
 
+const HELLO_ARE_YOU_STUCK: &str = "Hello? Are you stuck?";
+
+fn park_live_plan_present_with_isolated_preview(
+    app: &mut crate::app::app_view::AppView,
+    turn_running: bool,
+) {
+    use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.plan_approval_view =
+        Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+    agent.show_plan_preview();
+    agent.prompt.set_text("");
+    agent.plan_decision_resolved = false;
+    agent.session.state = if turn_running {
+        AgentState::TurnRunning
+    } else {
+        AgentState::Idle
+    };
+    agent
+        .scrollback
+        .push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
+            OtherToolCallBlock::new("Plan: Exit", ""),
+        )));
+}
+
+fn transcript_has_operator_line(agent: &AgentView, needle: &str) -> bool {
+    (0..agent.scrollback.len()).any(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+        Some(crate::scrollback::RenderBlock::UserPrompt(block)) => block.text.contains(needle),
+        _ => false,
+    })
+}
+
+fn plan_exit_tool_completed_at_zero(agent: &AgentView) -> bool {
+    use crate::scrollback::blocks::ToolCallBlock;
+    (0..agent.scrollback.len()).any(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+        Some(crate::scrollback::RenderBlock::ToolCall(ToolCallBlock::Other(block))) => {
+            block.name == "Plan: Exit" && block.elapsed_ms == Some(0)
+        }
+        _ => false,
+    })
+}
+
+/// Operator text `Hello? Are you stuck?` during plan present does not freeze
+/// the UI, does not paint `Plan: Exit` into an empty transcript, and does
+/// not leave `Run Plan: Exit 0.0s` on an empty screen. That text is a soft
+/// interject or a present-time comment.
+#[test]
+fn operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit() {
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    park_live_plan_present_with_isolated_preview(&mut app, true);
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: Isolated Preview pane must be open"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "fixture: plan present must be parked"
+        );
+    }
+
+    let effects = dispatch(Action::SendPrompt(HELLO_ARE_YOU_STUCK.into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendInterject { .. }))
+            || app.agents[&id]
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.feedback_draft.as_deref() == Some(HELLO_ARE_YOU_STUCK)),
+        "Hello? during plan present must interject or hold as comment; effects={effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "Hello? must not start a new SendPrompt that cancels the exit_plan_mode waiter; effects={effects:?}"
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "abandon_plan must not run; plan present stays parked"
+        );
+        assert!(
+            plan_review_closed(agent).is_empty(),
+            "Hello? must not close the plan review; got {:?}",
+            plan_review_closed(agent)
+        );
+        assert!(
+            transcript_has_operator_line(agent, HELLO_ARE_YOU_STUCK)
+                || agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|pav| pav.feedback_draft.as_deref() == Some(HELLO_ARE_YOU_STUCK))
+                || agent.prompt.text().contains(HELLO_ARE_YOU_STUCK),
+            "transcript must contain the operator line, or the text stays as a present-time comment"
+        );
+        assert!(
+            !plan_exit_tool_completed_at_zero(agent),
+            "this submit must not complete Plan: Exit at 0.0s"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text(HELLO_ARE_YOU_STUCK);
+        agent.session.state = AgentState::TurnRunning;
+    }
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match outcome {
+        InputOutcome::Action(action) | InputOutcome::ActionThenForward(action) => {
+            let key_effects = dispatch(action, &mut app);
+            assert!(
+                !key_effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::SendPrompt { .. })),
+                "Prompt+Revise Hello? Enter on a running present must not SendPrompt a new turn; effects={key_effects:?}"
+            );
+        }
+        InputOutcome::Changed => {
+            let agent = app.agents.get(&id).unwrap();
+            assert!(
+                agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+                "key Enter that holds Hello? must keep the park"
+            );
+        }
+        other => panic!("Hello? Enter must send, interject, or hold; got {other:?}"),
+    }
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "key-path Hello? must not abandon the plan"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("");
+        agent.session.state = AgentState::TurnRunning;
+    }
+    let empty = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        !matches!(empty, InputOutcome::Action(Action::SetPlanMode(_))),
+        "empty Enter must not Exit; got {empty:?}"
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves and never Exits"
+        );
+        assert!(
+            plan_review_closed(agent).is_empty(),
+            "empty Enter must not close the plan review"
+        );
+    }
+}
+
 /// Held comments ride Approve with the review-comments lead. Empty Enter
 /// never Approves; this path is non-empty then click Approve.
 #[test]

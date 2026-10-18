@@ -276,6 +276,28 @@ pub(crate) fn format_remaining_cents_as_dollars(cents: i64) -> String {
     if negative { format!("-{body}") } else { body }
 }
 
+/// SuperGrok dollar credits on the Heavy row. Known zero is `$0.00`.
+/// A missing reading is not painted and is not `$0`.
+fn format_heavy_row_prepaid_dollars(cents: i64) -> String {
+    let negative = cents < 0;
+    let abs_cents = cents.unsigned_abs();
+    let dollars = abs_cents / 100;
+    let frac = abs_cents % 100;
+    let body = format!("${dollars}.{frac:02}");
+    if negative { format!("-{body}") } else { body }
+}
+
+/// RFC 3339 `current_period.end` / identity `period_end`. Empty is unread.
+fn parse_period_end_stamp(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&Utc))
+}
+
 /// On-disk team postpaid Billing Credits remaining.
 ///
 /// The open Limits card and the header share this after a process-cache
@@ -326,14 +348,37 @@ fn limits_percent_figure(pct: Option<f64>) -> Option<String> {
     Some(format!("limits {remaining}%"))
 }
 
-/// Included usage percent and prepaid balance for one logged-in account.
-///
-/// `unified` stays `None` when that billing response omitted the flag.
+/// Included usage percent, prepaid SuperGrok dollar credits, and that
+/// identity's period end. `unified` stays `None` when that billing
+/// response omitted the flag. `period_end` is this identity only.
 #[derive(Clone, Copy)]
 struct AccountBillingFields {
     usage_pct: Option<f64>,
     prepaid_cents: Option<i64>,
     unified: Option<bool>,
+    period_end: Option<DateTime<Utc>>,
+}
+
+fn period_end_from_billing_config(
+    config: &xai_grok_shell::extensions::billing::BillingConfig,
+) -> Option<DateTime<Utc>> {
+    let (_, end) = xai_grok_shell::extensions::billing::included_usage_and_period_end(config);
+    end.as_deref().and_then(parse_period_end_stamp)
+}
+
+/// That role's identity `period_end` from the snapshot. The other role
+/// is not copied.
+fn snapshot_period_end_for_role(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+) -> Option<DateTime<Utc>> {
+    let target = poll_target_for_role(role)?;
+    let home = limits_reading_grok_home();
+    let doc = xai_grok_shell::auth::read_limits_snapshot_file(&home)?;
+    let row = doc
+        .identities
+        .iter()
+        .find(|row| row.identity_id == target.identity_id)?;
+    row.period_end.as_deref().and_then(parse_period_end_stamp)
 }
 
 enum CachedAccountBilling {
@@ -579,6 +624,7 @@ fn blocking_account_billing(identity_id: &str) -> Option<AccountBillingFields> {
                 usage_pct: config.credit_usage_percent,
                 prepaid_cents: config.prepaid_balance.as_ref().map(|cent| cent.val),
                 unified: config.is_unified_billing_user,
+                period_end: period_end_from_billing_config(&config),
             })
         })
         .ok()?;
@@ -623,16 +669,22 @@ fn live_account_billing(
 fn account_billing_fields(
     role: xai_grok_shell::auth::SupergrokAccountRole,
 ) -> AccountBillingFields {
-    if let Some(live) = live_account_billing(role) {
-        return live;
+    let mut fields = if let Some(live) = live_account_billing(role) {
+        live
+    } else {
+        // A stored poll percent belongs on that session's cell. Copying it
+        // here paints the same `limits N%` on the section and on the cell.
+        AccountBillingFields {
+            usage_pct: None,
+            prepaid_cents: None,
+            unified: None,
+            period_end: None,
+        }
+    };
+    if fields.period_end.is_none() {
+        fields.period_end = snapshot_period_end_for_role(role);
     }
-    // A stored poll percent belongs on that session's cell. Copying it
-    // here paints the same `limits N%` on the section and on the cell.
-    AccountBillingFields {
-        usage_pct: None,
-        prepaid_cents: None,
-        unified: None,
-    }
+    fields
 }
 
 /// True when this process has a live, non-empty session for `role`.
@@ -660,10 +712,11 @@ fn missing_session_line(role: xai_grok_shell::auth::SupergrokAccountRole) -> &'s
 
 /// Limits and Credits sections for the open account.
 ///
-/// One `Limits` heading and one `Credits` heading. Included usage is that
-/// account's percent remaining. Prepaid balance is that account's own cents
-/// when the billing response has them. Empty fields stay empty. A missing
-/// session adds one line. The other account's dollars stay off this tab.
+/// One `Limits` heading and one `Credits` heading. The Heavy row is this
+/// tab's identity only. Included usage is that account's percent remaining.
+/// Prepaid balance is that account's own cents when the billing response
+/// has them. Empty fields stay empty. A missing session adds one line.
+/// The other account's dollars stay off this tab.
 fn personal_snapshot_poll_outcome_is_reauth() -> bool {
     let home = limits_reading_grok_home();
     let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home) else {
@@ -682,7 +735,38 @@ fn personal_snapshot_poll_outcome_is_reauth() -> bool {
         .any(|row| row.identity_id == personal.headroom.identity_id && row.poll_outcome == "reauth")
 }
 
-fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Vec<String> {
+fn heavy_row_title(role: xai_grok_shell::auth::SupergrokAccountRole) -> &'static str {
+    if role == xai_grok_shell::auth::SupergrokAccountRole::Business {
+        "Business SuperGrok Heavy"
+    } else {
+        "Personal SuperGrok Heavy"
+    }
+}
+
+/// One Heavy meter line for the open tab. Remaining percent uses the same
+/// arithmetic as `limits_percent_figure`. Dollars are SuperGrok dollar
+/// credits for this identity. Unread prepaid is omitted.
+fn heavy_row_line(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+    fields: &AccountBillingFields,
+) -> String {
+    let mut line = heavy_row_title(role).to_string();
+    if let Some(pct) = fields.usage_pct.filter(|pct| pct.is_finite()) {
+        let used = pct.round().clamp(0.0, 100.0) as u8;
+        let remaining = 100u8.saturating_sub(used);
+        line.push_str(&format!("  {remaining}% remaining"));
+    }
+    if let Some(cents) = fields.prepaid_cents {
+        line.push_str("  ");
+        line.push_str(&format_heavy_row_prepaid_dollars(cents));
+    }
+    line
+}
+
+fn account_section_lines(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     let fields = account_billing_fields(role);
     let mut lines = vec!["Limits".to_string()];
     if !account_has_live_session(role) {
@@ -695,6 +779,13 @@ fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Ve
             "Personal SuperGrok login expired. Run grok-oss login for the personal account. That login keeps the business login."
                 .to_string(),
         );
+    }
+    lines.push(heavy_row_line(role, &fields));
+    if let Some(period_end) = fields.period_end {
+        lines.push(format!(
+            "Resets in: {}",
+            format_reset_countdown(now, period_end)
+        ));
     }
     if let Some(figure) = limits_percent_figure(fields.usage_pct) {
         lines.push(format!("  Included usage: {figure}"));
@@ -1356,7 +1447,7 @@ pub fn render_limits_modal(
     // live session, the in-memory LivePoll percent is the Personal
     // included-usage line, and only while this request draws included
     // SuperGrok period limits.
-    let mut sections = account_section_lines(account_role);
+    let mut sections = account_section_lines(account_role, now);
     insert_personal_live_poll_included_usage(
         &mut sections,
         account_role,
@@ -1368,7 +1459,6 @@ pub fn render_limits_modal(
     let account_count = account_lines.len();
     let mut body = account_lines;
     body.append(&mut sections);
-    let _ = now;
     if !draws_included {
         body.insert(
             account_count + section_count,
@@ -6512,6 +6602,295 @@ mod tests {
         assert!(misses.is_empty(), "{}", misses.join("\n"));
     }
 
+    struct DualHeavyHome {
+        _home: tempfile::TempDir,
+        _env: xai_grok_test_support::EnvGuard,
+        now: DateTime<Utc>,
+        personal_end: DateTime<Utc>,
+        business_end: DateTime<Utc>,
+        personal_id: String,
+        business_id: String,
+    }
+
+    impl Drop for DualHeavyHome {
+        fn drop(&mut self) {
+            clear_account_billing_cache();
+            xai_grok_shell::auth::clear_included_billing_cache();
+        }
+    }
+
+    fn remember_ready_account_billing(identity_id: &str, fields: AccountBillingFields) {
+        let home = limits_reading_grok_home();
+        let key = format!("{}|{}", home.display(), identity_id);
+        if let Ok(mut guard) = account_billing_cache().lock() {
+            guard.insert(key, CachedAccountBilling::Ready(fields));
+        }
+    }
+
+    /// Personal Heavy used 100% remaining 0, SuperGrok dollar credits known
+    /// zero, nextReset T0. Business Heavy used 20% remaining 80, SuperGrok
+    /// dollar credits known zero, nextReset T1. `now` makes T0 `6d 3h` and
+    /// T1 `6d 11h`. Live cache holds usage and prepaid. Identity `period_end`
+    /// is the snapshot fallback.
+    fn seed_dual_heavy_identities() -> DualHeavyHome {
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, LimitsSnapshotDocument, LimitsSnapshotIdentity, POLL_OUTCOME_OK,
+            upsert_supergrok_session, write_limits_snapshot_file,
+        };
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        clear_account_billing_cache();
+        xai_grok_shell::auth::clear_included_billing_cache();
+
+        let now = DateTime::parse_from_rfc3339("2026-10-16T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let personal_end = now + chrono::Duration::days(6) + chrono::Duration::hours(3);
+        let business_end = now + chrono::Duration::days(6) + chrono::Duration::hours(11);
+
+        let live = now + chrono::Duration::days(14);
+        let base = "https://auth.x.ai::dual-heavy";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "personal.heavy.jwt".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal-heavy".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-personal-heavy".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "business.heavy.jwt".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-business-heavy".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-heavy".into()),
+                team_id: Some("team-heavy".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let personal_id =
+            poll_target_for_role(xai_grok_shell::auth::SupergrokAccountRole::Personal)
+                .expect("personal poll target")
+                .identity_id;
+        let business_id =
+            poll_target_for_role(xai_grok_shell::auth::SupergrokAccountRole::Business)
+                .expect("business poll target")
+                .identity_id;
+
+        let identity =
+            |identity_id: &str, usage_pct: f64, end: DateTime<Utc>| LimitsSnapshotIdentity {
+                identity_id: identity_id.to_owned(),
+                usage_pct: Some(usage_pct),
+                period_end: Some(end.to_rfc3339()),
+                period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                dollar_credits_cents: Some(0),
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: POLL_OUTCOME_OK.to_owned(),
+            };
+        let mut doc = LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(identity(&personal_id, 100.0, personal_end));
+        doc.identities
+            .push(identity(&business_id, 20.0, business_end));
+        write_limits_snapshot_file(home.path(), &doc).expect("dual heavy rows");
+
+        remember_ready_account_billing(
+            &personal_id,
+            AccountBillingFields {
+                usage_pct: Some(100.0),
+                prepaid_cents: Some(0),
+                unified: None,
+                period_end: None,
+            },
+        );
+        remember_ready_account_billing(
+            &business_id,
+            AccountBillingFields {
+                usage_pct: Some(20.0),
+                prepaid_cents: Some(0),
+                unified: None,
+                period_end: None,
+            },
+        );
+
+        DualHeavyHome {
+            _home: home,
+            _env: env,
+            now,
+            personal_end,
+            business_end,
+            personal_id,
+            business_id,
+        }
+    }
+
+    fn dual_heavy_snapshot(personal_end: DateTime<Utc>) -> LimitsSnapshot {
+        let mut bal = weekly_bal(100.0, personal_end);
+        bal.prepaid_balance_cents = Some(0);
+        LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+    }
+
+    fn paint_limits_tab(state: &mut LimitsModalState, tab: usize, now: DateTime<Utc>) -> String {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 40);
+        state.window.active_tab = tab;
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, state, &theme, false, now);
+        painted_lines(&buf, area).join("\n")
+    }
+
+    fn heavy_block(card: &str, title: &str) -> String {
+        let lines: Vec<&str> = card.lines().collect();
+        let Some(start) = lines.iter().position(|line| line.contains(title)) else {
+            return String::new();
+        };
+        let end = (start + 3).min(lines.len());
+        lines[start..end].join("\n")
+    }
+
+    /// Owed: With the Business tab selected, the card contains `Business
+    /// SuperGrok Heavy` and does not contain `Personal SuperGrok Heavy`.
+    /// Remaining on that row is 80%. SuperGrok dollar credits on that row
+    /// are `$0.00` only when that business prepaid reading is known zero.
+    /// The reset line names days and hours from the business identity's own
+    /// `period_end`. It does not contain the personal remaining 0% Heavy
+    /// row. SuperGrok is paid. Meters stay distinct.
+    #[test]
+    #[serial_test::serial]
+    fn business_tab_paints_only_the_business_supergrok_heavy_row() {
+        let fixture = seed_dual_heavy_identities();
+        let mut state = LimitsModalState::new(dual_heavy_snapshot(fixture.personal_end));
+        let card = paint_limits_tab(&mut state, CREDITS_TAB, fixture.now);
+        let owed = "with the Business tab selected, the card contains Business SuperGrok Heavy and does not contain Personal SuperGrok Heavy. Remaining on that row is 80%. SuperGrok dollar credits on that row are $0.00 when that business prepaid reading is known zero. The reset line names days and hours from the business identity's own period_end. It does not contain the personal remaining 0% Heavy row.";
+        assert!(card.contains("Business SuperGrok Heavy"), "{owed}\n{card}");
+        assert!(!card.contains("Personal SuperGrok Heavy"), "{owed}\n{card}");
+        let heavy = heavy_block(&card, "Business SuperGrok Heavy");
+        assert!(
+            heavy.contains("80% remaining") && heavy.contains("$0.00"),
+            "{owed}\nheavy block:\n{heavy}\n{card}"
+        );
+        assert!(card.contains("Resets in: 6d 11h"), "{owed}\n{card}");
+        assert!(!card.contains("Resets in: 6d 3h"), "{owed}\n{card}");
+    }
+
+    /// Owed: With the Personal tab selected, the card contains `Personal
+    /// SuperGrok Heavy` and does not contain `Business SuperGrok Heavy`.
+    /// Remaining on that row is 0% when personal used is 100% and that
+    /// reading is known. The reset line names days and hours from the
+    /// personal identity's own `period_end`. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn personal_tab_paints_only_the_personal_supergrok_heavy_row() {
+        let fixture = seed_dual_heavy_identities();
+        let mut state = LimitsModalState::new(dual_heavy_snapshot(fixture.personal_end));
+        let card = paint_limits_tab(&mut state, LIMITS_TAB, fixture.now);
+        let owed = "with the Personal tab selected, the card contains Personal SuperGrok Heavy and does not contain Business SuperGrok Heavy. Remaining on that row is 0% when personal used is 100% and that reading is known. The reset line names days and hours from the personal identity's own period_end.";
+        assert!(card.contains("Personal SuperGrok Heavy"), "{owed}\n{card}");
+        assert!(!card.contains("Business SuperGrok Heavy"), "{owed}\n{card}");
+        let heavy = heavy_block(&card, "Personal SuperGrok Heavy");
+        assert!(
+            heavy.contains("0% remaining") && heavy.contains("$0.00"),
+            "{owed}\nheavy block:\n{heavy}\n{card}"
+        );
+        assert!(card.contains("Resets in: 6d 3h"), "{owed}\n{card}");
+        assert!(!card.contains("Resets in: 6d 11h"), "{owed}\n{card}");
+    }
+
+    /// Owed: Personal reset line is `Resets in: 6d 3h` (minutes and seconds
+    /// may follow, matching `format_reset_countdown`). Business reset line
+    /// is `Resets in: 6d 11h` from a different `next_reset_at`. The two
+    /// lines are not the same clock. `earliest_reset_at` is not the
+    /// Business tab's painted countdown. Matching day counts are not a
+    /// shared pool. SuperGrok is paid. Meters stay distinct.
+    #[test]
+    #[serial_test::serial]
+    fn each_heavy_reset_line_names_days_and_hours_from_that_meters_next_reset() {
+        let fixture = seed_dual_heavy_identities();
+        let mut state = LimitsModalState::new(dual_heavy_snapshot(fixture.personal_end));
+        let personal = paint_limits_tab(&mut state, LIMITS_TAB, fixture.now);
+        let business = paint_limits_tab(&mut state, CREDITS_TAB, fixture.now);
+        let owed = "the Personal reset line is Resets in: 6d 3h. The Business reset line is Resets in: 6d 11h from a different next_reset_at. The two lines are not the same clock. earliest_reset_at is not the Business tab's painted countdown. Matching day counts are not a shared pool.";
+        let personal_countdown = format_reset_countdown(fixture.now, fixture.personal_end);
+        let business_countdown = format_reset_countdown(fixture.now, fixture.business_end);
+        assert!(
+            personal_countdown.starts_with("6d 3h")
+                && business_countdown.starts_with("6d 11h")
+                && personal_countdown != business_countdown,
+            "{owed} formatter personal={personal_countdown} business={business_countdown}"
+        );
+        assert!(
+            personal.contains(&format!("Resets in: {personal_countdown}"))
+                && personal.contains("Resets in: 6d 3h"),
+            "{owed}\npersonal:\n{personal}"
+        );
+        assert!(
+            business.contains(&format!("Resets in: {business_countdown}"))
+                && business.contains("Resets in: 6d 11h"),
+            "{owed}\nbusiness:\n{business}"
+        );
+        assert!(
+            !personal.contains(&format!("Resets in: {business_countdown}"))
+                && !business.contains(&format!("Resets in: {personal_countdown}")),
+            "{owed}\npersonal:\n{personal}\nbusiness:\n{business}"
+        );
+        let earliest = earliest_reset_at(&state.snapshot).expect("primary next reset");
+        assert_eq!(
+            earliest, fixture.personal_end,
+            "{owed} in-memory snapshot earliest is the personal clock"
+        );
+        assert_eq!(
+            format_reset_countdown(fixture.now, earliest),
+            personal_countdown,
+            "{owed} earliest_reset_at is the personal countdown"
+        );
+        assert!(
+            !business.contains(&format!(
+                "Resets in: {}",
+                format_reset_countdown(fixture.now, earliest)
+            )),
+            "{owed} earliest_reset_at is not the Business tab's painted countdown:\n{business}"
+        );
+        assert_ne!(
+            fixture.personal_end, fixture.business_end,
+            "{owed} matching day counts are not a shared pool"
+        );
+        let doc = xai_grok_shell::auth::read_limits_snapshot_file(limits_reading_grok_home())
+            .expect("dual heavy snapshot");
+        let personal_row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == fixture.personal_id)
+            .expect("personal identity");
+        let business_row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == fixture.business_id)
+            .expect("business identity");
+        assert_ne!(
+            personal_row.period_end, business_row.period_end,
+            "{owed} each identity keeps its own nextReset"
+        );
+    }
+
     /// When the next request draws business included SuperGrok period
     /// limits, a new Limits card opens on the Business tab. `Using
     /// business limits` is the one copy of that action. `Use business
@@ -7728,8 +8107,11 @@ mod tests {
         )
         .expect("write auth.json");
 
-        let body =
-            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        let body = account_section_lines(
+            xai_grok_shell::auth::SupergrokAccountRole::Personal,
+            Utc::now(),
+        )
+        .join("\n");
         assert!(
             server.token_hits() >= 1,
             "the expired personal session refreshed before the card GET"
@@ -7929,8 +8311,11 @@ mod tests {
         )
         .expect("write auth.json");
 
-        let _body =
-            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        let _body = account_section_lines(
+            xai_grok_shell::auth::SupergrokAccountRole::Personal,
+            Utc::now(),
+        )
+        .join("\n");
         let authorizations = server.billing_authorizations();
         let hits = server.billing_hits();
         assert!(
@@ -8472,8 +8857,11 @@ mod tests {
             stay_supergrok: true,
         })
         .expect("included personal pin");
-        let body =
-            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        let body = account_section_lines(
+            xai_grok_shell::auth::SupergrokAccountRole::Personal,
+            Utc::now(),
+        )
+        .join("\n");
         assert!(
             body.contains("Personal SuperGrok has no session on this process."),
             "a hard-expired personal session is not a session on this process:\n{body}"

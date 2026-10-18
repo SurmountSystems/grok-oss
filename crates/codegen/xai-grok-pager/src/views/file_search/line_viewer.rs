@@ -770,6 +770,9 @@ pub struct PlanViewerExtras {
     pub revision_prompt_text: String,
     /// Hit target for that prompt input. None when the footer is not up.
     pub revision_prompt_area: Option<Rect>,
+    /// After Revise (prompt focus + Revise intent) the in-panel box is the
+    /// only input. Idle Preview with the four CTAs leaves this false.
+    pub show_revision_prompt: bool,
 }
 
 /// Double-click detection threshold in milliseconds.
@@ -2134,9 +2137,14 @@ pub fn render_line_viewer(
     // (rendered in step 8 below). The approval screen also reserves a prompt
     // input above that footer. The footer word `revise` is not the prompt.
     // A short pane keeps the footer and skips the prompt.
+    // Idle Preview (four CTAs) does not reserve this box. After Revise
+    // (`show_revision_prompt`) the in-panel input is three rows.
     let revision_prompt_rows: u16 = if viewer.kind == LineViewerKind::PlanPreview
         && viewer.show_footer()
         && inner.height >= 9
+        && viewer
+            .plan_ref()
+            .is_some_and(|plan| plan.show_revision_prompt)
     {
         3
     } else {
@@ -4719,11 +4727,11 @@ mod tests {
         assert!(enlarge.x + enlarge.width < close.x);
     }
 
-    /// Approval screen: plan text is visible and the footer is
-    /// `approve | comment | revise | exit`. The footer word `revise` is
-    /// not a prompt. A prompt input is on this screen so the Operator can
-    /// type a revision. This is not the drafting screen, and it is not the
-    /// pane after Approve has started implement.
+    /// Approval screen: plan text is visible and the idle footer is
+    /// `approve | comment | revise | exit`. Idle Preview does not paint
+    /// `Type a revision...`. After Revise, that placeholder is in the
+    /// panel. This is not the drafting screen, and it is not the pane
+    /// after Approve has started implement.
     #[test]
     fn plan_approval_screen_shows_a_prompt_input_while_the_revise_footer_is_up() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -4737,14 +4745,15 @@ mod tests {
         viewer.plan_mut().feedback_active = true;
         viewer.plan_mut().show_action_buttons = true;
         viewer.plan_mut().comment_flow_active = false;
+        viewer.plan_mut().show_revision_prompt = false;
         assert!(
             viewer.feedback_active(),
             "this is the approval screen, not the drafting screen"
         );
 
         let full = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(full);
         let theme = crate::theme::Theme::current();
+        let mut buf = Buffer::empty(full);
         render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
 
         let screen = (0..full.height)
@@ -4769,14 +4778,43 @@ mod tests {
             footer.contains('|'),
             "approval footer is approve | comment | revise | exit; got {footer:?}"
         );
+        assert!(
+            !screen.contains("Type a revision"),
+            "idle Preview with the four CTAs must not paint Type a revision...:\n{screen}"
+        );
+        assert!(
+            viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.revision_prompt_area.is_none()),
+            "idle Preview has no in-panel revision prompt hit target"
+        );
 
+        viewer.plan_mut().show_revision_prompt = true;
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+        let revise_screen = (0..full.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let revise_footer_y = (0..full.height).find(|&y| {
+            let lower = row_text(&buf, y).to_ascii_lowercase();
+            ["approve", "comment", "revise", "exit"]
+                .iter()
+                .all(|word| lower.contains(word))
+        });
+        let revise_footer_y = revise_footer_y.unwrap_or_else(|| {
+            panic!(
+                "Revise-clicked footer approve | comment | revise | exit is missing:\n{revise_screen}"
+            )
+        });
         let arrow = crate::glyphs::prompt_arrow().trim();
         let prompt_y =
-            (0..full.height).find(|&y| y != footer_y && row_text(&buf, y).contains(arrow));
+            (0..full.height).find(|&y| y != revise_footer_y && row_text(&buf, y).contains(arrow));
         let prompt_row = prompt_y.map(|y| row_text(&buf, y)).unwrap_or_default();
         assert!(
             prompt_y.is_some(),
-            "the approval screen has the footer word revise and no prompt input; footer={footer:?}\n{screen}"
+            "after Revise the in-panel box is the only input; footer={:?}\n{revise_screen}",
+            row_text(&buf, revise_footer_y)
         );
         let prompt_lower = prompt_row.to_ascii_lowercase();
         assert!(
@@ -4785,13 +4823,59 @@ mod tests {
         );
         assert!(
             prompt_row.contains("Type a revision"),
-            "the prompt input is where the Operator types a revision; got {prompt_row:?}"
+            "after Revise the in-panel box may show Type a revision...; got {prompt_row:?}"
         );
         assert!(
             viewer
                 .plan_ref()
                 .is_some_and(|plan| plan.revision_prompt_area.is_some()),
-            "the prompt input is a hit target on the approval screen"
+            "after Revise the in-panel box is a hit target"
+        );
+    }
+
+    /// Idle Preview footer is the four CTAs. `Type a revision...` is only
+    /// after Revise. Today's paint still puts the placeholder on idle.
+    #[test]
+    fn plan_approval_idle_does_not_show_type_a_revision_while_approve_comment_revise_exit_are_idle()
+    {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nFile-backed approval\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().comment_flow_active = false;
+        viewer.plan_mut().show_revision_prompt = false;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let screen = (0..full.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lower = screen.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "idle footer must name {needle}:\n{screen}"
+            );
+        }
+        assert!(
+            !screen.contains("Type a revision"),
+            "idle Preview must not paint Type a revision... while approve | comment | revise | exit are idle:\n{screen}"
+        );
+        assert!(
+            viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.revision_prompt_area.is_none()),
+            "idle Preview must not reserve an in-panel revision prompt"
         );
     }
 

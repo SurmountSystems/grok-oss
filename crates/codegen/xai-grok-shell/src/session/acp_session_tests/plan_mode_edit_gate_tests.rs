@@ -31,6 +31,39 @@ async fn build_gate_actor() -> SessionActor {
     });
     actor
 }
+/// TaskTool requires get_task_output and kill_task in the same toolset. Keep
+/// that trio off the shared actor so grok-edit gate tests still construct.
+async fn build_gate_actor_with_task() -> SessionActor {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionTool;
+    use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
+    use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
+    use xai_grok_tools::implementations::grok_build::{KillTaskTool, TaskOutputTool, TaskTool};
+    use xai_grok_tools::registry::types::ToolConfig;
+    let (gateway_tx, mut gateway_rx) =
+        tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+    let (persistence_tx, _persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+        ToolConfig::from_id("GrokBuild:read_file"),
+        ToolConfig::from_id("GrokBuild:search_replace"),
+        ToolConfig::for_tool::<EnterPlanModeTool>(),
+        ToolConfig::for_tool::<ExitPlanModeTool>(),
+        ToolConfig::for_tool::<AskUserQuestionTool>(),
+        ToolConfig::from(&TaskTool).with_name("spawn_subagent"),
+        ToolConfig::for_tool::<TaskOutputTool>(),
+        ToolConfig::for_tool::<KillTaskTool>(),
+    ])
+    .await;
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = gateway_rx.recv().await {
+            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
+                let _ = args.response_tx.send(Ok(()));
+            }
+        }
+    });
+    actor
+}
 async fn prepare(
     actor: &SessionActor,
     call: ToolCallResponse,
@@ -68,6 +101,53 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
         })
         .await;
 }
+fn spawn_explore_call(id: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "spawn_subagent",
+            serde_json::json!({
+                "prompt": "map the paint",
+                "description": "explore paint",
+                "subagent_type": "explore",
+            })
+            .to_string(),
+        ),
+    }
+}
+
+/// Operator contract: while plan_mode_active is writing or presenting,
+/// nested explore and implement jobs are not started. The live prepare
+/// loop must refuse an explore spawn so the job does not start.
+#[tokio::test(flavor = "current_thread")]
+async fn plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve() {
+    const CONTRACT: &str = "While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = build_gate_actor_with_task().await;
+            activate_plan_mode(&actor);
+            let result = prepare(&actor, spawn_explore_call("call_explore_gate")).await;
+            assert!(
+                matches!(result, Err(ToolLoop::Continue)),
+                "gate must reject explore spawn with Continue (tool not executed); got {result:?}. {CONTRACT}"
+            );
+            let text = tool_result_text(&actor, "call_explore_gate").await;
+            assert!(
+                text.contains(
+                    "while plan_mode_active is writing or presenting, nested explore and implement jobs are not started"
+                ),
+                "refuse text must quote the Operator contract. Got: {text}"
+            );
+            assert!(
+                text.contains("Nested research and implement start after Approve"),
+                "refuse text must say nested research and implement start after Approve. Got: {text}"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn plan_mode_allows_plan_file_edit() {
     let local = tokio::task::LocalSet::new();

@@ -110,11 +110,18 @@ pub fn is_trusted_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
-/// True for cli-chat-proxy URLs (production, plus local-dev hosts when the optional non-production feature is enabled).
+/// grok-oss cli-chat-proxy host. Distinct from the compiled grok.com production base.
+/// Nested spawn and grok-oss 401s use this origin (`cli-chat-proxy.x.ai`).
+const XAI_CLI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.x.ai/v1";
+
+/// True for cli-chat-proxy URLs (production grok.com, grok-oss `cli-chat-proxy.x.ai`, plus local-dev hosts when the optional non-production feature is enabled).
 /// When that feature is on, runtime env overrides can extend this trust set.
 /// Loopback is always accepted (unit tests and local mock servers on arbitrary ports).
 pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     if is_trusted_cli_chat_proxy_url(url) {
+        return true;
+    }
+    if matches_trusted_base_url(url, XAI_CLI_CHAT_PROXY_BASE_URL) {
         return true;
     }
     if let Ok(u) = reqwest::Url::parse(url)
@@ -409,6 +416,13 @@ mod tests {
         ));
     }
     #[test]
+    fn test_is_cli_chat_proxy_url_accepts_xai_proxy_host() {
+        assert!(is_cli_chat_proxy_url("https://cli-chat-proxy.x.ai/v1"));
+        assert!(is_cli_chat_proxy_url(
+            "https://cli-chat-proxy.x.ai/v1/responses"
+        ));
+    }
+    #[test]
     fn test_is_cli_chat_proxy_url_rejects_public_api() {
         assert!(!is_cli_chat_proxy_url("https://api.x.ai/v1"));
     }
@@ -416,6 +430,9 @@ mod tests {
     fn test_is_cli_chat_proxy_url_rejects_spoofed_hostname() {
         assert!(!is_cli_chat_proxy_url(
             "https://cli-chat-proxy.grok.com.evil.example/v1"
+        ));
+        assert!(!is_cli_chat_proxy_url(
+            "https://cli-chat-proxy.x.ai.evil.example/v1"
         ));
     }
     #[test]

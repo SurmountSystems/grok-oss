@@ -34,7 +34,7 @@ use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential}
 use super::storage::read_auth_json_or_empty;
 use super::storage::{
     AuthFileLock, auth_json_path, read_auth_json, read_auth_json_or_empty_recovering_corrupt,
-    write_auth_json,
+    reread_session_secrets_before_refresh, write_auth_json,
 };
 use crate::backend::{ActiveAuthBackend, AuthBackend};
 use crate::config::GrokComConfig;
@@ -611,6 +611,8 @@ impl AuthManager {
     }
     /// Inner of [`force_reload_from_disk`] with the retry budget injectable so the disk-anomaly branch is unit-testable without real sleeps.
     fn force_reload_from_disk_with(&self, tries: usize, backoff: StdDuration) {
+        // One keyring probe so a sibling refresh is visible. Not a paint tick.
+        self.reread_secrets_for_refresh(RefreshReason::PreRequest);
         let mut last_state = DiskAuthState::FileMissing;
         for attempt in 0..tries.max(1) {
             if attempt > 0 && !backoff.is_zero() {
@@ -1142,9 +1144,25 @@ impl AuthManager {
         self.hot_swap(disk_auth.clone());
         Ok(disk_auth.clone())
     }
+    /// One keyring re-read of this scope's session secrets before adopt or reload.
+    ///
+    /// A still-valid in-memory token does not come through here on the paint
+    /// path. `ServerRejected` and a token already inside the early-invalidation
+    /// window drop the process cache first so the rejected secret is not served
+    /// as current. The store backs off while its error circuit is open.
+    fn reread_secrets_for_refresh(&self, reason: RefreshReason) {
+        let expired = self
+            .current_or_expired()
+            .as_ref()
+            .is_some_and(|auth| self.is_token_expired(auth));
+        let drop_cache = reason == RefreshReason::ServerRejected || expired;
+        reread_session_secrets_before_refresh(&self.path, &self.scope, drop_cache);
+    }
     /// Re-read disk and try to adopt a sibling-written token, emitting telemetry on success.
     /// Combines `read_disk_auth`, `try_use_disk_token`, and the structured log every `refresh_chain` callsite needs.
+    /// Probes the keyring once first so a sibling token is already in the process cache.
     fn try_adopt_disk_token(&self, reason: RefreshReason, msg: &str) -> Option<GrokAuth> {
+        self.reread_secrets_for_refresh(reason);
         let disk_auth = self.read_disk_auth();
         let prev = self
             .current_or_expired()
@@ -1636,6 +1654,12 @@ impl AuthManager {
     /// The token must pass the shared adoption guards in [`Self::try_use_disk_token`]. (That means a sibling process wrote a fresher one.) Returns `true` only when in-memory state was actually replaced.
     /// Callers can then log adoption truthfully instead of inferring it from "we have a token now". That inference is also true when our own token was fine all along. It made the proactive-refresh log actively misleading when reconstructing a rotation chain after an incident.
     pub fn pick_up_sibling_token(&self) -> bool {
+        // A still-valid token stays on the process cache. Re-read only when
+        // there is nothing current to serve (missing, or inside the
+        // early-invalidation window).
+        if self.current().is_none() {
+            self.reread_secrets_for_refresh(RefreshReason::PreRequest);
+        }
         let auth = match read_auth_json(&self.path) {
             Ok(map) => lookup_auth(&map, &self.scope),
             _ => None,

@@ -249,10 +249,15 @@ pub(super) async fn reparent_surviving_child_tasks(
 }
 const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(not(test))]
 const WAKE_START_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(test)]
-const WAKE_START_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+const WAKE_START_HOLD_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+fn wake_flush_timeout(hold_ack: bool) -> std::time::Duration {
+    if hold_ack {
+        WAKE_START_HOLD_ACK_TIMEOUT
+    } else {
+        WAKE_START_FLUSH_TIMEOUT
+    }
+}
 #[derive(Clone)]
 enum WakePersistenceContext {
     Ordinary,
@@ -266,6 +271,39 @@ impl WakePersistenceContext {
             Self::Ordinary => ordinary.unwrap_or(0),
             Self::Wake { prior } => prior.next_trace_turn,
         }
+    }
+    async fn persist_start(
+        &self,
+        persistence_tx: &mpsc::UnboundedSender<crate::session::persistence::PersistenceMsg>,
+        start: crate::session::persistence::WakeStart,
+        abort: tokio_util::sync::CancellationToken,
+        hold_ack: bool,
+    ) -> bool {
+        let Self::Wake { .. } = self else {
+            return true;
+        };
+        let (respond_to, response_rx) = oneshot::channel();
+        if persistence_tx
+            .send(crate::session::persistence::PersistenceMsg::WakeStart {
+                start,
+                abort,
+                respond_to,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let response = async move {
+            if hold_ack {
+                std::future::pending().await
+            } else {
+                response_rx.await
+            }
+        };
+        matches!(
+            tokio::time::timeout(wake_flush_timeout(hold_ack), response).await,
+            Ok(Ok(Ok(())))
+        )
     }
     async fn abort(
         &self,
@@ -294,7 +332,7 @@ impl WakePersistenceContext {
                 response_rx.await
             }
         };
-        if tokio::time::timeout(WAKE_START_FLUSH_TIMEOUT, response)
+        if tokio::time::timeout(wake_flush_timeout(hold_ack), response)
             .await
             .is_err()
         {
@@ -883,7 +921,7 @@ async fn run_shell_child_body(
         && let Some(ref source_model) = source.model_id
         && effective_model_id.0.as_ref() != source_model.as_str()
     {
-        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
+        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx).await {
             tracing::info!(
                 subagent_id = %request.id,
                 resolved_model = %effective_model_id.0,
@@ -1247,6 +1285,74 @@ async fn run_shell_child_body(
             );
         }
     };
+    let wake_persistence_tx = is_wake.then(|| persistence.tx.clone());
+    let wake_start_abort = tokio_util::sync::CancellationToken::new();
+    #[cfg(test)]
+    let hold_wake_start_flush_ack = ctx
+        .run_shell_child_harness
+        .as_ref()
+        .is_some_and(|harness| harness.hold_wake_start_flush_ack);
+    #[cfg(not(test))]
+    let hold_wake_start_flush_ack = false;
+    #[cfg(test)]
+    let hold_wake_abort_flush_ack = ctx
+        .run_shell_child_harness
+        .as_ref()
+        .is_some_and(|harness| harness.hold_wake_abort_flush_ack);
+    #[cfg(not(test))]
+    let hold_wake_abort_flush_ack = false;
+    let mut restore_wake_after_teardown = false;
+    if is_wake {
+        let persisted = match (wake_persistence_tx.as_ref(), &wake_persistence) {
+            (Some(wake_persistence_tx), WakePersistenceContext::Wake { prior }) => {
+                wake_persistence
+                    .persist_start(
+                        wake_persistence_tx,
+                        crate::session::persistence::WakeStart {
+                            prior: prior.clone(),
+                            attempt_id: attempt_identity.to_string(),
+                            next_trace_turn: turn_number.saturating_add(1),
+                            model_id: effective_model_id.clone(),
+                            agent_name: Some(definition.name.clone()),
+                            reasoning_effort: Some(effective_sampling_config.reasoning_effort),
+                        },
+                        wake_start_abort.clone(),
+                        hold_wake_start_flush_ack,
+                    )
+                    .await
+            }
+            (None, WakePersistenceContext::Ordinary) => true,
+            _ => false,
+        };
+        if !persisted {
+            tracing::warn!(
+                subagent_id = %request.id,
+                turn_number,
+                "accepted wake trace turn did not persist before the deadline"
+            );
+            wake_start_abort.cancel();
+            if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
+                wake_persistence
+                    .abort(
+                        wake_persistence_tx,
+                        hold_wake_abort_flush_ack,
+                        &request.id,
+                        turn_number,
+                    )
+                    .await;
+            }
+            return setup_failure_output(
+                "accepted wake trace turn did not persist before the deadline",
+                &request,
+                &child_session_id,
+                &subagent_meta_dir,
+                &early_gcs_ctx,
+                start_artifacts.terminal_persistence_allowed(),
+                completion_data,
+            );
+        }
+        restore_wake_after_teardown = true;
+    }
     let child_cwd = resolve_child_cwd(
         worktree_path.as_deref(),
         override_cwd.as_deref(),
@@ -1514,11 +1620,7 @@ async fn run_shell_child_body(
         mcp_owned_count,
         skills_inherited_count,
     });
-    let wake_model_id = effective_model_id.clone();
-    let wake_agent_name = definition.name.clone();
-    let wake_reasoning_effort = effective_sampling_config.reasoning_effort;
     let subagent_session_default_agent_profile = Some(definition.name.clone());
-    let wake_persistence_tx = is_wake.then(|| persistence.tx.clone());
     if !is_wake {
         let _ = persistence
             .tx
@@ -1720,6 +1822,18 @@ async fn run_shell_child_body(
     let (child_init, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
+            if restore_wake_after_teardown {
+                if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
+                    wake_persistence
+                        .abort(
+                            wake_persistence_tx,
+                            hold_wake_abort_flush_ack,
+                            &request.id,
+                            turn_number,
+                        )
+                        .await;
+                }
+            }
             let msg = format!("Failed to spawn child session: {e}");
             let result = if completion_data.has_emitted_spawned_notification() {
                 fail_subagent(
@@ -1749,7 +1863,7 @@ async fn run_shell_child_body(
         &child_handle.hunk_tracker_handle,
         &child_toolset,
     );
-    let ready_to_first_turn_span = phase_region(SubagentSpawnPhase::ReadyToFirstTurn);
+    let mut ready_to_first_turn_span = Some(phase_region(SubagentSpawnPhase::ReadyToFirstTurn));
     let (receipt_sink, receipt_stream) = mpsc::channel(ACTIVE_MESSAGE_RECEIPT_CAPACITY);
     let receipt_drain = PromptTurnReceiptDrain::start(
         receipt_stream,
@@ -1809,7 +1923,6 @@ async fn run_shell_child_body(
     .await;
     let unpromoted_disposition = readiness.unpromoted_disposition();
     let mut completed_before_ack = None;
-    let mut restore_wake_after_teardown = false;
     let promoted = match readiness {
         InitialChildPromptReadiness::Admitted(release) => {
             let child = StartedChild {
@@ -1848,104 +1961,28 @@ async fn run_shell_child_body(
                 drop(release);
                 false
             } else {
-                let wake_start_abort = tokio_util::sync::CancellationToken::new();
                 #[cfg(test)]
-                let hold_wake_start_flush_ack = ctx
+                let reject_deferred_start_commit = ctx
                     .run_shell_child_harness
                     .as_ref()
-                    .is_some_and(|harness| harness.hold_wake_start_flush_ack);
+                    .is_some_and(|harness| harness.reject_deferred_start_commit);
                 #[cfg(not(test))]
-                let hold_wake_start_flush_ack = false;
-                let persisted = match (wake_persistence_tx.as_ref(), &wake_persistence) {
-                    (Some(wake_persistence_tx), WakePersistenceContext::Wake { prior }) => {
-                        let (respond_to, response_rx) = oneshot::channel();
-                        if wake_persistence_tx
-                            .send(crate::session::persistence::PersistenceMsg::WakeStart {
-                                start: crate::session::persistence::WakeStart {
-                                    prior: prior.clone(),
-                                    attempt_id: attempt_identity.to_string(),
-                                    next_trace_turn: turn_number.saturating_add(1),
-                                    model_id: wake_model_id.clone(),
-                                    agent_name: Some(wake_agent_name.clone()),
-                                    reasoning_effort: Some(wake_reasoning_effort),
-                                },
-                                abort: wake_start_abort.clone(),
-                                respond_to,
-                            })
-                            .is_err()
-                        {
-                            false
-                        } else {
-                            let response = async move {
-                                if hold_wake_start_flush_ack {
-                                    std::future::pending().await
-                                } else {
-                                    response_rx.await
-                                }
-                            };
-                            matches!(
-                                tokio::time::timeout(WAKE_START_FLUSH_TIMEOUT, response).await,
-                                Ok(Ok(Ok(())))
-                            )
-                        }
-                    }
-                    (None, WakePersistenceContext::Ordinary) => true,
-                    _ => false,
-                };
-                if !persisted {
-                    tracing::warn!(
-                        subagent_id = %request.id,
-                        turn_number,
-                        "accepted wake trace turn did not persist before the deadline"
-                    );
-                    wake_start_abort.cancel();
-                    #[cfg(test)]
-                    let hold_wake_abort_flush_ack = ctx
-                        .run_shell_child_harness
-                        .as_ref()
-                        .is_some_and(|harness| harness.hold_wake_abort_flush_ack);
-                    #[cfg(not(test))]
-                    let hold_wake_abort_flush_ack = false;
-                    if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
-                        wake_persistence
-                            .abort(
-                                wake_persistence_tx,
-                                hold_wake_abort_flush_ack,
-                                &request.id,
-                                turn_number,
-                            )
-                            .await;
-                    }
-                    if is_wake {
-                        let _ = reporter.settle_deferred_start(false).await;
-                    }
+                let reject_deferred_start_commit = false;
+                let is_committed = !is_wake
+                    || (!reject_deferred_start_commit
+                        && reporter.settle_deferred_start(true).await);
+                if !is_committed {
                     drop(release);
+                    wake_start_abort.cancel();
+                    let _ = reporter.settle_deferred_start(false).await;
+                    start_artifacts.forbid_terminal_persistence();
                     false
                 } else {
-                    #[cfg(test)]
-                    let reject_deferred_start_commit = ctx
-                        .run_shell_child_harness
-                        .as_ref()
-                        .is_some_and(|harness| harness.reject_deferred_start_commit);
-                    #[cfg(not(test))]
-                    let reject_deferred_start_commit = false;
-                    let is_committed = !is_wake
-                        || (!reject_deferred_start_commit
-                            && reporter.settle_deferred_start(true).await);
-                    if !is_committed {
-                        drop(release);
-                        restore_wake_after_teardown = true;
-                        wake_start_abort.cancel();
-                        let _ = reporter.settle_deferred_start(false).await;
-                        start_artifacts.forbid_terminal_persistence();
-                        false
-                    } else {
-                        if start_artifacts.publish_at(PublicationBoundary::Started) {
-                            completion_data.mark_spawned_notification_emitted();
-                        }
-                        let _ = release.send(());
-                        true
+                    if start_artifacts.publish_at(PublicationBoundary::Started) {
+                        completion_data.mark_spawned_notification_emitted();
                     }
+                    let _ = release.send(());
+                    true
                 }
             }
         }
@@ -1959,33 +1996,46 @@ async fn run_shell_child_body(
             false
         }
     };
-    if !promoted && completed_before_ack.is_none() {
-        ready_to_first_turn_span.close();
-        drop(spawn_root.take());
-        let result = cancel_pending_shell_child(
-            &child_handle.cmd_tx,
-            child_thread,
-            &ctx.workspace_ops,
-            &subagent_id,
-            &child_session_id,
-            &subagent_meta_dir,
-            worktree_path.as_deref(),
-            worktree_freshly_created,
-            start.elapsed().as_millis() as u64,
-            &gcs_upload_ctx,
-            UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
-            unpromoted_disposition,
-            start_artifacts.terminal_persistence_allowed(),
-        )
-        .await;
-        if restore_wake_after_teardown {
-            if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
-                wake_persistence
-                    .abort(wake_persistence_tx, false, &request.id, turn_number)
-                    .await;
-            }
-            let _ = reporter.settle_deferred_start(false).await;
+    let unpromoted_teardown = if !promoted && completed_before_ack.is_none() {
+        if let Some(span) = ready_to_first_turn_span.take() {
+            span.close();
         }
+        drop(spawn_root.take());
+        Some(
+            cancel_pending_shell_child(
+                &child_handle.cmd_tx,
+                &child_thread,
+                &ctx.workspace_ops,
+                &subagent_id,
+                &child_session_id,
+                &subagent_meta_dir,
+                worktree_path.as_deref(),
+                worktree_freshly_created,
+                start.elapsed().as_millis() as u64,
+                &gcs_upload_ctx,
+                UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
+                unpromoted_disposition,
+                start_artifacts.terminal_persistence_allowed(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    if !promoted && restore_wake_after_teardown {
+        if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
+            wake_persistence
+                .abort(
+                    wake_persistence_tx,
+                    hold_wake_abort_flush_ack,
+                    &request.id,
+                    turn_number,
+                )
+                .await;
+        }
+        let _ = reporter.settle_deferred_start(false).await;
+    }
+    if let Some(result) = unpromoted_teardown {
         return child_run_output(result, completion_data, None);
     }
     Box::pin(async move {
@@ -2004,7 +2054,9 @@ async fn run_shell_child_body(
         SubagentSpawnPhase::ReadyToFirstTurn,
         session_ready_at.elapsed(),
     );
-    ready_to_first_turn_span.close();
+    if let Some(span) = ready_to_first_turn_span.take() {
+        span.close();
+    }
     drop(spawn_root.take());
     let attempt_outcome = match completed_before_ack {
         Some(outcome) => outcome,

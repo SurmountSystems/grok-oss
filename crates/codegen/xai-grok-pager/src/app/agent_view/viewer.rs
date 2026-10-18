@@ -603,6 +603,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // Tab:prompt focuses the in-panel plan prompt, not a second composer.
+        if in_plan_approval && key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            return self.focus_plan_prompt(PlanPromptIntent::Revise);
+        }
+
         // Accepted plan search: n/N jump hits. They must not type into the
         // Operator box and must not RowWalk focus.
         if matches!(key.code, KeyCode::Char('n' | 'N'))
@@ -615,6 +620,32 @@ impl AgentView {
                 viewer.list_state.handle_key_event(key, &viewer.lines);
             }
             return InputOutcome::Changed;
+        }
+
+        // Live plan mode: the auto-opened pane is not Isolated Preview.
+        // Printable / Backspace / Delete type in the titled planning composer.
+        // Isolated Preview y/Y copy and search n/N already returned above
+        // when those owners apply. Bare Enter does not send or Approve.
+        let live_plan_mode = self.plan_mode_pending.unwrap_or(self.plan_mode_active)
+            && self.plan_approval_view.is_none();
+        if live_plan_mode && plan_preview_key_is_composer_text(key) {
+            let type_in = matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+            );
+            if type_in {
+                match self.prompt.handle_key(key) {
+                    crate::views::prompt_widget::PromptEvent::Edited => {
+                        self.prompt.refresh_slash(&self.session.models);
+                        if let Some(req) = self.prompt.pending_viewer_request.take() {
+                            self.open_line_viewer(&req.path, req.initial_range);
+                        }
+                        self.persist_unsent_composer_draft();
+                    }
+                    crate::views::prompt_widget::PromptEvent::Ignored => {}
+                }
+                return InputOutcome::Changed;
+            }
         }
 
         if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {

@@ -285,6 +285,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Parent session's ChatStateHandle, used to read the actual live sampling config and credentials from the parent session actor (async).
     /// Cheap Clone (mpsc sender). `None` when the parent SessionHandle is not found.
     pub parent_chat_state: Option<xai_chat_state::ChatStateHandle>,
+    /// Live parent sampler. Nested Authorization is `current_api_key()` byte for byte.
+    /// Token-Auth is present if and only if that sampler's extra headers already send it.
+    pub parent_sampler_handle: Option<xai_grok_sampler::SamplerHandle>,
     /// Parent session's resolved turn limit, for subagent inheritance.
     pub parent_max_turns: Option<usize>,
     /// All available models for resolving model IDs from overrides.
@@ -391,13 +394,21 @@ const _: () = {
     assert_send::<SubagentSpawnContext>()
 };
 impl SubagentSpawnContext {
-    /// Parent JWT to stamp when `AuthManager.current_wire_valid` is empty.
-    /// The parent turn often keeps that JWT on `sampling_config` or in `current_or_expired` while ACP method is still `"default"`.
+    /// JWT the live parent sampler is talking with.
+    /// `parent_sampler_handle.current_api_key()` is that JWT. `sampling_config.api_key` is the
+    /// spawn snapshot. `auth.key` and AuthManager can be a recovered CLI session the proxy still
+    /// rejects (`auth_kind=bearer` … `reason=no auth context`).
     fn inherited_fallback_key(&self) -> Option<String> {
-        self.auth
-            .as_ref()
-            .map(|auth| auth.key.clone())
+        self.sampling_config
+            .api_key
+            .clone()
             .filter(|key| !key.is_empty())
+            .or_else(|| {
+                self.auth
+                    .as_ref()
+                    .map(|auth| auth.key.clone())
+                    .filter(|key| !key.is_empty())
+            })
             .or_else(|| {
                 self.auth_manager
                     .current_wire_valid()
@@ -405,12 +416,24 @@ impl SubagentSpawnContext {
                     .map(|auth| auth.key)
                     .filter(|key| !key.is_empty())
             })
-            .or_else(|| {
-                self.sampling_config
-                    .api_key
-                    .clone()
-                    .filter(|key| !key.is_empty())
-            })
+    }
+
+    /// Live parent sampler JWT first, then the spawn-snapshot fallback.
+    async fn live_parent_sampler_jwt(&self) -> Option<String> {
+        if let Some(handle) = &self.parent_sampler_handle
+            && let Some(key) = handle.current_api_key().await
+        {
+            return Some(key);
+        }
+        self.inherited_fallback_key()
+    }
+
+    /// Extra headers the live parent sampler still sends. `None` when that handle is missing.
+    async fn live_parent_extra_headers(&self) -> Option<indexmap::IndexMap<String, String>> {
+        match &self.parent_sampler_handle {
+            Some(handle) => Some(handle.current_extra_headers().await),
+            None => None,
+        }
     }
 
     /// Parent still holds a refreshable OIDC / grok.com / external session.
@@ -687,8 +710,8 @@ async fn resolve_subagent_sampling_config(
     ctx: &SubagentSpawnContext,
 ) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
     let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
-    let try_pin = |model_id: &str, source: &'static str, unknown_msg: &'static str| {
-        match resolve_model_override_to_config(model_id, ctx) {
+    let try_pin = async |model_id: &str, source: &'static str, unknown_msg: &'static str| {
+        match resolve_model_override_to_config(model_id, ctx).await {
             Some((config, canonical_id)) => {
                 log_subagent_model_resolution(
                     agent_name,
@@ -711,6 +734,7 @@ async fn resolve_subagent_sampling_config(
             "config_override",
             "Subagent model override references unknown model, falling through to inherit",
         )
+        .await
     {
         return resolved;
     }
@@ -720,6 +744,7 @@ async fn resolve_subagent_sampling_config(
             "agent_definition",
             "Agent definition model references unknown model, falling through to inherit",
         )
+        .await
     {
         return resolved;
     }
@@ -743,7 +768,7 @@ async fn resolve_effective_model_config(
     ctx: &SubagentSpawnContext,
 ) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
     if let Some(model_id) = runtime_override_model {
-        if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
+        if let Some(resolved) = resolve_model_override_to_config(model_id, ctx).await {
             return resolved;
         }
         tracing::warn!(
@@ -795,13 +820,16 @@ fn session_bearer_resolver(
     ctx: &SubagentSpawnContext,
     byok: crate::agent::auth_method::ModelByok,
     base_url: &str,
+    ranked_key: Option<String>,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     use crate::agent::auth_method;
     let manager_auth = ctx
         .auth_manager
         .current_wire_valid()
         .or_else(|| ctx.auth_manager.current_or_expired());
-    let fallback = ctx.inherited_fallback_key();
+    let fallback = ranked_key
+        .filter(|key| !key.is_empty())
+        .or_else(|| ctx.inherited_fallback_key());
     let gated = auth_method::session_token_auth_gate(
         auth_method::is_session_based_method_or_inherited_live_session(
             Some(&ctx.auth_method_id),
@@ -831,11 +859,34 @@ fn inherited_bearer_resolver(
     ctx: &SubagentSpawnContext,
     model: &str,
     base_url: &str,
+    ranked_key: Option<String>,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     let byok = crate::agent::config::resolve_model_auth_facts_and_provider(model)
         .0
         .byok;
-    session_bearer_resolver(ctx, byok, base_url)
+    session_bearer_resolver(ctx, byok, base_url, ranked_key)
+}
+
+/// Nested Token-Auth matches the live parent sampler extra headers for this URL.
+/// Injecting Token-Auth when that parent omits it is the live 401:
+/// `auth_kind=bearer, x_xai_token_auth=xai-grok-cli, ... reason=no auth context`.
+/// Empty Bearer still strips those headers.
+fn apply_nested_cli_chat_proxy_headers(
+    extra_headers: &mut indexmap::IndexMap<String, String>,
+    alpha_test_key: Option<&str>,
+    base_url: &str,
+    sendable_bearer: Option<&str>,
+    parent_extra_headers: Option<&indexmap::IndexMap<String, String>>,
+) {
+    crate::agent::config::inject_url_derived_headers(extra_headers, alpha_test_key, base_url);
+    if sendable_bearer.is_none_or(|key| key.is_empty()) {
+        crate::agent::config::match_cli_chat_proxy_identity_headers_to_parent(extra_headers, None);
+        return;
+    }
+    crate::agent::config::match_cli_chat_proxy_identity_headers_to_parent(
+        extra_headers,
+        parent_extra_headers,
+    );
 }
 fn parent_catalog_model_id(ctx: &SubagentSpawnContext, routing_model: &str) -> acp::ModelId {
     let models = ctx.models_manager.models();
@@ -853,24 +904,24 @@ async fn read_parent_sampling_config(
         if let Some(cfg) = chat_state.get_sampling_config().await {
             let creds = chat_state.get_credentials().await;
             let mut extra_headers = cfg.extra_headers;
-            crate::agent::config::inject_url_derived_headers(
-                &mut extra_headers,
-                creds.alpha_test_key.as_deref(),
-                &cfg.base_url,
-            );
             let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
             let inherited_base_url = cfg.base_url.clone();
+            let live_jwt = ctx.live_parent_sampler_jwt().await;
+            let parent_extra = ctx.live_parent_extra_headers().await;
             let api_key = crate::agent::auth_method::nested_request_bearer(
-                creds.api_key,
+                creds.api_key.filter(|key| !key.is_empty()),
                 ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
-                ctx.inherited_fallback_key(),
+                live_jwt,
             );
-            if api_key.as_ref().is_none_or(|key| key.is_empty()) {
-                extra_headers.shift_remove("X-XAI-Token-Auth");
-                extra_headers.shift_remove("x-authenticateresponse");
-            }
+            apply_nested_cli_chat_proxy_headers(
+                &mut extra_headers,
+                creds.alpha_test_key.as_deref(),
+                &cfg.base_url,
+                api_key.as_deref(),
+                parent_extra.as_ref(),
+            );
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
             let supports_backend_search = ctx
                 .models_manager
@@ -881,7 +932,7 @@ async fn read_parent_sampling_config(
                 &cfg.base_url,
             );
             let inherited = xai_grok_sampler::SamplerConfig {
-                api_key,
+                api_key: api_key.clone(),
                 base_url: cfg.base_url,
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 model: cfg.model.clone(),
@@ -913,7 +964,12 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url),
+                bearer_resolver: inherited_bearer_resolver(
+                    ctx,
+                    &cfg.model,
+                    &inherited_base_url,
+                    api_key.clone(),
+                ),
                 supports_backend_search,
                 compactions_remaining: ctx
                     .models_manager
@@ -963,12 +1019,26 @@ async fn read_parent_sampling_config(
         })),
     );
     let mut fallback = ctx.sampling_config.clone();
+    let live_jwt = ctx.live_parent_sampler_jwt().await;
+    let parent_extra = ctx.live_parent_extra_headers().await;
     fallback.api_key = crate::agent::auth_method::nested_request_bearer(
         fallback.api_key.clone(),
         ctx.auth_manager.current_wire_valid().map(|auth| auth.key),
-        ctx.inherited_fallback_key(),
+        live_jwt,
     );
-    fallback.bearer_resolver = inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url);
+    apply_nested_cli_chat_proxy_headers(
+        &mut fallback.extra_headers,
+        ctx.alpha_test_key.as_deref(),
+        &fallback.base_url,
+        fallback.api_key.as_deref(),
+        parent_extra.as_ref(),
+    );
+    fallback.bearer_resolver = inherited_bearer_resolver(
+        ctx,
+        &fallback.model,
+        &fallback.base_url,
+        fallback.api_key.clone(),
+    );
     let catalog_model_id = parent_catalog_model_id(ctx, &fallback.model);
     fallback.supports_backend_search = ctx
         .models_manager
@@ -1040,7 +1110,7 @@ pub(crate) fn subagent_override_auth_rank_flags(
 }
 
 /// Resolve a model override string (config key or model ID) to a `(SamplerConfig, ModelId)` pair.
-fn resolve_model_override_to_config(
+async fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
@@ -1059,7 +1129,8 @@ fn resolve_model_override_to_config(
     } else {
         acp::ModelId::new(entry.info().model.clone())
     };
-    let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
+    let live_jwt = ctx.live_parent_sampler_jwt().await;
+    let session_key = live_jwt.as_deref();
     let has_session_key = session_key.is_some();
     // Same dual-auth rank as main sampling: preferred_method +
     // auto_use_included_limits so a model override cannot re-introduce
@@ -1113,10 +1184,18 @@ fn resolve_model_override_to_config(
                 crate::agent::auth_method::ModelByok::NotByok
             },
             &config.base_url,
+            config.api_key.clone(),
         )
     } else {
         None
     };
+    apply_nested_cli_chat_proxy_headers(
+        &mut config.extra_headers,
+        ctx.alpha_test_key.as_deref(),
+        &config.base_url,
+        config.api_key.as_deref(),
+        ctx.live_parent_extra_headers().await.as_ref(),
+    );
     xai_grok_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
         None,
@@ -2109,7 +2188,7 @@ impl UnpromotedChildDisposition {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn cancel_pending_shell_child(
     child_cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
-    child_thread: crate::session::SessionThread,
+    child_thread: &crate::session::SessionThread,
     workspace_ops: &xai_grok_workspace::WorkspaceOps,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
@@ -2126,7 +2205,7 @@ async fn cancel_pending_shell_child(
     let _ = child_cmd_tx.send(SessionCommand::Shutdown(
         crate::session::ShutdownKind::Graceful,
     ));
-    let thread_exited = await_session_thread_exit(&child_thread, thread_exit_timeout).await;
+    let thread_exited = await_session_thread_exit(child_thread, thread_exit_timeout).await;
     let fate = UnpromotedResourceFate::from_thread_exit(thread_exited);
     let result = disposition.result(subagent_id, child_session_id.0.as_ref(), duration_ms);
     if may_persist_terminal {

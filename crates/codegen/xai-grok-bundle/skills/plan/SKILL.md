@@ -66,3 +66,7 @@ hard constraint 15 and § *The operator's words are the spec*.
 When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.
 
 Present is not Approve. Empty Enter does not approve. The idle choices stay Approve, Comment, Revise, and Exit. Do not use a questionnaire modal. The Operator's words are the spec.
+
+## Nested explore and implement start after Approve
+
+While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write `plan.md` from Operator evidence, present, wait for Approve, then spawn. Do not spawn explore or implement jobs during `/plan`. The Hierarchical fast path stays: one already-named command, one already-named file read, the asked-for report, one already-named one-line edit.

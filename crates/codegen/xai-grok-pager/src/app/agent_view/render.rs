@@ -21,7 +21,7 @@ use crate::theme::Theme;
 use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanReviewSource};
 use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle, mode_flags};
 use crate::views::question_view::QUESTION_VIEW_HPAD;
 use crate::views::question_view::feedback_input;
@@ -190,6 +190,62 @@ fn seal_prompt_bottom_rule(
             break;
         }
         x = x.saturating_add(1);
+    }
+}
+
+/// Recolor the composer's outer box-drawing ring to `fg`.
+///
+/// Plan mode keeps `prompt_border_active` on this ring while a planning
+/// turn is running. Title letters and the info-line model name stay.
+/// A stolen running `┃` on this ring becomes `│`.
+fn seal_prompt_outline(
+    buf: &mut Buffer,
+    area: Rect,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let left = area.x;
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let top = area.y;
+    let bottom = area.y.saturating_add(area.height).saturating_sub(1);
+    let style = Style::default().fg(fg).bg(bg);
+    let mut y = top;
+    loop {
+        let mut x = left;
+        loop {
+            let on_ring = x == left || x == right || y == top || y == bottom;
+            if on_ring && let Some(cell) = buf.cell_mut((x, y)) {
+                let sym = cell.symbol().to_string();
+                let (ch, rewrite) = match sym.as_str() {
+                    "\u{250c}" | "\u{2510}" | "\u{2514}" | "\u{2518}" | "\u{2500}" | "\u{2502}" => {
+                        (None, true)
+                    }
+                    "\u{2503}" if x == left || x == right => (Some('\u{2502}'), true),
+                    "\u{256d}" if y == top && x == left => (Some('\u{250c}'), true),
+                    "\u{256e}" if y == top && x == right => (Some('\u{2510}'), true),
+                    "\u{2570}" if y == bottom && x == left => (Some('\u{2514}'), true),
+                    "\u{256f}" if y == bottom && x == right => (Some('\u{2518}'), true),
+                    _ => (None, false),
+                };
+                if rewrite {
+                    if let Some(ch) = ch {
+                        cell.set_char(ch);
+                    }
+                    cell.set_style(style);
+                }
+            }
+            if x == right {
+                break;
+            }
+            x = x.saturating_add(1);
+        }
+        if y == bottom {
+            break;
+        }
+        y = y.saturating_add(1);
     }
 }
 
@@ -1269,13 +1325,22 @@ impl AgentView {
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         self.show_active_resolved_plan_file_if_hidden();
         let casual_commenting = self.is_casual_commenting();
+        let ask_mode = self.effective_session_mode() == xai_grok_tools::types::SessionMode::Ask;
         let mode_accent = if effective_plan || casual_commenting {
             Some(theme.accent_plan)
-        } else if self.effective_session_mode() == xai_grok_tools::types::SessionMode::Ask {
+        } else if ask_mode {
             Some(theme.accent_success)
         } else {
             None
         };
+        // Plan, comment, and Ask keep a white prompt outline. A live
+        // `plan_mode_active` keeps that stroke while a planning turn is
+        // running, even when `plan_mode_pending` is `Some(false)`.
+        let plan_stroke_white = effective_plan
+            || self.plan_mode_active
+            || casual_commenting
+            || ask_mode
+            || self.plan_approval_view.is_some();
         let prompt_focused = if self.plan_approval_view.is_some() {
             self.plan_approval_view
                 .as_ref()
@@ -1301,7 +1366,12 @@ impl AgentView {
             },
             // Plan, comment, and Ask keep the prompt outline on
             // `prompt_border_active`. A 0.4 blend of `bg_base` is black on DOGE.
-            border_color_override: mode_accent.map(|_| theme.prompt_border_active),
+            // A running planning turn keeps this white stroke.
+            border_color_override: if plan_stroke_white {
+                Some(theme.prompt_border_active)
+            } else {
+                None
+            },
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -2669,6 +2739,7 @@ impl AgentView {
         } else {
             self.hit_todo_close.clear();
             self.hit_todo_clear_done.clear();
+            self.todo.clear_row_hit_rects();
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
@@ -3722,34 +3793,61 @@ impl AgentView {
             } else {
                 None
             };
-            // Typed glyphs stay in this planning input, on the caret row.
-            // A soft plan pane must not erase them.
-            let prompt_result_inner = self.prompt.draw(
-                buf,
-                layout.prompt,
-                Some(layout.scrollback),
-                &prompt_style,
-                Some(&info),
-                voice_overlay,
-            );
-            let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
-            self.set_composer_copy_button(copy_button);
-            if self.plan_approval_view.is_some() {
-                seal_prompt_bottom_rule(
+            // File-backed Isolated Preview with the pane open skips the
+            // main composer (idle screenshot, including Tab:prompt). Inline
+            // CreatePlan present and plan write still paint it.
+            let hide_main_composer = self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.source == PlanReviewSource::FileBacked)
+                && self.line_viewer.as_ref().is_some_and(|viewer| {
+                    viewer.kind
+                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                });
+            if hide_main_composer {
+                self.set_composer_copy_button(None);
+                if let Some((s, ovr)) = saved_scroll {
+                    self.prompt.textarea.set_scroll_override(ovr);
+                    self.prompt.set_scroll(s);
+                }
+            } else {
+                // Typed glyphs stay in this planning input, on the caret row.
+                // A soft plan pane must not erase them.
+                let prompt_result_inner = self.prompt.draw(
                     buf,
                     layout.prompt,
-                    theme.prompt_border_active,
-                    theme.bg_base,
+                    Some(layout.scrollback),
+                    &prompt_style,
+                    Some(&info),
+                    voice_overlay,
                 );
-            }
-            if let Some((s, ovr)) = saved_scroll {
-                self.prompt.textarea.set_scroll_override(ovr);
-                self.prompt.set_scroll(s);
-            }
-            prompt_cursor_pos = prompt_result_inner.cursor_pos;
-            prompt_caret_cell = prompt_result_inner.caret_cell;
-            if let Some(escapes) = prompt_result_inner.post_flush_escapes {
-                prompt_post_flush = Some(escapes.into());
+                let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
+                self.set_composer_copy_button(copy_button);
+                if plan_stroke_white && voice_overlay.is_none() {
+                    seal_prompt_outline(
+                        buf,
+                        layout.prompt,
+                        theme.prompt_border_active,
+                        theme.bg_base,
+                    );
+                }
+                if self.plan_approval_view.is_some() {
+                    seal_prompt_bottom_rule(
+                        buf,
+                        layout.prompt,
+                        theme.prompt_border_active,
+                        theme.bg_base,
+                    );
+                }
+                if let Some((s, ovr)) = saved_scroll {
+                    self.prompt.textarea.set_scroll_override(ovr);
+                    self.prompt.set_scroll(s);
+                }
+                prompt_cursor_pos = prompt_result_inner.cursor_pos;
+                prompt_caret_cell = prompt_result_inner.caret_cell;
+                if let Some(escapes) = prompt_result_inner.post_flush_escapes {
+                    prompt_post_flush = Some(escapes.into());
+                }
             }
         }
         if self.prompt.file_search_visible() {
@@ -4197,9 +4295,25 @@ impl AgentView {
                 .map(|viewer| {
                     if let Some(ref pav) = self.plan_approval_view {
                         viewer.plan_mut().active_commenting_range = pav.commenting_range.clone();
+                        // File-backed Isolated Preview types in the in-panel
+                        // box after Tab:prompt / Revise. Inline Prompt keeps
+                        // the titled planning composer; a second in-panel
+                        // copy of the draft would steal the letter-caret scan.
+                        let show_revision = pav.source == PlanReviewSource::FileBacked
+                            && pav.focus == PlanApprovalFocus::Prompt
+                            && pav.prompt_intent
+                                == crate::views::plan_approval_view::PlanPromptIntent::Revise;
+                        viewer.plan_mut().show_revision_prompt = show_revision;
+                        if show_revision {
+                            viewer.plan_mut().revision_prompt_text = self.prompt.text().to_string();
+                        } else {
+                            viewer.plan_mut().revision_prompt_text.clear();
+                        }
                     } else {
                         viewer.plan_mut().active_commenting_range =
                             self.casual_commenting_range.clone();
+                        viewer.plan_mut().show_revision_prompt = false;
+                        viewer.plan_mut().revision_prompt_text.clear();
                     }
                     render_line_viewer(
                         buf,
@@ -4324,14 +4438,21 @@ impl AgentView {
             } else {
                 None
             };
-            // Isolated Preview still types in the Human box. Re-paint the
-            // box caret after the plan pane so a right dock cannot hide it.
-            // If the prompt widget skipped caret_cell (unfocused layout),
-            // sit at the inner origin of the prompt pane.
-            if self
-                .plan_approval_view
-                .as_ref()
-                .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
+            // Idle FileBacked Isolated Preview does not re-paint a Human-box
+            // caret under the panel. After Revise that path types in the
+            // in-panel box. The focused Inline plan editor still re-paints
+            // after the pane so a right dock cannot hide the Operator-green
+            // plate on a letter.
+            let focused_inline_plan_editor = self.plan_approval_view.as_ref().is_some_and(|p| {
+                p.source == PlanReviewSource::Inline && p.focus == PlanApprovalFocus::Prompt
+            });
+            if focused_inline_plan_editor
+                || (self
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
+                    && viewer.kind
+                        != crate::views::file_search::line_viewer::LineViewerKind::PlanPreview)
             {
                 let caret = prompt_caret_cell.or_else(|| {
                     let p = self.pane_areas.prompt;
@@ -5642,17 +5763,17 @@ mod plan_approval_draw_contract_tests {
     #[test]
     fn plan_approval_preview_paints_composer_box_caret() {
         use crate::theme::cache;
-        use crate::views::plan_approval_view::PlanApprovalFocus;
 
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
         let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
 
-        let mut agent = plan_approval_agent();
-        assert_eq!(
-            agent.plan_approval_view.as_ref().expect("plan view").focus,
-            PlanApprovalFocus::Preview
-        );
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content = Some("# Plan\n\nDo the thing\n".into());
         agent
             .prompt
             .set_text("I'll be honest, I don't understand your plan.");
@@ -5705,7 +5826,7 @@ mod plan_approval_draw_contract_tests {
         );
         assert!(
             found_caret,
-            "Preview plan park must paint the Human box caret on the typeable composer:\n{last_text}"
+            "plan write must paint the Human box caret on the titled planning composer:\n{last_text}"
         );
     }
 
@@ -5717,7 +5838,6 @@ mod plan_approval_draw_contract_tests {
     #[test]
     fn plan_approval_preview_empty_composer_paints_box_caret() {
         use crate::theme::cache;
-        use crate::views::plan_approval_view::PlanApprovalFocus;
 
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
@@ -5725,16 +5845,17 @@ mod plan_approval_draw_contract_tests {
         let theme = crate::theme::Theme::current();
         let area = Rect::new(0, 0, 100, 40);
 
-        let mut agent = plan_approval_agent();
-        assert_eq!(
-            agent.plan_approval_view.as_ref().expect("plan view").focus,
-            PlanApprovalFocus::Preview
-        );
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content = Some("# Plan\n\nDo the thing\n".into());
         agent.prompt.set_text("");
         agent.prompt.set_cursor(0);
         assert!(
             agent.prompt.text().is_empty(),
-            "fixture: Isolated Preview composer starts empty"
+            "fixture: planning composer starts empty"
         );
 
         let draw = |agent: &mut AgentView| {
@@ -6588,6 +6709,194 @@ mod plan_approval_draw_contract_tests {
         }
     }
 
+    /// While plan mode is open and a planning turn is running, the prompt
+    /// outline stays `prompt_border_active` white. The running-turn activity
+    /// color `accent_running` stays off that composer ring.
+    #[test]
+    fn plan_mode_prompt_outline_stays_white_while_a_planning_turn_is_running() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::app::agent::AgentState;
+        use crate::theme::{Theme, cache};
+        use agent_client_protocol as acp;
+        use ratatui::style::Color;
+        use std::sync::Arc;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt outline is white"
+        );
+        assert_eq!(
+            theme.accent_running,
+            Color::Rgb(255, 0, 255),
+            "DOGE accent_running is magenta"
+        );
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("hello?");
+        let meta = NotificationMeta::default();
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("tc-write")),
+                    "Write `.grok/sessions/.../plan.md`",
+                )
+                .kind(acp::ToolKind::Edit)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut agent.scrollback,
+        );
+        agent
+            .scrollback
+            .push(crate::scrollback::entry::ScrollbackEntry::running(
+                crate::scrollback::RenderBlock::agent_message("writing the plan"),
+            ));
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "owed: the planning turn is still running"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        for (x, y, label) in [
+            (stroke.left, stroke.top, "top-left ┌"),
+            (stroke.right, stroke.top, "top-right ┐"),
+            (stroke.left, stroke.bottom, "bottom-left └"),
+        ] {
+            let cell = buf
+                .cell((x, y))
+                .unwrap_or_else(|| panic!("{label} must exist at ({x},{y})"));
+            assert_eq!(
+                cell.fg, white,
+                "owed: while plan_mode_active and a planning turn is running, \
+                 the composer {label} is prompt_border_active white; got {:?}",
+                cell.fg
+            );
+            assert_ne!(
+                cell.fg, theme.accent_running,
+                "owed: accent_running must stay off the composer {label}"
+            );
+        }
+        let mid_y = stroke.top.saturating_add(1);
+        if mid_y < stroke.bottom {
+            let side = buf.cell((stroke.left, mid_y)).expect("composer left side");
+            assert_eq!(
+                side.fg, white,
+                "owed: the composer left │ stays white while the planning turn is running; got {:?}",
+                side.fg
+            );
+            assert_ne!(
+                side.fg, theme.accent_running,
+                "owed: accent_running must stay off the composer left │"
+            );
+        }
+    }
+
+    /// An active planning turn's magenta rail is the agent message left
+    /// accent. Title, shortcuts, and the composer ring stay off that rail.
+    #[test]
+    fn active_planning_turn_magenta_rail_is_the_agent_message_accent_not_a_full_window_stripe() {
+        use crate::app::agent::AgentState;
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_running, magenta);
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("hello?");
+        agent
+            .scrollback
+            .push(crate::scrollback::entry::ScrollbackEntry::running(
+                crate::scrollback::RenderBlock::agent_message("writing the plan"),
+            ));
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let rail = "\u{2503}";
+        let area = Rect::new(0, 0, 100, 40);
+
+        fn magenta_rail_at(buf: &Buffer, x: u16, y: u16, magenta: Color, rail: &str) -> bool {
+            buf.cell((x, y)).is_some_and(|cell| {
+                cell.fg == magenta && (cell.symbol() == rail || cell.symbol() == "\u{2502}")
+            })
+        }
+
+        if let Some(cell) = buf.cell((stroke.left, 0)) {
+            assert!(
+                !(cell.fg == magenta && cell.symbol() == rail),
+                "owed: the title row is not a magenta agent rail; got fg={:?} symbol={:?}",
+                cell.fg,
+                cell.symbol()
+            );
+        }
+        let footer_y = area.height.saturating_sub(1);
+        if let Some(cell) = buf.cell((stroke.left, footer_y)) {
+            assert!(
+                !(cell.fg == magenta && cell.symbol() == rail),
+                "owed: the shortcuts row is not a magenta agent rail; got fg={:?} symbol={:?}",
+                cell.fg,
+                cell.symbol()
+            );
+        }
+        for y in stroke.top..=stroke.bottom {
+            let cell = buf.cell((stroke.left, y)).expect("composer left ring");
+            assert_ne!(
+                cell.fg,
+                magenta,
+                "owed: the composer left ring at y={y} stays off accent_running; symbol={:?}",
+                cell.symbol()
+            );
+        }
+        for y in area.y..area.y.saturating_add(area.height) {
+            let in_scrollback =
+                y >= scrollback.y && y < scrollback.y.saturating_add(scrollback.height);
+            if in_scrollback {
+                continue;
+            }
+            if y >= stroke.top && y <= stroke.bottom {
+                continue;
+            }
+            assert!(
+                !magenta_rail_at(&buf, stroke.left, y, magenta, rail),
+                "owed: a magenta ┃ at x={} y={y} is outside the running agent message; that rail is not a full-window stripe",
+                stroke.left
+            );
+        }
+    }
+
     fn yellow_copy_on_row(
         buf: &Buffer,
         prompt: Rect,
@@ -6859,6 +7168,10 @@ mod plan_approval_draw_contract_tests {
         );
         agent.plan_mode_active = true;
         agent.show_plan_preview_if_available();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+            pav.prompt_intent = crate::views::plan_approval_view::PlanPromptIntent::Revise;
+        }
         assert!(
             agent
                 .line_viewer
@@ -6880,7 +7193,12 @@ mod plan_approval_draw_contract_tests {
             );
         }
 
-        let prompt = agent.pane_areas.prompt;
+        let prompt = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("after Revise the in-panel box is the only input");
         assert!(
             prompt.width > 4 && prompt.height > 2,
             "plan approval prompt must have a painted area; got {prompt:?}"
@@ -6931,7 +7249,130 @@ mod plan_approval_draw_contract_tests {
             corner.is_some_and(|cell| cell.symbol() == "\u{2518}" && cell.fg == white);
         assert!(
             broken.is_none() && corner_white,
-            "the bottom rule does not meet the bottom-right corner because the status row sits on it (Grok 4.7 (high) · plan approval · always-approve); every side of the prompt stroke must be Rgb(255, 255, 255). first break at {broken:?}"
+            "every side of the in-panel approval prompt stroke must be Rgb(255, 255, 255). first break at {broken:?}"
+        );
+    }
+
+    /// Idle plan approval (four CTAs, focus Preview) must not paint a
+    /// titled Grok OSS composer under the plan panel. Today's paint remaps
+    /// Grok Build to Grok OSS on that lower box.
+    #[test]
+    fn plan_approval_does_not_paint_the_main_grok_oss_composer_under_the_plan_panel() {
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.display_name = Some("Grok Build".into());
+        agent.show_plan_preview_if_available();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|pav| pav.focus),
+            Some(crate::views::plan_approval_view::PlanApprovalFocus::Preview),
+            "idle approval starts on Preview"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            }),
+            "idle approval docks PlanPreview"
+        );
+
+        let (_buf, text) = draw_buf(&mut agent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "this is the side-panel approval screen:\n{text}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "footer must read approve | comment | revise | exit; missing {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !text.contains("Grok OSS"),
+            "idle Preview must not paint a titled Grok OSS composer under the plan panel:\n{text}"
+        );
+        assert!(
+            !text.contains("Type a revision"),
+            "idle Preview must not paint Type a revision... under or inside the panel:\n{text}"
+        );
+    }
+
+    /// Tab:prompt on idle plan approval focuses the in-panel plan prompt,
+    /// not a second Grok OSS composer under the panel.
+    #[test]
+    fn tab_prompt_on_plan_approval_focuses_the_plan_prompt_not_a_second_composer() {
+        use crate::app::app_view::InputOutcome;
+        use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.display_name = Some("Grok Build".into());
+        agent.show_plan_preview_if_available();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|pav| pav.focus),
+            Some(PlanApprovalFocus::Preview),
+            "idle approval starts on Preview"
+        );
+
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Tab:prompt must focus the in-panel plan prompt; got {outcome:?}"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("plan approval stays open");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+
+        let (_buf, text) = draw_buf(&mut agent);
+        assert!(
+            text.contains("Type a revision"),
+            "after Tab:prompt the in-panel box may show Type a revision...:\n{text}"
+        );
+        assert!(
+            !text.contains("Grok OSS"),
+            "Tab:prompt must not paint a second titled Grok OSS composer under the panel:\n{text}"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .and_then(|viewer| viewer.plan_ref())
+                .is_some_and(|plan| plan.revision_prompt_area.is_some()),
+            "Tab:prompt focuses the in-panel plan prompt hit target"
         );
     }
 
@@ -7041,25 +7482,11 @@ mod plan_approval_draw_contract_tests {
         }
 
         let mut agent = make_agent();
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
-            session_id: "test-session".into(),
-            tool_call_id: "call-file-plan".into(),
-            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
-        };
-        agent.plan_approval_view = Some(
-            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
-                request,
-                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
-                agent.prompt.stash(),
-                tx,
-            ),
-        );
         agent.plan_mode_active = true;
-        agent.show_plan_preview_if_available();
-        if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
-        }
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content = Some("# Isolated plan.md\n\nDo the thing\n".into());
 
         let one_row = "BBBBB";
         agent.prompt.set_text(one_row);
@@ -7144,6 +7571,215 @@ mod plan_approval_draw_contract_tests {
             !run_outside(&buf, screen, prompt, marker),
             "owed: {owed}. second row glyphs painted outside the planning input:\n{text}"
         );
+    }
+
+    /// While plan mode is open, typed text paints at the planning caret
+    /// inside the titled `planning` composer. The transcript does not show
+    /// that draft as an Operator message while the composer is empty.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn planning_composer_typed_text_stays_at_the_caret_and_is_not_an_operator_transcript_row() {
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crate::scrollback::block::RenderBlock;
+        use crate::theme::{Theme, cache};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-live-caret-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let body = theme.text_primary;
+        let rail = theme.accent_user;
+        let owed = "While plan mode is open, typed text paints at the planning caret inside the titled `planning` composer. The transcript does not show that draft as an Operator message while the composer is empty.";
+        let typed = "the planning input is still in the wrong place:";
+
+        fn interior(prompt: Rect) -> Rect {
+            Rect {
+                x: prompt.x.saturating_add(1),
+                y: prompt.y.saturating_add(1),
+                width: prompt.width.saturating_sub(2),
+                height: prompt.height.saturating_sub(2),
+            }
+        }
+
+        fn covers(rect: Rect, x: u16, y: u16) -> bool {
+            x >= rect.x
+                && y >= rect.y
+                && x < rect.x.saturating_add(rect.width)
+                && y < rect.y.saturating_add(rect.height)
+        }
+
+        fn find_run(buf: &Buffer, area: Rect, needle: &str) -> Option<(u16, u16)> {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return None;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched {
+                        return Some((xs[i], y));
+                    }
+                }
+            }
+            None
+        }
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("planning".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let _ = draw_buf(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "owed: {owed}. live titled planning composer, not Isolated Preview Prompt-focus"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            }),
+            "owed: {owed}. the soft plan pane must open the way live plan mode opens it"
+        );
+
+        let registry = ActionRegistry::non_vscode_for_test();
+        for ch in typed.chars() {
+            let outcome = agent.handle_input(
+                &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &registry,
+            );
+            assert!(
+                !matches!(
+                    outcome,
+                    InputOutcome::Action(Action::SendPrompt(_))
+                        | InputOutcome::Action(Action::SendPromptNow { .. })
+                ),
+                "owed: {owed}. character insert must not send. got {outcome:?}"
+            );
+        }
+        assert!(
+            agent.prompt.text().contains(typed),
+            "owed: {owed}. agent.prompt must hold the draft; composer is not empty. got {:?}",
+            agent.prompt.text()
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: {owed}. planning composer must have a painted area; got {prompt:?}\n{text}"
+        );
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("prompt stroke");
+        assert_eq!(
+            top_left.symbol(),
+            "\u{250c}",
+            "owed: {owed}. the titled planning composer keeps a white ┌ frame"
+        );
+        assert_eq!(
+            top_left.fg, theme.prompt_border_active,
+            "owed: {owed}. the titled planning composer stroke stays prompt_border_active"
+        );
+        let top_rule = Rect {
+            x: prompt.x,
+            y: prompt.y,
+            width: prompt.width,
+            height: 1,
+        };
+        assert!(
+            find_run(&buf, top_rule, "planning").is_some(),
+            "owed: {owed}. the top rule caption is planning:\n{text}"
+        );
+
+        let box_in = interior(prompt);
+        let Some((x, y)) = find_run(&buf, box_in, typed) else {
+            panic!(
+                "owed: {owed}. typed glyphs are missing from the planning caret inside the prompt interior:\n{text}"
+            );
+        };
+        for (i, ch) in typed.chars().enumerate() {
+            let cell = buf
+                .cell((x.saturating_add(i as u16), y))
+                .unwrap_or_else(|| panic!("owed: {owed}. missing {ch} at the caret"));
+            assert_eq!(
+                cell.symbol(),
+                ch.to_string(),
+                "owed: {owed}. glyph {ch} is missing from the planning caret"
+            );
+            assert_eq!(
+                cell.fg, body,
+                "owed: {owed}. glyph {ch} at the caret is text_primary, got {:?}",
+                cell.fg
+            );
+        }
+
+        let draft_on_scrollback = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::UserPrompt(block)) if block.text.contains(typed)
+            )
+        });
+        assert!(
+            !draft_on_scrollback,
+            "owed: {owed}. scrollback has no UserPrompt whose text is that draft"
+        );
+
+        let screen = Rect::new(0, 0, 100, 40);
+        let chars: Vec<char> = typed.chars().collect();
+        let n = chars.len();
+        for row in screen.y..screen.y.saturating_add(screen.height) {
+            let xs: Vec<u16> = (screen.x..screen.x.saturating_add(screen.width)).collect();
+            if xs.len() < n {
+                continue;
+            }
+            for i in 0..=xs.len() - n {
+                let matched = (0..n).all(|k| {
+                    buf.cell((xs[i + k], row))
+                        .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                });
+                if !matched {
+                    continue;
+                }
+                let start_x = xs[i];
+                if covers(prompt, start_x, row) {
+                    continue;
+                }
+                let rail_left = buf
+                    .cell((start_x.saturating_sub(1), row))
+                    .is_some_and(|cell| cell.symbol() == "\u{2503}" && cell.fg == rail);
+                assert!(
+                    !rail_left,
+                    "owed: {owed}. the glyph run is not on a cell whose left-rail neighbor is accent_user ┃ outside the planning composer ({start_x}, {row}):\n{text}"
+                );
+            }
+        }
     }
 
     /// While voice is idle no indicator row exists, so the overlay keeps
@@ -10177,8 +10813,8 @@ mod plan_turn_row_revising_copy_tests {
     use crate::app::bundle::BundleState;
     use crate::scrollback::render::ScratchBuffer;
     use crate::views::plan_approval_view::{
-        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_WAITING_UPDATED_STATUS,
-        PlanApprovalViewState,
+        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_REWRITE_WAIT_HEADING,
+        PLAN_WAITING_UPDATED_STATUS, PlanApprovalViewState, PlanFeedbackInFlight,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -10370,10 +11006,6 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !(revise_in_pane && revise_left),
             "Revise sentence QueEmpTh stays once. painted in both the plan box and the bottom composer"
-        );
-        assert!(
-            revise_in_pane || painted.contains("Type a revision"),
-            "approval screen should show a prompt input"
         );
         assert!(
             painted.contains("approve | comment | revise | exit"),
@@ -10569,6 +11201,72 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains(PLAN_REVISING_STATUS),
             "fresh present is not Revising:\n{text}"
+        );
+    }
+
+    /// First `exit_plan_mode` present is review. `"Revising plan..."` is gone
+    /// after that present. Idle after the first present must not keep
+    /// Revising for minutes.
+    #[test]
+    fn first_exit_plan_mode_present_does_not_keep_revising_plan_after_the_turn_goes_idle() {
+        let mut agent = make_agent();
+        agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "present must clear leftover Revising"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "a present must not set plan_decision_resolved"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "first present must open the review park side panel, not Approve"
+        );
+        assert!(
+            !text.contains(PLAN_REVISING_STATUS),
+            "Idle after first present must not keep Revising plan...:\n{text}"
+        );
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "first present must say Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains(PLAN_REWRITE_WAIT_HEADING),
+            "first present must not keep rewriting-wait heading:\n{text}"
+        );
+        assert!(
+            text.contains("approve | comment | revise | exit"),
+            "idle CTAs stay review, not Approve-as-done:\n{text}"
+        );
+
+        // Paint-precedence: live present plus Idle must not paint Revising
+        // even if loading_replay skipped the clear.
+        agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+        agent.session.state = AgentState::Idle;
+        let leftover = draw_screen(&mut agent);
+        assert!(
+            !leftover.contains(PLAN_REVISING_STATUS),
+            "live plan_approval_view plus Idle must not paint Revising plan... even if leftover in-flight is still Some:\n{leftover}"
+        );
+        assert!(
+            leftover.contains("Plan ready. Side panel open"),
+            "paint-precedence leftover Revising must still be Plan ready. Side panel open:\n{leftover}"
+        );
+        assert!(
+            leftover.contains("approve | comment | revise | exit"),
+            "paint-precedence leftover Revising must keep idle review CTAs:\n{leftover}"
+        );
+        assert!(
+            !leftover.contains(PLAN_REWRITE_WAIT_HEADING),
+            "paint-precedence leftover Revising must not keep rewriting-wait heading:\n{leftover}"
         );
     }
 }

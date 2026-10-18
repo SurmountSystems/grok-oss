@@ -1422,7 +1422,8 @@ pub fn build_task_description(naming: &TaskToolNaming) -> String {
          - When the agent is done, it returns a single message with its agent ID. Use that ID with {resume_from_param} for a completed subagent. Use follow_up to target a still-running nested L2. follow_up and resume_from are mutually exclusive. A running id uses follow_up. A completed id uses resume_from. Do not kill or respawn. Put the additional prompt text in prompt.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Keep working; completion is a notification. Optional snapshot via {background_retrieval_tool}. A blocking wait is only for when you must join. This is set to true by default.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
-         - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
+         - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\
+         - While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Follow-up to a still-running nested L2 is not a start.\n\n\
          Resuming a previous agent ({resume_from_param}):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\n\
          Isolation mode:\n\
@@ -2017,6 +2018,29 @@ mod tests {
         assert!(desc.contains("Use isolation to control the child's execution environment."));
         assert!(desc.contains("Assigned write paths:"));
         assert!(desc.contains("Use write_paths to assign files this subagent will write."));
+    }
+
+    /// Operator contract: while plan_mode_active is writing or presenting,
+    /// nested explore and implement jobs are not started. The advertised
+    /// spawn_subagent / task description must say that so L1 does not launch
+    /// explore during /plan.
+    #[test]
+    fn build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting()
+     {
+        const CONTRACT: &str = "While plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve.";
+        let desc = build_task_description(&literal_naming());
+        assert!(
+            desc.contains(CONTRACT),
+            "spawn_subagent description must quote the Operator contract so the model does not launch explore while writing or presenting. Got: {desc}"
+        );
+        assert!(
+            !desc.contains("subagent_type"),
+            "description must not tell the model to pass subagent_type: {desc}"
+        );
+        assert!(
+            !desc.contains("Agent types:"),
+            "description must not list agent types: {desc}"
+        );
     }
 
     #[test]

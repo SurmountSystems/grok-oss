@@ -218,6 +218,19 @@ fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
     );
 }
 #[test]
+fn inject_url_derived_headers_adds_token_auth_for_xai_cli_chat_proxy() {
+    let mut headers = IndexMap::new();
+    inject_url_derived_headers(&mut headers, None, "https://cli-chat-proxy.x.ai/v1");
+    assert_eq!(
+        headers.get("X-XAI-Token-Auth").map(String::as_str),
+        Some("xai-grok-cli")
+    );
+    assert_eq!(
+        headers.get("x-authenticateresponse").map(String::as_str),
+        Some("authenticate-response")
+    );
+}
+#[test]
 fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
     let mut headers = IndexMap::new();
     inject_url_derived_headers(&mut headers, None, "https://api.x.ai/v1");

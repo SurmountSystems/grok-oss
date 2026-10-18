@@ -321,6 +321,36 @@ fn standalone_wayland_missing_is_issue_but_no_seats_or_errors_are_not() {
 }
 
 #[test]
+fn standalone_wayland_with_wl_copy_is_not_an_issue() {
+    let terminal = TerminalContext::default();
+    let snapshot = crate::diagnostics::probes::collect_standalone_from(
+        &terminal,
+        unavailable_tmux_facts(),
+        WaylandProbeFacts {
+            is_wayland: true,
+            data_control: TmuxProbeResult::Available(false),
+            wl_copy_available: true,
+        },
+        "wl-copy",
+        LOCAL_ROUTE.clone(),
+        false,
+        HostOs::Macos,
+        DisplayServer::Wayland,
+        false,
+        RuntimeEvidence::Available(ColorLevel::TrueColor),
+    );
+    let report = collect_report_with(snapshot);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.id != DiagnosticId::new("terminal", "wayland-data-control")),
+        "wl-copy on PATH must not emit terminal.wayland-data-control, got: {:?}",
+        report.findings
+    );
+}
+
+#[test]
 fn human_wayland_error_includes_detail_once() {
     let mut report = healthy_report();
     report.facts.clipboard.native_preflight = NativeClipboardPreflight::Unavailable;

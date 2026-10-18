@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
@@ -133,6 +134,16 @@ impl SamplerHandle {
             .ok()
             .flatten()
             .filter(|key| !key.trim().is_empty())
+    }
+
+    /// Extra headers the live sampler still sends (`X-XAI-Token-Auth` present or absent).
+    /// Nested spawn copies Token-Auth if and only if this bag already has it.
+    pub async fn current_extra_headers(&self) -> IndexMap<String, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SamplerCommand::CurrentExtraHeaders { reply: reply_tx });
+        reply_rx.await.unwrap_or_default()
     }
 
     /// Submit a request and await its completion. Events still flow to the shared channel for live UI updates.

@@ -30,6 +30,17 @@
 //! fail-closes on keyring error/timeout so multi-add RMW cannot invent an empty
 //! key list and clobber keyring state on a later successful write.
 //!
+//! **Success cache:** a completed keyring probe (present or confirmed miss) is
+//! kept in process memory, keyed by credential URL. Later
+//! [`CredentialsStore::read`] calls for that URL do not SearchItems / GetSecret
+//! again. SuperGrok session secrets are omitted from `auth.json`, so restore
+//! may call `read` on every load; the cache is what stops idle Secret Service
+//! hammering. Writes are write-through. Deletes invalidate. A token refresh
+//! re-reads the keyring once (bypass cache) before SetSecret so another
+//! process that already refreshed is not overwritten. Confirmed misses still
+//! consult the file mirror so a sibling process's post-write mirror is visible
+//! without D-Bus.
+//!
 //! **Circuit breaker (resolve only):** after a keyring timeout/error, resolve
 //! [`CredentialsStore::read`] skips further keyring probes for a short TTL.
 //! RMW [`CredentialsStore::read_for_update`] and writes always probe so
@@ -53,8 +64,9 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +100,115 @@ const MAX_KEYRING_HELPERS: usize = 2;
 /// this long (fail-open file fallthrough). Does **not** apply to RMW
 /// [`CredentialsStore::read_for_update`] or writes — those always probe.
 const KEYRING_CIRCUIT_TTL: Duration = Duration::from_secs(15);
+
+/// One completed keyring probe, cached so idle restore / render ticks do not
+/// SearchItems / GetSecret again.
+#[derive(Clone, Debug)]
+enum CachedCredential {
+    Present { username: String, secret: String },
+    Absent,
+}
+
+/// Process-wide success cache, keyed by credential URL.
+/// `HashMap::new` is not const, so this is a `LazyLock` around the mutex.
+static KEYRING_SUCCESS_CACHE: LazyLock<Mutex<HashMap<String, CachedCredential>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static KEYRING_SEARCH_ITEMS: AtomicU64 = AtomicU64::new(0);
+static KEYRING_GET_SECRET: AtomicU64 = AtomicU64::new(0);
+static KEYRING_SET_SECRET: AtomicU64 = AtomicU64::new(0);
+static KEYRING_DELETE: AtomicU64 = AtomicU64::new(0);
+
+/// Counts of real keyring backend ops (Secret Service SearchItems / GetSecret /
+/// SetSecret / Delete, or the in-process mock of those ops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyringBackendOpCounts {
+    pub search_items: u64,
+    pub get_secret: u64,
+    pub set_secret: u64,
+    pub delete: u64,
+}
+
+/// What a refresh-time keyring re-read found. The variants carry no secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyringRefreshLook {
+    /// Cache already matched the keyring, or this store does not use the keyring.
+    Unchanged,
+    /// Keyring (or the file mirror after a keyring miss) held a different secret.
+    /// The process cache now has that secret.
+    Adopted,
+    /// Keyring has no secret for this url, and the file mirror does not either.
+    Missing,
+}
+
+/// Snapshot of backend op counters. Tests assert idle re-reads do not grow these.
+pub fn keyring_backend_op_counts() -> KeyringBackendOpCounts {
+    KeyringBackendOpCounts {
+        search_items: KEYRING_SEARCH_ITEMS.load(Ordering::Relaxed),
+        get_secret: KEYRING_GET_SECRET.load(Ordering::Relaxed),
+        set_secret: KEYRING_SET_SECRET.load(Ordering::Relaxed),
+        delete: KEYRING_DELETE.load(Ordering::Relaxed),
+    }
+}
+
+/// Count one Secret Service SearchItems (or the in-process mock of it).
+/// `url` is the keyring account, never the secret.
+pub(crate) fn note_keyring_search_items(service: &str, url: &str) {
+    KEYRING_SEARCH_ITEMS.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(service, url, op = "SearchItems", "keyring backend");
+}
+
+/// Count one Secret Service GetSecret (or the in-process mock of it).
+pub(crate) fn note_keyring_get_secret(service: &str, url: &str) {
+    KEYRING_GET_SECRET.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(service, url, op = "GetSecret", "keyring backend");
+}
+
+fn note_keyring_set_secret(service: &str, url: &str) {
+    KEYRING_SET_SECRET.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(service, url, op = "SetSecret", "keyring backend");
+}
+
+fn note_keyring_delete(service: &str, url: &str) {
+    KEYRING_DELETE.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(service, url, op = "Delete", "keyring backend");
+}
+
+fn cache_get(url: &str) -> Option<CachedCredential> {
+    KEYRING_SUCCESS_CACHE
+        .lock()
+        .ok()
+        .and_then(|g| g.get(url).cloned())
+}
+
+fn cache_put(url: &str, entry: CachedCredential) {
+    if let Ok(mut g) = KEYRING_SUCCESS_CACHE.lock() {
+        g.insert(url.to_owned(), entry);
+    }
+}
+
+fn cache_put_present(url: &str, username: String, secret: String) {
+    cache_put(url, CachedCredential::Present { username, secret });
+}
+
+fn cache_invalidate(url: &str) {
+    if let Ok(mut g) = KEYRING_SUCCESS_CACHE.lock() {
+        g.remove(url);
+    }
+}
+
+fn clear_keyring_success_cache() {
+    if let Ok(mut g) = KEYRING_SUCCESS_CACHE.lock() {
+        g.clear();
+    }
+}
+
+fn reset_keyring_op_counts() {
+    KEYRING_SEARCH_ITEMS.store(0, Ordering::Relaxed);
+    KEYRING_GET_SECRET.store(0, Ordering::Relaxed);
+    KEYRING_SET_SECRET.store(0, Ordering::Relaxed);
+    KEYRING_DELETE.store(0, Ordering::Relaxed);
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialsStoreError {
@@ -187,30 +308,65 @@ impl CredentialsStore {
     /// Prefer OS keyring (time-boxed); on miss / keyring unavailable, fall back
     /// to the file mirror so dual-written secrets remain readable (agent
     /// **resolve**). Honors the resolve-only keyring circuit breaker (skips
-    /// keyring while open). For multi-add RMW, use [`Self::read_for_update`].
+    /// keyring while open). A successful probe is cached in process memory so
+    /// later resolve reads (idle restore, render ticks) do not hit Secret
+    /// Service again. For multi-add RMW, use [`Self::read_for_update`].
     pub fn read(&self, url: &str) -> Result<Option<(String, String)>, CredentialsStoreError> {
         if url.is_empty() {
             return Ok(None);
         }
-        if !self.force_file {
-            // Circuit applies to resolve only — silent skip to file (no fake
-            // "timed out after 3s" without a real wait).
-            if keyring_circuit_open() {
-                tracing::debug!("keyring circuit open; resolve read using file store");
-            } else {
-                match keyring_read(url) {
-                    Ok(Some(cred)) => return Ok(Some(cred)),
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "keyring read failed or timed out; trying file store"
-                        );
-                    }
+        if self.force_file {
+            return self.read_file_only(url);
+        }
+        match cache_get(url) {
+            Some(CachedCredential::Present { username, secret }) => {
+                return Ok(Some((username, secret)));
+            }
+            Some(CachedCredential::Absent) => {
+                // Confirmed keyring miss: skip D-Bus. Still see a sibling
+                // process's file mirror without SearchItems.
+                if let Ok(Some(file_cred)) = self.read_file_only(url) {
+                    cache_put_present(url, file_cred.0.clone(), file_cred.1.clone());
+                    return Ok(Some(file_cred));
                 }
+                return Ok(None);
+            }
+            None => {}
+        }
+        // Circuit applies to resolve only — silent skip to file (no fake
+        // "timed out after 3s" without a real wait). Do not cache a miss
+        // observed while the circuit is open: that is not a confirmed probe.
+        if keyring_circuit_open() {
+            tracing::debug!("keyring circuit open; resolve read using file store");
+            return self.read_file_only(url);
+        }
+        match keyring_read(url) {
+            Ok(Some(cred)) => {
+                let cred = self.overlay_username_from_file(url, cred);
+                cache_put_present(url, cred.0.clone(), cred.1.clone());
+                return Ok(Some(cred));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "keyring read failed or timed out; trying file store"
+                );
+                return self.read_file_only(url);
             }
         }
-        self.read_file_only(url)
+        let file = self.read_file_only(url)?;
+        cache_put(
+            url,
+            match &file {
+                Some((username, secret)) => CachedCredential::Present {
+                    username: username.clone(),
+                    secret: secret.clone(),
+                },
+                None => CachedCredential::Absent,
+            },
+        );
+        Ok(file)
     }
 
     /// Read for read-modify-write (console multi-add).
@@ -233,8 +389,35 @@ impl CredentialsStore {
             return self.read_file_only(url);
         }
         match keyring_read(url)? {
-            Some(cred) => Ok(Some(cred)),
-            None => self.read_file_only(url),
+            Some(cred) => {
+                let cred = self.overlay_username_from_file(url, cred);
+                cache_put_present(url, cred.0.clone(), cred.1.clone());
+                Ok(Some(cred))
+            }
+            None => {
+                let file = self.read_file_only(url)?;
+                cache_put(
+                    url,
+                    match &file {
+                        Some((username, secret)) => CachedCredential::Present {
+                            username: username.clone(),
+                            secret: secret.clone(),
+                        },
+                        None => CachedCredential::Absent,
+                    },
+                );
+                Ok(file)
+            }
+        }
+    }
+
+    /// Keyring stores only the secret; the file mirror keeps the caller
+    /// username (`key` / `refresh_token` for SuperGrok sessions). Overlay so
+    /// restore can match those usernames after a Secret Service read.
+    fn overlay_username_from_file(&self, url: &str, cred: (String, String)) -> (String, String) {
+        match self.read_file_only(url) {
+            Ok(Some((file_user, _))) if !file_user.is_empty() => (file_user, cred.1),
+            _ => cred,
         }
     }
 
@@ -278,8 +461,42 @@ impl CredentialsStore {
         if self.force_file {
             return self.write_file(url, username, secret);
         }
+        // Anti-stampede: re-read the keyring (bypass cache) in case another
+        // process already refreshed this URL.
+        match keyring_read(url) {
+            Ok(Some((_existing_user, existing_secret))) if existing_secret == secret => {
+                cache_put_present(url, username.to_owned(), secret.to_owned());
+                let _ = self.write_file(url, username, secret);
+                return Ok(());
+            }
+            Ok(Some((existing_user, existing_secret))) => {
+                if let Some(CachedCredential::Present {
+                    secret: cached_secret,
+                    ..
+                }) = cache_get(url)
+                {
+                    if cached_secret != existing_secret {
+                        tracing::debug!(
+                            url,
+                            "keyring already holds a different secret; adopting instead of overwrite"
+                        );
+                        let user = if existing_user.is_empty() {
+                            username.to_owned()
+                        } else {
+                            existing_user
+                        };
+                        cache_put_present(url, user.clone(), existing_secret.clone());
+                        let _ = self.write_file(url, &user, &existing_secret);
+                        return Ok(());
+                    }
+                }
+                let _ = existing_user;
+            }
+            _ => {}
+        }
         // Keyring required for interactive / default store writes.
         keyring_write(url, username, secret)?;
+        cache_put_present(url, username.to_owned(), secret.to_owned());
         // Mirror only after keyring succeeded (logout/read if keyring later down).
         let _ = self.write_file(url, username, secret);
         Ok(())
@@ -290,6 +507,7 @@ impl CredentialsStore {
         if url.is_empty() {
             return Ok(());
         }
+        cache_invalidate(url);
         if !self.force_file {
             let _ = keyring_delete(url);
         }
@@ -298,6 +516,81 @@ impl CredentialsStore {
             self.save_file(&store)?;
         }
         Ok(())
+    }
+
+    /// Drop one cached probe. The next [`Self::read`] hits the backend again
+    /// unless a later write or re-read fills the cache.
+    pub fn invalidate_cached_secret(&self, url: &str) {
+        if !url.is_empty() {
+            cache_invalidate(url);
+        }
+    }
+
+    /// One real keyring read, ignoring the process cache.
+    ///
+    /// Refresh calls this before deciding to mint a new token. If the keyring
+    /// already holds a different secret, that secret replaces the cache and
+    /// the caller must not SetSecret over it. File-only stores return
+    /// [`KeyringRefreshLook::Unchanged`] and do not touch the backend. While
+    /// the resolve circuit is open this returns an error and does not probe,
+    /// so a failed refresh does not retry Secret Service in a tight loop.
+    pub fn reread_keyring_before_refresh(
+        &self,
+        url: &str,
+    ) -> Result<KeyringRefreshLook, CredentialsStoreError> {
+        if url.is_empty() || self.force_file {
+            return Ok(KeyringRefreshLook::Unchanged);
+        }
+        if keyring_circuit_open() {
+            tracing::debug!(url, "keyring circuit open; refresh re-read backed off");
+            return Err(CredentialsStoreError::Keyring(
+                "keyring circuit open; refresh re-read backed off".into(),
+            ));
+        }
+        let previous = cache_get(url);
+        match keyring_read(url) {
+            Ok(Some(cred)) => {
+                let cred = self.overlay_username_from_file(url, cred);
+                let changed = match &previous {
+                    Some(CachedCredential::Present { secret, .. }) => secret != &cred.1,
+                    _ => true,
+                };
+                cache_put_present(url, cred.0, cred.1);
+                Ok(if changed {
+                    KeyringRefreshLook::Adopted
+                } else {
+                    KeyringRefreshLook::Unchanged
+                })
+            }
+            Ok(None) => {
+                let file = self.read_file_only(url)?;
+                let changed = match (&previous, &file) {
+                    (Some(CachedCredential::Present { secret, .. }), Some((_, file_secret))) => {
+                        secret != file_secret
+                    }
+                    (Some(CachedCredential::Absent) | None, None) => false,
+                    _ => true,
+                };
+                cache_put(
+                    url,
+                    match &file {
+                        Some((username, secret)) => CachedCredential::Present {
+                            username: username.clone(),
+                            secret: secret.clone(),
+                        },
+                        None => CachedCredential::Absent,
+                    },
+                );
+                if file.is_none() {
+                    Ok(KeyringRefreshLook::Missing)
+                } else if changed {
+                    Ok(KeyringRefreshLook::Adopted)
+                } else {
+                    Ok(KeyringRefreshLook::Unchanged)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn load_file(&self) -> Result<FileStore, CredentialsStoreError> {
@@ -417,6 +710,24 @@ enum KeyringBackend {
     Fallback,
 }
 
+/// Which Secret Service method a primary attempt stands for.
+/// Used when a test hook refuses the op before `primary_get` runs, so the
+/// circuit test still sees one counted probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyringOpKind {
+    Read,
+    Write,
+    Delete,
+}
+
+fn note_primary_attempt(kind: KeyringOpKind, url: &str) {
+    match kind {
+        KeyringOpKind::Read => note_keyring_search_items(SERVICE_NAME, url),
+        KeyringOpKind::Write => note_keyring_set_secret(SERVICE_NAME, url),
+        KeyringOpKind::Delete => note_keyring_delete(SERVICE_NAME, url),
+    }
+}
+
 /// One queued closure for a backend helper. Capacity on the helper channel is
 /// 1 so a blocked Secret Service cannot pile up secrets in RAM.
 struct KeyringJob {
@@ -479,13 +790,29 @@ fn helper_sender(
 /// without spawning another sleeper. The in-flight helper may still complete
 /// a slow write later (module docs) and retains any secret cloned into the op
 /// until then.
-fn run_keyring_op<T, F>(backend: KeyringBackend, op: F) -> Result<T, CredentialsStoreError>
+fn run_keyring_op<T, F>(
+    backend: KeyringBackend,
+    kind: KeyringOpKind,
+    url: &str,
+    op: F,
+) -> Result<T, CredentialsStoreError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, CredentialsStoreError> + Send + 'static,
 {
+    // `kind` and `url` are read on the test injection path. Keep them live
+    // for the non-test build, where the probe is counted inside `primary_*`.
+    let _ = (kind, url);
     #[cfg(test)]
-    test_hooks::maybe_inject_before_op(backend)?;
+    if let Err(err) = test_hooks::maybe_inject_before_op(backend) {
+        // Injection returns on this thread, before `primary_get`. Count the
+        // primary attempt here so a circuit test sees one probe, then a flat
+        // second read. Fallback injection is not Secret Service SearchItems.
+        if backend == KeyringBackend::Primary {
+            note_primary_attempt(kind, url);
+        }
+        return Err(err);
+    }
 
     let timeout = keyring_op_timeout();
     let helper = helper_sender(backend)?;
@@ -546,10 +873,18 @@ where
 }
 
 fn primary_get(url: &str) -> Result<Option<(String, String)>, CredentialsStoreError> {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() {
+        return test_hooks::mock_primary_get(url);
+    }
+    note_keyring_search_items(SERVICE_NAME, url);
     let entry = keyring::Entry::new(SERVICE_NAME, url)
         .map_err(|e| CredentialsStoreError::Keyring(e.to_string()))?;
     match entry.get_password() {
-        Ok(secret) if !secret.is_empty() => Ok(Some((BEARER_USERNAME.to_owned(), secret))),
+        Ok(secret) if !secret.is_empty() => {
+            note_keyring_get_secret(SERVICE_NAME, url);
+            Ok(Some((BEARER_USERNAME.to_owned(), secret)))
+        }
         Ok(_) => Ok(None),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(CredentialsStoreError::Keyring(e.to_string())),
@@ -557,6 +892,11 @@ fn primary_get(url: &str) -> Result<Option<(String, String)>, CredentialsStoreEr
 }
 
 fn primary_set(url: &str, secret: &str) -> Result<(), CredentialsStoreError> {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() {
+        return test_hooks::mock_primary_set(url, secret);
+    }
+    note_keyring_set_secret(SERVICE_NAME, url);
     let entry = keyring::Entry::new(SERVICE_NAME, url)
         .map_err(|e| CredentialsStoreError::Keyring(e.to_string()))?;
     entry
@@ -565,6 +905,11 @@ fn primary_set(url: &str, secret: &str) -> Result<(), CredentialsStoreError> {
 }
 
 fn primary_delete(url: &str) -> Result<(), CredentialsStoreError> {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() {
+        return test_hooks::mock_primary_delete(url);
+    }
+    note_keyring_delete(SERVICE_NAME, url);
     let entry = keyring::Entry::new(SERVICE_NAME, url)
         .map_err(|e| CredentialsStoreError::Keyring(e.to_string()))?;
     match entry.delete_credential() {
@@ -683,7 +1028,7 @@ fn fallback_delete_os(_url: &str) -> Result<(), CredentialsStoreError> {
 /// trip only when every secure backend fails with a keyring error/timeout.
 fn keyring_read(url: &str) -> Result<Option<(String, String)>, CredentialsStoreError> {
     let url_owned = url.to_owned();
-    let primary = run_keyring_op(KeyringBackend::Primary, {
+    let primary = run_keyring_op(KeyringBackend::Primary, KeyringOpKind::Read, url, {
         let url = url_owned.clone();
         move || primary_get(&url)
     });
@@ -696,7 +1041,19 @@ fn keyring_read(url: &str) -> Result<Option<(String, String)>, CredentialsStoreE
         Err(e) => Err(e),
     };
 
-    let fallback = run_keyring_op(KeyringBackend::Fallback, {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() && !test_hooks::mock_fallback_active() {
+        // Isolated in-memory primary: do not touch OS keyutils on a mock miss.
+        return match primary_miss {
+            Ok(None) => {
+                clear_keyring_circuit();
+                Ok(None)
+            }
+            other => other,
+        };
+    }
+
+    let fallback = run_keyring_op(KeyringBackend::Fallback, KeyringOpKind::Read, url, {
         let url = url_owned;
         move || fallback_get(&url)
     });
@@ -731,7 +1088,7 @@ fn keyring_write(url: &str, _username: &str, secret: &str) -> Result<(), Credent
     // Writes always attempt secure backends (ignore resolve circuit).
     let url_owned = url.to_owned();
     let secret_owned = secret.to_owned();
-    let primary = run_keyring_op(KeyringBackend::Primary, {
+    let primary = run_keyring_op(KeyringBackend::Primary, KeyringOpKind::Write, url, {
         let url = url_owned.clone();
         let secret = secret_owned.clone();
         move || primary_set(&url, &secret)
@@ -742,7 +1099,13 @@ fn keyring_write(url: &str, _username: &str, secret: &str) -> Result<(), Credent
     }
     let primary_err = primary.expect_err("checked is_err");
 
-    let fallback = run_keyring_op(KeyringBackend::Fallback, {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() && !test_hooks::mock_fallback_active() {
+        note_keyring_err(&primary_err);
+        return Err(primary_err);
+    }
+
+    let fallback = run_keyring_op(KeyringBackend::Fallback, KeyringOpKind::Write, url, {
         let url = url_owned;
         let secret = secret_owned;
         move || fallback_set(&url, &secret)
@@ -763,11 +1126,24 @@ fn keyring_write(url: &str, _username: &str, secret: &str) -> Result<(), Credent
 fn keyring_delete(url: &str) -> Result<(), CredentialsStoreError> {
     // Deletes always attempt both backends (ignore resolve circuit); best-effort.
     let url_owned = url.to_owned();
-    let primary = run_keyring_op(KeyringBackend::Primary, {
+    let primary = run_keyring_op(KeyringBackend::Primary, KeyringOpKind::Delete, url, {
         let url = url_owned.clone();
         move || primary_delete(&url)
     });
-    let fallback = run_keyring_op(KeyringBackend::Fallback, {
+    #[cfg(test)]
+    if test_hooks::mock_primary_active() && !test_hooks::mock_fallback_active() {
+        return match primary {
+            Ok(()) => {
+                clear_keyring_circuit();
+                Ok(())
+            }
+            Err(e) => {
+                note_keyring_err(&e);
+                Err(e)
+            }
+        };
+    }
+    let fallback = run_keyring_op(KeyringBackend::Fallback, KeyringOpKind::Delete, url, {
         let url = url_owned;
         move || fallback_delete(&url)
     });
@@ -804,9 +1180,11 @@ pub mod test_hooks {
         force_err_primary: Option<String>,
         /// Fail fallback before work.
         force_err_fallback: Option<String>,
+        /// Use in-memory mock as the primary backend (hermetic cache tests).
+        mock_primary: bool,
         /// Use in-memory mock as the secure fallback (hermetic dual-backend tests).
         mock_fallback: bool,
-        /// Mock fallback secrets: credential URL → secret.
+        /// Mock secrets: credential URL → secret (shared by primary and fallback mocks).
         mock_secrets: HashMap<String, String>,
     }
 
@@ -825,6 +1203,18 @@ pub mod test_hooks {
         let mut g = HOOKS.lock().expect("keyring test hooks lock");
         *g = HookState::default();
         clear_keyring_circuit();
+        clear_keyring_success_cache();
+        reset_keyring_op_counts();
+    }
+
+    /// In-memory primary keyring. No D-Bus, no OS keyutils.
+    ///
+    /// Named contract tests for the success cache use this mock as the spy.
+    pub fn simulate_in_memory_keyring() -> HookGuard {
+        clear();
+        let mut g = HOOKS.lock().expect("keyring test hooks lock");
+        g.mock_primary = true;
+        HookGuard
     }
 
     /// Simulate **all** secure backends blocked: ops return
@@ -887,6 +1277,41 @@ pub mod test_hooks {
         HOOKS.lock().expect("keyring test hooks lock").mock_fallback
     }
 
+    pub(super) fn mock_primary_active() -> bool {
+        HOOKS.lock().expect("keyring test hooks lock").mock_primary
+    }
+
+    pub(super) fn mock_primary_get(
+        url: &str,
+    ) -> Result<Option<(String, String)>, CredentialsStoreError> {
+        note_keyring_search_items(SERVICE_NAME, url);
+        let secret = {
+            let g = HOOKS.lock().expect("keyring test hooks lock");
+            g.mock_secrets.get(url).cloned()
+        };
+        match secret {
+            Some(s) if !s.is_empty() => {
+                note_keyring_get_secret(SERVICE_NAME, url);
+                Ok(Some((BEARER_USERNAME.to_owned(), s)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(super) fn mock_primary_set(url: &str, secret: &str) -> Result<(), CredentialsStoreError> {
+        note_keyring_set_secret(SERVICE_NAME, url);
+        let mut g = HOOKS.lock().expect("keyring test hooks lock");
+        g.mock_secrets.insert(url.to_owned(), secret.to_owned());
+        Ok(())
+    }
+
+    pub(super) fn mock_primary_delete(url: &str) -> Result<(), CredentialsStoreError> {
+        note_keyring_delete(SERVICE_NAME, url);
+        let mut g = HOOKS.lock().expect("keyring test hooks lock");
+        g.mock_secrets.remove(url);
+        Ok(())
+    }
+
     pub(super) fn mock_fallback_get(
         url: &str,
     ) -> Result<Option<(String, String)>, CredentialsStoreError> {
@@ -906,6 +1331,12 @@ pub mod test_hooks {
         let mut g = HOOKS.lock().expect("keyring test hooks lock");
         g.mock_secrets.remove(url);
         Ok(())
+    }
+
+    /// Seed the in-memory mock without counting a SetSecret (spy setup).
+    pub fn mock_seed(url: &str, secret: &str) {
+        let mut g = HOOKS.lock().expect("keyring test hooks lock");
+        g.mock_secrets.insert(url.to_owned(), secret.to_owned());
     }
 
     /// Whether the mock fallback holds `secret` for `url` (test assertions).
@@ -1315,6 +1746,260 @@ mod tests {
              grok-keyring-op helpers (one per backend); this burst grew {grown} \
              (before={before} after={after})"
         );
+    }
+
+    fn session_url() -> &'static str {
+        "supergrok-session:https://auth.x.ai::placeholder::personal"
+    }
+
+    fn prefer_keyring_store() -> (TempDir, CredentialsStore) {
+        let dir = TempDir::new().unwrap();
+        let store = CredentialsStore::at_path_prefer_keyring(dir.path().join(FILE_NAME));
+        (dir, store)
+    }
+
+    /// Named contract: after one successful read of a session url, a second
+    /// read does not call the keyring backend. SearchItems/GetSecret stay 1.
+    #[test]
+    #[serial]
+    fn second_read_of_a_session_url_does_not_hit_the_keyring() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+        test_hooks::mock_seed(url, "session-token-one");
+
+        let first = store.read(url).unwrap().expect("present");
+        assert_eq!(first.1, "session-token-one");
+        let after_first = keyring_backend_op_counts();
+        assert_eq!(after_first.search_items, 1, "first read SearchItems");
+        assert_eq!(after_first.get_secret, 1, "first read GetSecret");
+
+        let second = store.read(url).unwrap().expect("cached");
+        assert_eq!(second.1, "session-token-one");
+        let after_second = keyring_backend_op_counts();
+        assert_eq!(
+            after_second.search_items, 1,
+            "second read must not SearchItems"
+        );
+        assert_eq!(after_second.get_secret, 1, "second read must not GetSecret");
+        assert_eq!(after_second.set_secret, 0);
+        assert_eq!(after_second.delete, 0);
+    }
+
+    /// Named contract: write updates the cache so the next read does not hit
+    /// the keyring.
+    #[test]
+    #[serial]
+    fn write_is_write_through_and_the_next_read_skips_the_keyring() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+
+        store.write(url, "key", "session-token-written").unwrap();
+        let after_write = keyring_backend_op_counts();
+        assert_eq!(
+            after_write.search_items, 1,
+            "write re-reads once before SetSecret"
+        );
+        assert_eq!(after_write.set_secret, 1, "write SetSecret");
+
+        let got = store.read(url).unwrap().expect("cached after write");
+        assert_eq!(got.0, "key");
+        assert_eq!(got.1, "session-token-written");
+        let after_read = keyring_backend_op_counts();
+        assert_eq!(
+            after_read.search_items, after_write.search_items,
+            "read after write must not SearchItems"
+        );
+        assert_eq!(
+            after_read.get_secret, after_write.get_secret,
+            "read after write must not GetSecret"
+        );
+        assert_eq!(after_read.set_secret, 1);
+    }
+
+    /// Named contract: refresh re-reads the keyring once before writing a new
+    /// token (anti-stampede).
+    #[test]
+    #[serial]
+    fn refresh_re_reads_the_keyring_once_before_writing_a_new_token() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+
+        store.write(url, "key", "token-v1").unwrap();
+        let after_first = keyring_backend_op_counts();
+        store.write(url, "key", "token-v2").unwrap();
+        let after_refresh = keyring_backend_op_counts();
+
+        assert_eq!(
+            after_refresh.search_items,
+            after_first.search_items + 1,
+            "refresh must SearchItems once before SetSecret"
+        );
+        assert_eq!(
+            after_refresh.get_secret,
+            after_first.get_secret + 1,
+            "refresh must GetSecret the live token before overwrite"
+        );
+        assert_eq!(
+            after_refresh.set_secret,
+            after_first.set_secret + 1,
+            "refresh SetSecret once"
+        );
+        let got = store.read(url).unwrap().expect("v2 cached");
+        assert_eq!(got.1, "token-v2");
+        let after_read = keyring_backend_op_counts();
+        assert_eq!(after_read.search_items, after_refresh.search_items);
+        assert_eq!(after_read.set_secret, after_refresh.set_secret);
+    }
+
+    /// Named contract: on refresh, if another process already wrote a new
+    /// token, adopt it instead of overwriting.
+    #[test]
+    #[serial]
+    fn refresh_adopts_a_token_another_process_already_wrote() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+
+        store.write(url, "key", "token-v1").unwrap();
+        test_hooks::mock_seed(url, "token-from-other-process");
+        let before = keyring_backend_op_counts();
+
+        store.write(url, "key", "token-v2-stale-refresh").unwrap();
+        let after = keyring_backend_op_counts();
+        assert_eq!(
+            after.search_items,
+            before.search_items + 1,
+            "anti-stampede re-read"
+        );
+        assert_eq!(
+            after.set_secret, before.set_secret,
+            "must not SetSecret over the other process token"
+        );
+        let got = store.read(url).unwrap().expect("adopted");
+        assert_eq!(got.1, "token-from-other-process");
+    }
+
+    fn assert_error_circuit_skips_the_second_read() {
+        let _hooks = test_hooks::simulate_keyring_error("simulated secret service down");
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+        let before = keyring_backend_op_counts();
+
+        let _ = store.read(url);
+        assert!(
+            keyring_circuit_open(),
+            "resolve error must open the keyring circuit"
+        );
+        let after_first = keyring_backend_op_counts();
+        assert!(
+            after_first.search_items > before.search_items,
+            "the failing probe must count SearchItems before the circuit opens"
+        );
+        let _ = store.read(url);
+        let after_second = keyring_backend_op_counts();
+        assert_eq!(
+            after_second.search_items, after_first.search_items,
+            "open circuit must not SearchItems again"
+        );
+        assert_eq!(after_second.get_secret, after_first.get_secret);
+        assert_eq!(after_second.set_secret, after_first.set_secret);
+
+        let refresh = store.reread_keyring_before_refresh(url);
+        assert!(
+            refresh.is_err(),
+            "refresh re-read must back off while the circuit is open"
+        );
+        let after_refresh = keyring_backend_op_counts();
+        assert_eq!(
+            after_refresh.search_items, after_second.search_items,
+            "backed-off refresh re-read must not SearchItems"
+        );
+    }
+
+    /// Named contract: circuit/error backoff still skips tight retries after
+    /// failure. A second resolve read does not dispatch another SearchItems.
+    #[test]
+    #[serial]
+    fn keyring_error_circuit_skips_tight_retries() {
+        assert_error_circuit_skips_the_second_read();
+    }
+
+    /// Named contract: circuit/error backoff still skips tight retries after
+    /// failure.
+    #[test]
+    #[serial]
+    fn circuit_error_backoff_skips_tight_retries_after_failure() {
+        assert_error_circuit_skips_the_second_read();
+    }
+
+    /// Named contract: delete invalidates the cache so the next read probes.
+    #[test]
+    #[serial]
+    fn delete_invalidates_the_cache() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+
+        store.write(url, "key", "session-token-del").unwrap();
+        let _ = store.read(url).unwrap();
+        store.delete(url).unwrap();
+        let after_delete = keyring_backend_op_counts();
+        assert_eq!(after_delete.delete, 1);
+
+        let got = store.read(url).unwrap();
+        assert!(got.is_none(), "deleted url is absent");
+        let after_read = keyring_backend_op_counts();
+        assert_eq!(
+            after_read.search_items,
+            after_delete.search_items + 1,
+            "read after delete must SearchItems"
+        );
+    }
+
+    /// Named contract: refresh re-reads the keyring once and adopts a sibling
+    /// token without SetSecret. The following read stays on the cache.
+    #[test]
+    #[serial]
+    fn reread_before_refresh_adopts_a_sibling_token_with_one_probe() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = prefer_keyring_store();
+        let url = session_url();
+
+        store.write(url, "key", "token-v1").unwrap();
+        test_hooks::mock_seed(url, "token-from-sibling");
+        let before = keyring_backend_op_counts();
+        let look = store.reread_keyring_before_refresh(url).unwrap();
+        assert_eq!(look, KeyringRefreshLook::Adopted);
+        let after = keyring_backend_op_counts();
+        assert_eq!(after.search_items, before.search_items + 1);
+        assert_eq!(after.get_secret, before.get_secret + 1);
+        assert_eq!(after.set_secret, before.set_secret);
+        let got = store.read(url).unwrap().expect("adopted");
+        assert_eq!(got.1, "token-from-sibling");
+        assert_eq!(
+            keyring_backend_op_counts().search_items,
+            after.search_items,
+            "read after adopt must not SearchItems"
+        );
+    }
+
+    /// File-only stores (unit tests, `GROK_CREDENTIALS_FORCE_FILE`) must not
+    /// probe the keyring on the refresh re-read.
+    #[test]
+    #[serial]
+    fn file_only_reread_does_not_touch_the_keyring() {
+        let _hooks = test_hooks::simulate_in_memory_keyring();
+        let (_dir, store) = temp_store();
+        let before = keyring_backend_op_counts();
+        let look = store.reread_keyring_before_refresh(session_url()).unwrap();
+        assert_eq!(look, KeyringRefreshLook::Unchanged);
+        let after = keyring_backend_op_counts();
+        assert_eq!(after.search_items, before.search_items);
+        assert_eq!(after.get_secret, before.get_secret);
+        assert_eq!(after.set_secret, before.set_secret);
     }
 }
 

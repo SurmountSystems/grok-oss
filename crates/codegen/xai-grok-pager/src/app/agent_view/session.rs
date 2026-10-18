@@ -775,6 +775,7 @@ impl AgentView {
             draft_consumed: false,
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
+            nested_resume_prompt_ids: Vec::new(),
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,

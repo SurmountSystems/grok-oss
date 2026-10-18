@@ -163,6 +163,8 @@ pub struct SessionHandle {
     /// Subagents inherit the parent's handle so scheduled tasks survive the subagent's exit.
     pub scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Live parent sampler. Nested spawn reads `current_api_key` and extra headers from this handle.
+    pub sampler_handle: xai_grok_sampler::SamplerHandle,
     pub registry_write_order: RegistryWriteOrder,
 }
 pub(crate) fn load_context_window_selection(

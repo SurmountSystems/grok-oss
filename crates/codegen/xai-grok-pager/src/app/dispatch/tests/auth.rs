@@ -507,6 +507,410 @@ fn auth_complete_retries_stashed_prompt_without_a_return_view() {
     );
 }
 
+/// Operator contract: after re-auth, nested L2s that 401'd resume the same
+/// way a dropped network does. AuthComplete must not leave those rows failed.
+#[test]
+fn auth_complete_resumes_nested_l2s_that_401d() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-parent-reauth"));
+        let now = std::time::Instant::now();
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            crate::app::subagent::SubagentInfo {
+                subagent_id: "sa-nested-401".into(),
+                child_session_id: "cs-nested-401".into(),
+                description: "Plan chrome, limits, freeze, jumping-the-gun".into(),
+                subagent_type: "general-purpose".into(),
+                finished: true,
+                status: Some("failed".into()),
+                attempt: crate::app::subagent::SubagentAttemptInfo {
+                    lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(
+                    ),
+                    persona: None,
+                    role: Some("implementer".into()),
+                    model: None,
+                    context_source: None,
+                    resumed_from: None,
+                    capability_mode: None,
+                    workflow_run_id: None,
+                    context_normalized: false,
+                    parent_prompt_id: None,
+                    parent_session_id: Some("sess-parent-reauth".into()),
+                    depth: Some(1),
+                    started_at: now,
+                    last_progress_at: now,
+                    status: Some("failed".into()),
+                    error: Some(
+                        "Auth recovery succeeded but 4 authenticated inference requests were still rejected (401)"
+                            .into(),
+                    ),
+                    duration_ms: None,
+                    tool_calls: None,
+                    turns: None,
+                    turn_count: None,
+                    tool_call_count: None,
+                    tokens_used: None,
+                    tokens_past: 0,
+                    context_window_tokens: None,
+                    context_usage_pct: None,
+                    tools_used: Vec::new(),
+                    error_count: None,
+                    activity_label: None,
+                    is_background: false,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    terminal_entry_id: None,
+                },
+                completed_attempt_tokens: 0,
+                sealed_attempt_tokens: Default::default(),
+                prompt: Some("implement the plan chrome".into()),
+                child_cwd: None,
+                worktree_path: None,
+                transcript: Default::default(),
+            },
+        );
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 9,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 9,
+            meta: None,
+        }),
+        &mut app,
+    );
+    let nested = test_agent(&app, id)
+        .subagent_sessions
+        .get("cs-nested-401")
+        .expect("nested row stays");
+    assert!(
+        !nested.finished,
+        "AuthComplete must un-finish the 401'd nested L2 so occupancy restore can resume it"
+    );
+    assert!(
+        nested.attempt.status.is_none(),
+        "AuthComplete must clear the failed nested status so the row is live again"
+    );
+    assert_eq!(
+        test_agent(&app, id)
+            .session
+            .session_id
+            .as_ref()
+            .map(|sid| sid.0.as_ref()),
+        Some("sess-parent-reauth"),
+        "AuthComplete must keep the parent session bound"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. })),
+        "LoadSession of the nested id would replace the parent chat, got: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                ..
+            } if session_id.0.as_ref() == "cs-nested-401" && text == "implement the plan chrome"
+        )),
+        "AuthComplete must resend the nested L2 prompt after re-auth, got: {effects:?}"
+    );
+}
+
+const NESTED_BEARER_NO_AUTH_CONTEXT_401: &str = "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+
+fn nested_l2_that_401d(parent_sid: &str) -> crate::app::subagent::SubagentInfo {
+    let now = std::time::Instant::now();
+    crate::app::subagent::SubagentInfo {
+        subagent_id: "sa-nested-401".into(),
+        child_session_id: "cs-nested-401".into(),
+        description: "Plan chrome, limits, freeze, jumping-the-gun".into(),
+        subagent_type: "general-purpose".into(),
+        finished: true,
+        status: Some("failed".into()),
+        attempt: crate::app::subagent::SubagentAttemptInfo {
+            lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+            persona: None,
+            role: Some("implementer".into()),
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: Some(parent_sid.into()),
+            depth: Some(1),
+            started_at: now,
+            last_progress_at: now,
+            status: Some("failed".into()),
+            error: Some(
+                "Auth recovery succeeded but 4 authenticated inference requests were still rejected (401)"
+                    .into(),
+            ),
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            tokens_past: 0,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            terminal_entry_id: None,
+        },
+        completed_attempt_tokens: 0,
+        sealed_attempt_tokens: Default::default(),
+        prompt: Some("implement the plan chrome".into()),
+        child_cwd: None,
+        worktree_path: None,
+        transcript: Default::default(),
+    }
+}
+
+fn scrollback_has_resuming_nested_work(agent: &crate::app::agent_view::AgentView) -> bool {
+    (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(crate::scrollback::block::RenderBlock::System(sys))
+                if crate::app::dispatch::is_resuming_nested_work_copy(&sys.text)
+        )
+    })
+}
+
+fn scrollback_has_reauth_required(agent: &crate::app::agent_view::AgentView) -> bool {
+    (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(crate::scrollback::block::RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    })
+}
+
+fn scrollback_has_request_failed(agent: &crate::app::agent_view::AgentView) -> bool {
+    (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(crate::scrollback::block::RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::RequestFailed { .. })
+        )
+    })
+}
+
+/// Operator: "This is a fucking lie btw: Re-authenticated. Resuming nested work…"
+/// The product does not paint that sentence when the nested retry still 401s with
+/// `auth_kind=bearer` plus `reason=no auth context`. Nested resume did not start
+/// as a success. Keep the nested 401 visible. Do not paint `/login`.
+#[test]
+fn product_does_not_paint_reauthenticated_resuming_nested_work_when_the_nested_retry_still_401s_with_bearer_no_auth_context()
+ {
+    use crate::app::acp_handler::apply_session_event_for_test;
+    use crate::scrollback::block::RenderBlock;
+    use xai_grok_shell::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-parent-reauth"));
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-parent-reauth"),
+        );
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 11,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 11,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                ..
+            } if session_id.0.as_ref() == "cs-nested-401" && text == "implement the plan chrome"
+        )),
+        "AuthComplete may still un-finish nested L2s and resend, got: {effects:?}"
+    );
+    assert!(
+        !scrollback_has_resuming_nested_work(test_agent(&app, id)),
+        "AuthComplete must not paint Re-authenticated. Resuming nested work before the nested POST is in flight or succeeded"
+    );
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.scrollback.push_block(RenderBlock::system(
+            "Re-authenticated. Resuming nested work\u{2026}".to_string(),
+        ));
+        agent.scrollback.push_block(RenderBlock::system(
+            "Re-authenticated. Resuming nested work...".to_string(),
+        ));
+        apply_session_event_for_test(
+            &XaiSessionUpdate::RetryState(RetryState::Failed {
+                error_type: "auth".into(),
+                message: NESTED_BEARER_NO_AUTH_CONTEXT_401.into(),
+            }),
+            &mut agent.session,
+            &mut agent.scrollback,
+        );
+    }
+    let agent = test_agent(&app, id);
+    assert!(
+        !scrollback_has_resuming_nested_work(agent),
+        "owed outcome: the product does not paint Re-authenticated. Resuming nested work when the nested retry still 401s with auth_kind=bearer plus reason=no auth context"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "nested 401 with no auth context must not tell the Operator to /login while the parent still talks"
+    );
+    assert!(
+        scrollback_has_request_failed(agent),
+        "keep the nested 401 visible, got scrollback without RequestFailed"
+    );
+}
+
+/// The copy may paint once a nested UnstickResendPrompt actually dispatched and
+/// the send succeeded. Parent AuthComplete alone is not that.
+#[test]
+fn nested_resume_copy_paints_only_after_unstick_resend_prompt_response_ok() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-parent-reauth"));
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-parent-reauth"),
+        );
+    }
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 12,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 12,
+            meta: None,
+        }),
+        &mut app,
+    );
+    let prompt_id = effects.iter().find_map(|e| match e {
+        Effect::UnstickResendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
+        _ => None,
+    });
+    let prompt_id = prompt_id.expect("AuthComplete must emit UnstickResendPrompt");
+    assert!(
+        !scrollback_has_resuming_nested_work(test_agent(&app, id)),
+        "copy waits until the nested resend is actually dispatched"
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                serde_json::json!({ "promptId": prompt_id.clone() })
+                    .as_object()
+                    .cloned(),
+            )),
+            http_status: None,
+            prompt_id: Some(prompt_id),
+        }),
+        &mut app,
+    );
+    assert!(
+        scrollback_has_resuming_nested_work(test_agent(&app, id)),
+        "nested resume copy may paint after the UnstickResendPrompt send succeeded"
+    );
+}
+
+/// Nested UnstickResendPrompt that 401s with the live paste must not paint the
+/// success sentence. AuthComplete already queued the resend.
+#[test]
+fn nested_unstick_resend_prompt_response_401_does_not_paint_resuming_nested_work() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-parent-reauth"));
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-parent-reauth"),
+        );
+    }
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 13,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 13,
+            meta: None,
+        }),
+        &mut app,
+    );
+    let prompt_id = effects.iter().find_map(|e| match e {
+        Effect::UnstickResendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
+        _ => None,
+    });
+    let prompt_id = prompt_id.expect("AuthComplete must emit UnstickResendPrompt");
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(NESTED_BEARER_NO_AUTH_CONTEXT_401.to_string()),
+            http_status: Some(401),
+            prompt_id: Some(prompt_id),
+        }),
+        &mut app,
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        !scrollback_has_resuming_nested_work(agent),
+        "owed outcome: the product does not paint Re-authenticated. Resuming nested work when the nested retry still 401s with auth_kind=bearer plus reason=no auth context"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "nested 401 with no auth context must not tell the Operator to /login while the parent still talks"
+    );
+}
+
 /// Without `compact_held_prompt`, clearing `in_flight_prompt` when compact starts leaves nothing for reauth to stash.
 #[test]
 fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {

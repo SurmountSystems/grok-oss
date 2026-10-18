@@ -2129,7 +2129,7 @@ pub(crate) async fn spawn_session_actor(
         turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
         pending_image_strip: parking_lot::Mutex::new(std::collections::HashMap::new()),
         image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
-        sampler_handle,
+        sampler_handle: sampler_handle.clone(),
         sampling_gate,
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,
@@ -2523,6 +2523,7 @@ pub(crate) async fn spawn_session_actor(
         terminal_backend: Some(terminal_backend.clone()),
         tools_notification_handle: Some(tools_notification_handle.clone()),
         scheduler_handle: scheduler_handle_for_handle,
+        sampler_handle: sampler_handle.clone(),
     };
     Ok((
         SessionInitResult {
