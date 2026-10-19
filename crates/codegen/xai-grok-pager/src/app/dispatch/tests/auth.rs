@@ -915,6 +915,102 @@ fn auth_complete_resends_last_nested_prompt_with_recovered_bearer() {
     );
 }
 
+/// Operator: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+/// AuthComplete after that 401 starts a nested POST with recoveredBearer.
+#[tokio::test]
+async fn auth_complete_after_nested_bearer_no_auth_context_401_starts_nested_post_with_recovered_bearer()
+ {
+    use crate::app::effects::{SessionFlags, execute};
+    use std::path::Path;
+    use tokio::task::JoinSet;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-parent-reauth"));
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-parent-reauth"),
+        );
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 31,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let mut effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 31,
+            meta: None,
+        }),
+        &mut app,
+    );
+    let unstick = effects
+        .drain(..)
+        .find(|e| {
+            matches!(
+                e,
+                Effect::UnstickResendPrompt {
+                    session_id,
+                    recovered_bearer: true,
+                    recovered_bearer_jwt: Some(jwt),
+                    ..
+                } if session_id.0.as_ref() == "cs-nested-401"
+                    && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+            )
+        })
+        .expect("AuthComplete after that 401 must emit UnstickResendPrompt recoveredBearer");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let Some(xai_acp_lib::AcpAgentMessage::Prompt(args)) = rx.recv().await else {
+            panic!("AuthComplete after that 401 must start a nested POST");
+        };
+        let meta = args.request.meta.as_ref().expect("_meta");
+        assert_eq!(
+            meta.get("recoveredBearer"),
+            Some(&serde_json::Value::Bool(true)),
+            "nested POST must carry recoveredBearer. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+        );
+        assert_eq!(
+            meta.get("recoveredBearerJwt"),
+            Some(&serde_json::Value::String(
+                PARENT_SAMPLER_CURRENT_API_KEY.to_string()
+            )),
+            "recoveredBearerJwt must be the live parent sampler JWT"
+        );
+        let _ = args
+            .response_tx
+            .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)));
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        unstick,
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("nested POST task")
+        .expect("nested POST must not panic");
+    match result {
+        TaskResult::PromptResponse { result, .. } => {
+            assert!(result.is_ok(), "nested POST with recoveredBearer must send");
+        }
+        other => panic!("expected PromptResponse from nested POST, got {other:?}"),
+    }
+}
+
 /// Operator: "And also you don't resume after login. You just sit there as if I've done nothing, which is not useful."
 /// A still-running nested 401 (`finished` still false) must resume on AuthComplete.
 /// Prior fixtures all set `finished: true`, so that hole sat untested.

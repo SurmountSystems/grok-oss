@@ -1285,14 +1285,12 @@ impl SessionActor {
     /// Nested turns prefer the JWT the live sampler is already talking with. AuthManager recovery
     /// can mint a different token that cli-chat-proxy still rejects.
     async fn stampable_nested_parent_bearer(&self) -> Option<String> {
-        if self.startup_hints.is_subagent
-            && let Some(key) = self
-                .sampler_handle
-                .current_api_key()
-                .await
-                .filter(|key| !key.is_empty())
-        {
-            return Some(key);
+        if self.startup_hints.is_subagent {
+            // Nested `sampler_handle.current_api_key()` is this child's last
+            // send, the spawn-time JWT that just 401'd. Stamping it again
+            // resubmits the same Bearer. Live parent JWT is restamped via
+            // recoveredBearer (`parent_sampler_handle.current_api_key()`).
+            return None;
         }
         if let Some(am) = self.auth_manager.as_ref()
             && let Some(key) = am
@@ -1961,7 +1959,12 @@ impl SessionActor {
         };
         let (error_type, detailed_message) =
             if crate::extensions::notification::is_nested_missing_auth_context(&error.message) {
-                ("auth_transient", detailed_message)
+                // Nested bearer + xai-grok-cli + no auth context is an inherit
+                // miss. Tagging it `auth_transient` painted "Authentication
+                // temporarily unavailable" and replaced resume. Keep `auth` so
+                // is_reauthable_failure (nested check) still skips /login and
+                // the pager retries with the live parent sampler JWT.
+                ("auth", detailed_message)
             } else {
                 match self.auth_manager.as_ref() {
                     Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(

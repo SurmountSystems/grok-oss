@@ -1286,7 +1286,17 @@ impl acp::Agent for MvpAgent {
                     "nested recoveredBearer has no live parent sampler JWT",
                 ));
             };
-            handle.sampler_handle.set_api_key(Some(recovered));
+            handle.sampler_handle.set_api_key(Some(recovered.clone()));
+            // SetApiKey is a mailbox command. Await CurrentApiKey so the
+            // restamp lands before this prompt reconstructs and POSTs.
+            // Fire-and-forget left spawn-time JWT on the wire (Operator:
+            // same 401 after Logging in..., then 4m Waiting for the model).
+            let flushed = handle.sampler_handle.current_api_key().await;
+            if flushed.as_deref() != Some(recovered.as_str()) {
+                return Err(acp::Error::internal_error().data(
+                    "nested recoveredBearer SetApiKey did not restamp live parent sampler JWT",
+                ));
+            }
         }
         let mut before_upload_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         if let Some(ctx) = trace_context.clone() {
