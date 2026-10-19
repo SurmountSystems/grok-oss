@@ -1149,6 +1149,32 @@ mod tests {
         assert_eq!(formatted.headline, "Service unavailable (503)");
     }
 
+    /// Operator live paste after grok-oss 1.0.45: 401, then orange
+    /// "Authentication temporarily unavailable … Try sending again in a moment."
+    /// Nested bearer + xai-grok-cli + no auth context must not use that headline
+    /// even when the shell tagged the RetryState as `auth_transient`.
+    #[test]
+    fn nested_bearer_no_auth_context_is_not_authentication_temporarily_unavailable() {
+        let paste = "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        let formatted = format_request_failure(None, Some(WireErrorType::AuthTransient), paste);
+        assert_ne!(
+            formatted.headline, "Authentication temporarily unavailable",
+            "Operator: Authentication temporarily unavailable must not replace resume. Retry with the live Bearer. Got headline {}",
+            formatted.headline
+        );
+        assert!(
+            !formatted.detail.contains("Try sending again in a moment"),
+            "AuthTransient action copy must not replace the nested 401, got {}",
+            formatted.detail
+        );
+        assert_eq!(formatted.headline, "Request failed");
+        assert!(
+            formatted.detail.contains("reason=no auth context"),
+            "keep the nested 401 visible, got {}",
+            formatted.detail
+        );
+    }
+
     #[test]
     fn formats_exhausted_retry_prefix() {
         let formatted = format_request_failure(

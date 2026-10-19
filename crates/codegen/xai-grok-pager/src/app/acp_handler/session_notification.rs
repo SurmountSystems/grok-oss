@@ -1776,12 +1776,19 @@ pub(super) fn handle_child_session_notification(
                 };
                 if let Some(message) = message.filter(|m| {
                     xai_grok_shell::extensions::notification::is_nested_missing_auth_context(m)
-                }) && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
-                {
-                    let status = info.status.as_deref().or(info.attempt.status.as_deref());
-                    if !matches!(status, Some("completed") | Some("cancelled")) {
-                        info.attempt.error = Some(std::sync::Arc::from(message));
+                }) {
+                    if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+                        let status = info.status.as_deref().or(info.attempt.status.as_deref());
+                        if !matches!(status, Some("completed") | Some("cancelled")) {
+                            info.attempt.error = Some(std::sync::Arc::from(message));
+                        }
                     }
+                    // Do not wait for /login. Retry the nested POST with the live
+                    // parent sampler JWT (recoveredBearer). Operator: 4m18s
+                    // Waiting for the model with no POST after Logging in...
+                    let retry_effects =
+                        crate::app::dispatch::retry_nested_resume_after_missing_auth(agent);
+                    agent.pending_effects.extend(retry_effects);
                 }
             }
             let mut changed = false;
@@ -2613,6 +2620,11 @@ pub(super) fn apply_retry_state_with_nested(
             } else if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
                 push_reauth_required_once(scrollback);
+            } else if nested_missing_auth {
+                scrollback.push_block(RenderBlock::session_event(
+                    crate::app::error_display::format_request_failure(None, None, reason)
+                        .into_session_event(),
+                ));
             } else if *rate_limited {
                 let error = crate::app::effects::sanitize_user_error(
                     &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
@@ -2647,6 +2659,19 @@ pub(super) fn apply_retry_state_with_nested(
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
                 push_reauth_required_once(scrollback);
+            } else if nested_missing_auth {
+                // Operator live: orange "Authentication temporarily unavailable …
+                // Try sending again in a moment." then Logging in... then the same
+                // 401. Nested bearer + xai-grok-cli + no auth context is not a
+                // self-heal blip. Keep the 401 visible. Retry with the live Bearer.
+                scrollback.push_block(RenderBlock::session_event(
+                    crate::app::error_display::format_request_failure(
+                        None,
+                        Some(crate::app::error_display::WireErrorType::Other),
+                        message,
+                    )
+                    .into_session_event(),
+                ));
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
                 if !crate::app::dispatch::scrollback_has_recent_disk_full(scrollback) {
                     scrollback.push_block(RenderBlock::session_event(SessionEvent::DiskFull));

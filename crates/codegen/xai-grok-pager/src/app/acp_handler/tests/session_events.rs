@@ -867,6 +867,43 @@
         assert_eq!(count_reauth_required(&scrollback), 0);
     }
 
+    /// Operator live after grok-oss 1.0.45: 401, then orange
+    /// "Authentication temporarily unavailable … Try sending again in a moment."
+    /// Tagging nested missing-auth as `auth_transient` must not paint that banner.
+    #[test]
+    fn apply_retry_state_nested_bearer_no_auth_context_does_not_paint_authentication_temporarily_unavailable()
+    {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth_transient".into(),
+                message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed { headline, detail, .. }) => {
+                assert_ne!(
+                    headline, "Authentication temporarily unavailable",
+                    "Operator: Authentication temporarily unavailable must not replace resume. Retry with the live Bearer."
+                );
+                assert!(
+                    !detail.contains("Try sending again in a moment"),
+                    "AuthTransient action copy must not replace the nested 401, got {detail}"
+                );
+                assert!(
+                    detail.contains("reason=no auth context"),
+                    "keep the nested 401 visible, got {detail}"
+                );
+            }
+            other => panic!("keep the nested 401 visible as RequestFailed, got {other:?}"),
+        }
+    }
+
     /// Operator: "This is a fucking lie btw: Re-authenticated. Resuming nested work…"
     /// A nested retry that still 401s with auth_kind=bearer plus reason=no auth context
     /// must strip that success sentence and keep the 401 visible.
@@ -1882,6 +1919,38 @@
         let info = agent.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.attempt.tokens_used, Some(25000));
         assert_eq!(info.attempt.context_usage_pct, Some(19));
+    }
+
+    /// Nested child 401 (Operator paste) must retry with recoveredBearer immediately.
+    /// Do not wait for /login or sit on Waiting for the model with no POST.
+    #[test]
+    fn child_nested_bearer_no_auth_context_401_retries_with_recovered_bearer() {
+        let mut agent = make_agent(Some("root-sess"));
+        agent.parent_sampler_jwt = Some("parent-sampler-current-api-key".into());
+        let child_sid = "cs-nested-401";
+        let mut info = make_subagent_info(child_sid);
+        info.attempt.depth = Some(1);
+        info.prompt = Some("implement the plan chrome".into());
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        let update = XaiSessionUpdate::RetryState(RetryState::Failed {
+            error_type: "auth".into(),
+            message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+        });
+        let _ = handle_child_session_notification(update, child_sid, &mut agent, false, None);
+        assert!(
+            agent.pending_effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::UnstickResendPrompt {
+                    session_id,
+                    recovered_bearer: true,
+                    recovered_bearer_jwt: Some(jwt),
+                    ..
+                } if session_id.0.as_ref() == child_sid
+                    && jwt == "parent-sampler-current-api-key"
+            )),
+            "nested 401 must start a nested POST with recoveredBearer, got {:?}",
+            agent.pending_effects
+        );
     }
 
     #[test]

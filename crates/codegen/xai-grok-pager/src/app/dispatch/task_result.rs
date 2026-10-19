@@ -864,9 +864,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             });
             let mut effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
             app.refresh_status_line_for(agent_id);
-            if nested_missing && had_nested_resume {
+            if nested_missing {
                 if let Some(agent) = app.agents.get_mut(&agent_id) {
-                    effects.extend(retry_nested_resume_after_missing_auth(agent));
+                    if had_nested_resume || agent.nested_auth_resume_retries == 0 {
+                        effects.extend(retry_nested_resume_after_missing_auth(agent));
+                    }
                 }
             }
             effects

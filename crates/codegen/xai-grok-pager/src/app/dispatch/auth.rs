@@ -429,28 +429,14 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
     effects
 }
 
-/// Nested bearer + xai-grok-cli + no auth context 401 after AuthComplete.
-/// Resend the interrupted nested prompt with recovered Bearer once. Do not sit idle.
-pub(super) fn retry_nested_resume_after_missing_auth(agent: &mut AgentView) -> Vec<Effect> {
+/// Nested bearer + xai-grok-cli + no auth context 401. Resend the interrupted
+/// nested prompt with recovered Bearer once. Do not sit idle. Do not mark
+/// other live L2s failed.
+pub(crate) fn retry_nested_resume_after_missing_auth(agent: &mut AgentView) -> Vec<Effect> {
     if agent.nested_auth_resume_retries >= 1 {
         return vec![];
     }
     agent.nested_auth_resume_retries = agent.nested_auth_resume_retries.saturating_add(1);
-    for info in agent.subagent_sessions.values_mut() {
-        if info.attempt.depth.is_some_and(|depth| depth != 1) {
-            continue;
-        }
-        let status = info.status.as_deref().or(info.attempt.status.as_deref());
-        if matches!(status, Some("completed") | Some("cancelled")) {
-            continue;
-        }
-        if info.prompt.as_deref().is_none_or(str::is_empty) {
-            continue;
-        }
-        info.finished = true;
-        info.status = Some("failed".into());
-        info.attempt.status = Some("failed".into());
-    }
     enqueue_nested_resume_after_auth(agent)
 }
 
