@@ -46,7 +46,9 @@ where
         return false;
     }
     let has_byok = models.into_iter().any(ModelEntry::has_own_credentials);
-    has_byok || (has_xai_api_key_env() && first_party_env_ok)
+    has_byok
+        || (has_xai_api_key_env() && first_party_env_ok)
+        || xai_grok_config::resolve_configured_inference().is_some()
 }
 
 /// Inputs to [`build_auth_methods`]. The caller (`MvpAgent::initialize()`) computes the booleans. They depend on async side effects (token refresh) and shared mutable state (`AuthManager`).
@@ -300,14 +302,21 @@ pub(crate) fn is_session_based_method_or_inherited_live_session(
 }
 
 /// Bearer for a nested request.
-/// The inherited parent session key (the JWT the live parent sampler is talking with) wins.
-/// A stale chat-state key must not win over that JWT. Recovery can mint a different AuthManager token that cli-chat-proxy still rejects.
-/// AuthManager wire-valid is last, when inherited and chat are empty.
+/// Client-wide `[inference]` / `GROK_API_*` / `OPENAI_*` wins so nested agents
+/// use the same endpoint key and do not send a SuperGrok JWT to a custom host.
+/// When that overlay is unset, the inherited parent session key (the JWT the
+/// live parent sampler is talking with) wins. A stale chat-state key must not
+/// win over that JWT. Recovery can mint a different AuthManager token that
+/// cli-chat-proxy still rejects. AuthManager wire-valid is last, when inherited
+/// and chat are empty.
 pub(crate) fn nested_request_bearer(
     chat_api_key: Option<String>,
     wire_valid_key: Option<String>,
     inherited_key: Option<String>,
 ) -> Option<String> {
+    if let Some(inf) = xai_grok_config::resolve_configured_inference() {
+        return Some(inf.api_key);
+    }
     [inherited_key, chat_api_key, wire_valid_key]
         .into_iter()
         .find_map(|key| key.filter(|s| !s.is_empty()))
@@ -566,7 +575,9 @@ mod tests {
 
     /// An empty chat-state key uses the wire-valid parent token.
     #[test]
+    #[serial]
     fn nested_request_bearer_uses_the_wire_valid_token_when_chat_credentials_are_empty() {
+        let _isolated = isolate_process_auth_env();
         assert_eq!(
             nested_request_bearer(None, Some("parent-jwt".into()), None).as_deref(),
             Some("parent-jwt")
@@ -585,7 +596,9 @@ mod tests {
 
     /// Chat and wire-valid can both be empty while the parent still holds a session JWT.
     #[test]
+    #[serial]
     fn nested_request_bearer_falls_back_to_the_inherited_parent_key() {
+        let _isolated = isolate_process_auth_env();
         assert_eq!(
             nested_request_bearer(None, None, Some("inherited-jwt".into())).as_deref(),
             Some("inherited-jwt")
@@ -1024,6 +1037,10 @@ mod tests {
         let mut names = vec![
             XAI_API_KEY_ENV_VAR.to_owned(),
             LEGACY_XAI_API_KEY_ENV_VAR.to_owned(),
+            xai_grok_config::GROK_API_BASE_ENV.to_owned(),
+            xai_grok_config::GROK_API_KEY_ENV.to_owned(),
+            xai_grok_config::OPENAI_BASE_URL_ENV.to_owned(),
+            xai_grok_config::OPENAI_API_KEY_ENV.to_owned(),
         ];
         let cfg = Config::default();
         let models = crate::agent::config::resolve_model_list(&cfg, None);

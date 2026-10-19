@@ -201,6 +201,154 @@ fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
+/// Operator: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+/// UnstickResendPrompt recovered_bearer true results in `_meta.recoveredBearerJwt` equal to parent sampler current_api_key.
+#[test]
+fn unstick_resend_prompt_recovered_bearer_true_stamps_recovered_bearer_jwt_equal_to_parent_sampler_current_api_key()
+ {
+    const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";
+    let mut map = serde_json::Map::new();
+    assert!(
+            stamp_unstick_recovered_bearer(
+                &mut map,
+                true,
+                Some(PARENT_SAMPLER_CURRENT_API_KEY),
+            ),
+            "recovered Bearer with a live parent sampler JWT must POST"
+        );
+    assert_eq!(j(&map, "recoveredBearer"), &serde_json::Value::Bool(true));
+    assert_eq!(
+            j(&map, "recoveredBearerJwt"),
+            &serde_json::Value::String(PARENT_SAMPLER_CURRENT_API_KEY.to_string()),
+            "recoveredBearerJwt must equal parent sampler current_api_key"
+        );
+}
+/// Recovered Bearer without a pager JWT still stamps recoveredBearer true and sends.
+/// Nested MvpAgent resolves JWT from the resident parent sampler.
+#[test]
+fn unstick_resend_prompt_recovered_bearer_true_without_jwt_stamps_recovered_bearer_and_sends() {
+    let mut map = serde_json::Map::new();
+    assert!(
+            stamp_unstick_recovered_bearer(&mut map, true, None),
+            "recovered Bearer with no pager JWT must still send session/prompt"
+        );
+    assert_eq!(j(&map, "recoveredBearer"), &serde_json::Value::Bool(true));
+    assert!(
+            map.get("recoveredBearerJwt").is_none(),
+            "omit recoveredBearerJwt when pager JWT is none so nested resolves the resident parent"
+        );
+    let mut blank = serde_json::Map::new();
+    assert!(stamp_unstick_recovered_bearer(&mut blank, true, Some("  ")));
+    assert_eq!(j(&blank, "recoveredBearer"), &serde_json::Value::Bool(true));
+    assert!(blank.get("recoveredBearerJwt").is_none());
+}
+/// Operator: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+/// UnstickResendPrompt recovered_bearer true results in `_meta.recoveredBearerJwt` equal to parent sampler current_api_key.
+#[tokio::test]
+async fn unstick_resend_prompt_recovered_bearer_true_posts_recovered_bearer_jwt_equal_to_parent_sampler_current_api_key()
+ {
+    const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let Some(xai_acp_lib::AcpAgentMessage::Prompt(args)) = rx.recv().await else {
+            panic!("expected session/prompt");
+        };
+        let meta = args.request.meta.as_ref().expect("_meta");
+        assert_eq!(j(meta, "recoveredBearer"), &serde_json::Value::Bool(true));
+        assert_eq!(
+                j(meta, "recoveredBearerJwt"),
+                &serde_json::Value::String(PARENT_SAMPLER_CURRENT_API_KEY.to_string()),
+                "recoveredBearerJwt must equal parent sampler current_api_key"
+            );
+        assert_eq!(j(meta, "unstickRetry"), &serde_json::Value::Bool(true));
+        let _ = args
+            .response_tx
+            .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)));
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::UnstickResendPrompt {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new("cs-nested-401"),
+            text: "implement the plan chrome".into(),
+            prompt_id: "p-recovered".into(),
+            images: Vec::new(),
+            images_dir: None,
+            recovered_bearer: true,
+            recovered_bearer_jwt: Some(PARENT_SAMPLER_CURRENT_API_KEY.into()),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    match result {
+        TaskResult::PromptResponse { prompt_id, result, .. } => {
+            assert_eq!(prompt_id.as_deref(), Some("p-recovered"));
+            assert!(result.is_ok());
+        }
+        other => panic!("expected PromptResponse, got {other:?}"),
+    }
+}
+/// Recovered Bearer with no pager JWT still posts session/prompt with recoveredBearer true.
+/// Nested MvpAgent resolves JWT from the resident parent sampler.
+#[tokio::test]
+async fn unstick_resend_prompt_recovered_bearer_true_without_jwt_still_posts() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let Some(xai_acp_lib::AcpAgentMessage::Prompt(args)) = rx.recv().await else {
+            panic!("expected session/prompt");
+        };
+        let meta = args.request.meta.as_ref().expect("_meta");
+        assert_eq!(j(meta, "recoveredBearer"), &serde_json::Value::Bool(true));
+        assert!(
+                meta.get("recoveredBearerJwt").is_none(),
+                "omit recoveredBearerJwt when pager JWT is none"
+            );
+        assert_eq!(j(meta, "unstickRetry"), &serde_json::Value::Bool(true));
+        let _ = args
+            .response_tx
+            .send(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)));
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::UnstickResendPrompt {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new("cs-nested-401"),
+            text: "implement the plan chrome".into(),
+            prompt_id: "p-no-jwt".into(),
+            images: Vec::new(),
+            images_dir: None,
+            recovered_bearer: true,
+            recovered_bearer_jwt: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    match result {
+        TaskResult::PromptResponse { prompt_id, result, .. } => {
+            assert_eq!(prompt_id.as_deref(), Some("p-no-jwt"));
+            assert!(result.is_ok());
+        }
+        other => panic!("expected PromptResponse, got {other:?}"),
+    }
+}
 /// Text-only interjections must omit the `content` key entirely; the legacy `x.ai/interject` wire shape stays byte-identical.
 #[test]
 fn interject_params_omit_content_when_no_blocks() {

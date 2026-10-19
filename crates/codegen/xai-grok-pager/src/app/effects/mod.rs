@@ -1438,7 +1438,15 @@ pub(crate) fn execute(
             prompt_id,
             images,
             images_dir,
+            recovered_bearer,
+            recovered_bearer_jwt,
         } => {
+            let mut recovered_meta = serde_json::Map::new();
+            if stamp_unstick_recovered_bearer(
+                &mut recovered_meta,
+                recovered_bearer,
+                recovered_bearer_jwt.as_deref(),
+            ) {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             let is_api_key_auth = session_flags.is_api_key_auth;
@@ -1466,6 +1474,7 @@ pub(crate) fn execute(
                     let mut meta = prompt_request_meta(&prompt_id, screen_mode);
                     if let Some(map) = meta.as_object_mut() {
                         map.insert("unstickRetry".into(), serde_json::Value::Bool(true));
+                        map.extend(recovered_meta);
                     }
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(meta.as_object().cloned());
@@ -1496,6 +1505,7 @@ pub(crate) fn execute(
                         prompt_id: Some(prompt_id),
                     }
                 });
+            }
         }
         Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id }
         | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id } => {
@@ -5622,6 +5632,25 @@ fn prompt_request_meta(
         map.insert("screenMode".into(), serde_json::Value::String(mode.into()));
     }
     serde_json::Value::Object(map)
+}
+/// Nested recovered-Bearer `_meta`. recoveredBearer true without a pager JWT still
+/// sends session/prompt; nested MvpAgent resolves JWT from the resident parent sampler.
+fn stamp_unstick_recovered_bearer(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    recovered_bearer: bool,
+    recovered_bearer_jwt: Option<&str>,
+) -> bool {
+    if !recovered_bearer {
+        return true;
+    }
+    map.insert("recoveredBearer".into(), serde_json::Value::Bool(true));
+    if let Some(jwt) = recovered_bearer_jwt.map(str::trim).filter(|s| !s.is_empty()) {
+        map.insert(
+            "recoveredBearerJwt".into(),
+            serde_json::Value::String(jwt.to_string()),
+        );
+    }
+    true
 }
 /// The cancel is answered before points is asked, so the backend has already stopped the turn when it lists
 pub(crate) async fn cancel_then_fetch_rewind_points(

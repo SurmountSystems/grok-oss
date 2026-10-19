@@ -13734,6 +13734,7 @@ dependencies = [
  "toml",
  "tracing",
  "ts-rs",
+ "url",
  "urlencoding",
  "which",
  "xai-dirs",

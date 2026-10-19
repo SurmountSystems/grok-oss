@@ -951,6 +951,13 @@ pub struct AgentView {
     /// The "Re-authenticated. Resuming nested work" copy waits until one of these
     /// sends is in flight or succeeded. A nested 401 with no auth context clears them.
     pub(crate) nested_resume_prompt_ids: Vec<String>,
+    /// Nested AuthComplete resend plus at most one recovered-Bearer retry after a
+    /// `reason=no auth context` 401. Stops a 401 loop from sitting idle forever.
+    pub(crate) nested_auth_resume_retries: u8,
+    /// Live parent sampler JWT (`SamplerHandle::current_api_key()`). Nested recoveredBearer
+    /// puts this on `_meta.recoveredBearerJwt` when present. None still sends recoveredBearer
+    /// true so nested can resolve the resident parent sampler.
+    pub(crate) parent_sampler_jwt: Option<String>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

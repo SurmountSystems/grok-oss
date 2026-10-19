@@ -46,7 +46,7 @@ pub const DEFAULT_AGENT_TYPE: &str = "grok-build-plan";
 pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
-pub use xai_grok_config::{CLI_CHAT_PROXY_BASE_URL_DEFAULT, EndpointsConfig};
+pub use xai_grok_config::{CLI_CHAT_PROXY_BASE_URL_DEFAULT, EndpointsConfig, InferenceFileConfig};
 const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
 /// One or more environment variable names that may hold a model API key.
 /// Serde `untagged`: accepts a string or an array in TOML/JSON.
@@ -392,6 +392,7 @@ pub struct RuntimeResolutionContext<'a> {
     pub storage_mode: Option<&'a str>,
 }
 pub use xai_grok_config::env_bool;
+pub use xai_grok_env::FIRST_PARTY_CREDENTIAL_ENV_VARS;
 pub(crate) use xai_grok_env::env_string;
 /// Compaction-mode precedence (env > config > remote settings > default, with unrecognized values at each source falling through).
 /// `remote` sits just above the default, mirroring `feature_flag` in `resolve_bool_flag`.
@@ -812,6 +813,10 @@ pub struct Config {
     pub shell_environment_policy: ShellEnvironmentPolicyKnownKeys,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// Client-wide OpenAI-compatible inference. Not `[auth]`; stock
+    /// `preferred_method = "api_key"` still pins console.
+    #[serde(default)]
+    pub inference: InferenceFileConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
@@ -1211,6 +1216,7 @@ impl Default for Config {
             toolset: ShellToolsetConfig::default(),
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
+            inference: InferenceFileConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
@@ -4705,6 +4711,9 @@ fn resolve_credentials_ranked(
     preferred: Option<crate::auth::PreferredAuthMethod>,
     auto_use_included_limits: bool,
 ) -> ResolvedCredentials {
+    if let Some(inf) = xai_grok_config::resolve_configured_inference() {
+        return crate::agent::inference_override::credentials_from_inference(inf);
+    }
     let info = model.info();
     let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
     let first_party = crate::util::is_xai_api_url(&info.base_url);
@@ -5402,7 +5411,7 @@ pub(crate) fn sampling_config_for_model(
     );
     let request_compression =
         crate::util::config::request_compression_for_url(&credentials.base_url);
-    SamplerConfig {
+    let mut sampling = SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
@@ -5448,7 +5457,9 @@ pub(crate) fn sampling_config_for_model(
         session_identity_key: credentials.session_identity_key,
         stashed_bearer_resolver: None,
         session_bearer_resolver: None,
-    }
+    };
+    crate::agent::inference_override::overlay_inference_model(&mut sampling.model);
+    sampling
 }
 /// Fold URL-derived headers into `extra_headers`. The sampler crate is intentionally URL-agnostic: it does not inspect `base_url` to decide which auth or staging headers to add.
 /// Replicate the URL-derived header logic at the shell boundary so callers downstream see a single homogenous header bag. cli-chat-proxy bases (grok.com and `cli-chat-proxy.x.ai`) get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.

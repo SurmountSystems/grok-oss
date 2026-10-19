@@ -274,19 +274,12 @@ pub(super) fn dispatch_revise_plan(
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
     // `send_plan_feedback` already drained these bytes onto the action. Put
-    // them back before any refuse so a dropped revise does not lose the
-    // screenshot. `consume_input` below attaches them the same way a normal
-    // composer send does. The pre-review draft stays on the review stash.
-    let plan_turn_images = !images.is_empty();
-    if plan_turn_images
-        && let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get_mut(&id)
-    {
-        for image in images {
-            let _ = agent.prompt.insert_image(image);
-        }
-    }
+    // them back on a refuse so a dropped revise does not lose the screenshot.
+    // The send path stamps Action images onto the outgoing request
+    // (`SendPromptBlocks` / `SendInterject` blocks) and does not round-trip
+    // through `insert_image`. The pre-review draft stays on the review stash.
     if app.reconnect_pending {
+        restore_plan_revise_images(app, images);
         if let Some(agent) = get_active_agent_mut(app) {
             agent.show_toast(RECONNECTING_NOTICE);
         } else {
@@ -308,6 +301,7 @@ pub(super) fn dispatch_revise_plan(
         _ => (false, false, false),
     };
     if has_post_turn_review && leave_plan_pending {
+        restore_plan_revise_images(app, images);
         if let Some(agent) = get_active_agent_mut(app) {
             agent.show_toast(LEAVE_PLAN_REVISE_NOTICE);
         } else {
@@ -316,6 +310,7 @@ pub(super) fn dispatch_revise_plan(
         return vec![];
     }
     if has_post_turn_review && build_in_flight {
+        restore_plan_revise_images(app, images);
         if let Some(agent) = get_active_agent_mut(app) {
             agent.show_toast(BUILD_IN_FLIGHT_REVISE_NOTICE);
         } else {
@@ -323,11 +318,9 @@ pub(super) fn dispatch_revise_plan(
         }
         return vec![];
     }
+    let stamp_text = (!images.is_empty()).then(|| text.clone());
     let dispatched = dispatch_send_prompt_with_outcome(
-        app,
-        text,
-        /* consume_input */ plan_turn_images,
-        /* literal */ true,
+        app, text, /* consume_input */ false, /* literal */ true,
         /* is_follow_up */ false,
     );
     if has_post_turn_review
@@ -337,7 +330,104 @@ pub(super) fn dispatch_revise_plan(
     {
         agent.commit_post_turn_plan_revised();
     }
-    dispatched.effects
+    if dispatched.outcome.accepted_for_revise() {
+        if let Some(stamp_text) = stamp_text {
+            stamp_plan_revise_images_onto_send(app, dispatched.effects, stamp_text, images)
+        } else {
+            dispatched.effects
+        }
+    } else {
+        restore_plan_revise_images(app, images);
+        dispatched.effects
+    }
+}
+
+/// Put drained plan-turn chips back on the composer when a revise is refused.
+fn restore_plan_revise_images(app: &mut AppView, images: Vec<crate::prompt_images::PastedImage>) {
+    if images.is_empty() {
+        return;
+    }
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        for image in images {
+            let _ = agent.prompt.insert_image(image);
+        }
+    }
+}
+
+/// Stamp Action images onto the outgoing send. Same shape as
+/// [`interject::dispatch_interject`]: image-bearing requests become
+/// [`Effect::SendPromptBlocks`] (or `SendInterject` / `SendPromptNow` blocks).
+fn stamp_plan_revise_images_onto_send(
+    app: &mut AppView,
+    mut effects: Vec<Effect>,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    if images.is_empty() {
+        return effects;
+    }
+    let cwd = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get(&id).map(|agent| agent.session.cwd.clone()),
+        _ => None,
+    };
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report_ref(
+        text.clone(),
+        &images,
+        cwd.as_deref(),
+    );
+    let notice = if let Some(agent) = get_active_agent_mut(app) {
+        if let Some(queued) = agent.session.pending_prompts.back_mut()
+            && queued.images.is_empty()
+            && queued.text == text
+        {
+            queued.images = images;
+        }
+        agent.skipped_image_send_notice(&build.skipped_display_numbers)
+    } else {
+        None
+    };
+    app.pending_image_notices.extend(notice);
+    let blocks = build.blocks;
+    for effect in &mut effects {
+        match effect {
+            Effect::SendPrompt {
+                agent_id,
+                session_id,
+                prompt_id,
+                ..
+            } => {
+                *effect = Effect::SendPromptBlocks {
+                    agent_id: *agent_id,
+                    session_id: session_id.clone(),
+                    blocks: blocks.clone(),
+                    prompt_id: prompt_id.clone(),
+                };
+                break;
+            }
+            Effect::SendInterject {
+                blocks: dest_blocks,
+                ..
+            } => {
+                *dest_blocks = Some(blocks.clone());
+                break;
+            }
+            Effect::SendPromptNow {
+                blocks: dest_blocks,
+                ..
+            }
+            | Effect::SendPromptBlocks {
+                blocks: dest_blocks,
+                ..
+            } => {
+                *dest_blocks = blocks.clone();
+                break;
+            }
+            _ => {}
+        }
+    }
+    effects
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,7 +482,9 @@ fn classify_prompt_send(
     if effects.iter().any(|effect| {
         matches!(
             effect,
-            Effect::SendPrompt { .. } | Effect::SendPromptNow { .. }
+            Effect::SendPrompt { .. }
+                | Effect::SendPromptNow { .. }
+                | Effect::SendPromptBlocks { .. }
         )
     }) {
         return PromptSendOutcome::Sent;

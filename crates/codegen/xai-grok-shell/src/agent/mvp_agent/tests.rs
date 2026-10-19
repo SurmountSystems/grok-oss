@@ -1291,6 +1291,7 @@ pub(super) fn make_test_handle(
         tools_notification_handle: None,
         scheduler_handle: None,
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        parent_session_id: None,
     }
 }
 #[tokio::test]

@@ -32,6 +32,11 @@ pub(crate) enum SamplerCommand {
         config: Box<SamplerConfig>,
     },
 
+    /// After interactive login, restamp the nested inherit resolver with the recovered parent sampler JWT.
+    SetApiKey {
+        api_key: Option<String>,
+    },
+
     /// Query: is a specific request still in flight?
     IsActive {
         request_id: RequestId,

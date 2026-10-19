@@ -838,7 +838,7 @@ impl acp::Agent for MvpAgent {
                     user_id: uid,
                 });
                 self.spawn_post_auth_settings(auth_for_settings);
-                Ok(self.auth_response_with_meta())
+                Ok(self.auth_response_with_meta().await)
             }
             auth_method::GROK_COM_METHOD_ID | auth_method::OIDC_METHOD_ID => {
                 let grok_ctx = self.auth_manager.grok_com_config();
@@ -987,7 +987,7 @@ impl acp::Agent for MvpAgent {
                     user_id: Some(auth.user_id.clone()),
                 });
                 self.spawn_post_auth_settings(auth);
-                Ok(self.auth_response_with_meta())
+                Ok(self.auth_response_with_meta().await)
             }
             _ => {
                 Err(
@@ -1238,6 +1238,56 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("unstickRetry"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let recovered_bearer_jwt_meta = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| {
+                m.get("recoveredBearerJwt")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| m.get("recoveredBearer").and_then(|v| v.as_str()))
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let recovered_bearer = recovered_bearer_jwt_meta.is_some()
+            || arguments
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("recoveredBearer"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        if recovered_bearer {
+            // Nested inherit resolver is the Authorization source. SetApiKey restamps
+            // that fallback with the live parent sampler JWT, same order as nested
+            // spawn (`parent_sampler_handle.current_api_key()` / live_parent_sampler_jwt
+            // first). Nested MvpAgent has no parent_sampler_handle field: live JWT
+            // comes from `_meta.recoveredBearerJwt` or the resident parent's sampler.
+            // Do not SetApiKey(AuthManager current_wire_valid / current_or_expired):
+            // cli-chat-proxy rejects it while the parent JWT still talks (Operator paste:
+            // auth_kind=bearer … reason=no auth context after login).
+            let parent_jwt = if recovered_bearer_jwt_meta.is_some() {
+                recovered_bearer_jwt_meta
+            } else if let Some(parent_sid) = handle.parent_session_id.as_ref() {
+                let parent_id = acp::SessionId::new(parent_sid.clone());
+                match self.session_registry.resident_handle(&parent_id) {
+                    Some(parent) => parent.sampler_handle.current_api_key().await,
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let recovered = xai_grok_login::credential_provider::recovered_bearer_inherit_jwt(
+                parent_jwt,
+            );
+            let Some(recovered) = recovered else {
+                // No live parent sampler JWT: skip SetApiKey and do not POST the
+                // spawn-time inherit fallback.
+                return Err(acp::Error::internal_error().data(
+                    "nested recoveredBearer has no live parent sampler JWT",
+                ));
+            };
+            handle.sampler_handle.set_api_key(Some(recovered));
+        }
         let mut before_upload_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         if let Some(ctx) = trace_context.clone() {
             let (tx, parsed_prompt_rx) = oneshot::channel::<ParsedPromptInfo>();

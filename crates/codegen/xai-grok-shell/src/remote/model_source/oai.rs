@@ -17,9 +17,12 @@ pub(crate) struct OaiModelSource {
 }
 impl OaiModelSource {
     pub(crate) fn new(endpoints: &EndpointsConfig, fetch_auth: ModelFetchAuth) -> Self {
+        let inference_base_url = xai_grok_config::resolve_configured_inference()
+            .map(|inf| inf.endpoint)
+            .unwrap_or_else(|| endpoints.resolve_inference_base_url());
         Self {
             endpoint: ListModelsEndpoint::from_endpoints(endpoints, fetch_auth),
-            inference_base_url: endpoints.resolve_inference_base_url(),
+            inference_base_url,
         }
     }
 }
@@ -91,6 +94,9 @@ impl ModelSource for OaiModelSource {
 }
 /// A grok login session token must not reach a custom models endpoint.
 fn list_fetch_api_key(auth: Option<&GrokAuth>) -> Result<String, BackendError> {
+    if let Some(inf) = xai_grok_config::resolve_configured_inference() {
+        return Ok(inf.api_key);
+    }
     crate::agent::auth_method::read_xai_api_key_env()
         .or_else(|_| {
             external_provider_auth(auth)
@@ -112,6 +118,12 @@ struct ListModelsEndpoint {
 }
 impl ListModelsEndpoint {
     fn from_endpoints(endpoints: &EndpointsConfig, fetch_auth: ModelFetchAuth) -> Self {
+        if let Some(inf) = xai_grok_config::resolve_configured_inference() {
+            return Self {
+                url: format!("{}/models", inf.endpoint.trim_end_matches('/')),
+                auth: EndpointAuth::ApiKey,
+            };
+        }
         if endpoints.has_custom_endpoint() {
             Self {
                 url: endpoints.resolve_models_list_url(),
@@ -142,6 +154,10 @@ mod tests {
             "GROK_CLI_CHAT_PROXY_BASE_URL",
             "GROK_XAI_API_BASE_URL",
             "GROK_MODELS_LIST_URL",
+            "GROK_API_BASE",
+            "GROK_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",
         ] {
             unsafe { std::env::remove_var(k) };
         }

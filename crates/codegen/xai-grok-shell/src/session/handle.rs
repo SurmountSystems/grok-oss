@@ -165,6 +165,9 @@ pub struct SessionHandle {
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
     /// Live parent sampler. Nested spawn reads `current_api_key` and extra headers from this handle.
     pub sampler_handle: xai_grok_sampler::SamplerHandle,
+    /// Nested child's parent session id (`StartupHints.parent_session_id`).
+    /// recoveredBearer looks up that session's `sampler_handle.current_api_key()`.
+    pub parent_session_id: Option<String>,
     pub registry_write_order: RegistryWriteOrder,
 }
 pub(crate) fn load_context_window_selection(

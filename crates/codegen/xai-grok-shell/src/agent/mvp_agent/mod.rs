@@ -1777,7 +1777,7 @@ impl MvpAgent {
             );
         }
     }
-    pub(crate) fn auth_response_with_meta(&self) -> AuthenticateResponse {
+    pub(crate) async fn auth_response_with_meta(&self) -> AuthenticateResponse {
         let (show_resolved_model, gate, subscription_tier) = {
             let cfg = self.cfg.borrow();
             let rs = cfg.remote_settings.as_ref();
@@ -1796,6 +1796,28 @@ impl MvpAgent {
             subscription_tier,
             self.auth_manager.current_or_expired().as_ref(),
         );
+        let mut parent_sampler_jwts = serde_json::Map::new();
+        let mut recovered_from_parent = None;
+        let mut recovered_from_any = None;
+        for id in self.session_registry.resident_ids() {
+            let Some(handle) = self.session_registry.resident_handle(&id) else {
+                continue;
+            };
+            let Some(jwt) = handle.sampler_handle.current_api_key().await else {
+                continue;
+            };
+            parent_sampler_jwts.insert(
+                id.0.to_string(),
+                serde_json::Value::String(jwt.clone()),
+            );
+            if recovered_from_any.is_none() {
+                recovered_from_any = Some(jwt.clone());
+            }
+            if handle.parent_session_id.is_none() && recovered_from_parent.is_none() {
+                recovered_from_parent = Some(jwt);
+            }
+        }
+        let recovered_bearer_jwt = recovered_from_parent.or(recovered_from_any);
         let meta = self
             .auth_manager
             .current()
@@ -1818,10 +1840,27 @@ impl MvpAgent {
                     backend_billed: !xai_grok_login::backend::ActiveAuthBackend::default()
                         .is_xai_authority(),
                 };
-                serde_json::to_value(auth_meta)
+                let mut obj = serde_json::to_value(auth_meta)
                     .ok()
                     .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                if !parent_sampler_jwts.is_empty() {
+                    obj.insert(
+                        "parentSamplerJwts".into(),
+                        serde_json::Value::Object(parent_sampler_jwts.clone()),
+                    );
+                }
+                if let Some(jwt) = recovered_bearer_jwt.clone() {
+                    obj.insert(
+                        "recoveredBearerJwt".into(),
+                        serde_json::Value::String(jwt.clone()),
+                    );
+                    obj.insert(
+                        "parentSamplerJwt".into(),
+                        serde_json::Value::String(jwt),
+                    );
+                }
+                obj
             });
         AuthenticateResponse::new().meta(meta)
     }

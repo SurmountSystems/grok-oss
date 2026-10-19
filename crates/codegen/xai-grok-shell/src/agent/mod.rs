@@ -10,6 +10,7 @@ pub mod external_otel_pin;
 pub mod feedback_client;
 pub mod folder_trust;
 pub(crate) mod handlers;
+pub(crate) mod inference_override;
 pub mod init;
 pub mod media_tool_config;
 pub mod model_providers;

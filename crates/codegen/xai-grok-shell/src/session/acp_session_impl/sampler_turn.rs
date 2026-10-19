@@ -730,18 +730,21 @@ impl SessionActor {
         // Nested reconstruct must not rotate the parent CLI session. That rotation leaves the
         // spawn-time JWT as Authorization while the parent talks with the new one, which is
         // cli-chat-proxy `auth_kind=bearer` … `reason=no auth context`.
-        if use_bearer_resolver
-            && !self.startup_hints.is_subagent
+        if crate::agent::inference_override::reconstruct_installs_inherited_session_bearer_resolver(
+            use_bearer_resolver,
+        ) && !self.startup_hints.is_subagent
             && let Some(am) = self.auth_manager.as_ref()
         {
             let _ = am.auth().await;
             // SamplingClient::post stamps bearer_resolver, not the ranked api_key.
             // When limits mode is on, align that bearer to the included
             // SuperGrok period primary before the request is built.
-            if am.grok_com_config().auto_use_included_limits
-                && am.grok_com_config().preferred_method
-                    != Some(xai_grok_login::PreferredAuthMethod::ApiKey)
-            {
+            if crate::agent::inference_override::reconstruct_aligns_ranked_free_period_primary(
+                use_bearer_resolver,
+                am.grok_com_config().auto_use_included_limits,
+                am.grok_com_config().preferred_method
+                    == Some(xai_grok_login::PreferredAuthMethod::ApiKey),
+            ) {
                 use crate::auth::supergrok_identity_rank::AuthManagerRankAlign;
                 let _ = am.align_to_ranked_free_period_primary();
             }
@@ -761,16 +764,18 @@ impl SessionActor {
         };
         let mut api_key = if let Some(live) = nested_live {
             Some(live)
-        } else if use_bearer_resolver {
-            // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
-            // A session from another authority must not seed the default headers either.
-            self.auth_manager
-                .as_ref()
-                .filter(|_| ActiveAuthBackend::default().is_xai_authority())
-                .and_then(|am| am.current_wire_valid().map(|a| a.key))
-                .or_else(|| creds.api_key.clone().filter(|key| !key.is_empty()))
         } else {
-            creds.api_key.clone().filter(|key| !key.is_empty())
+            // Session gate still prefers a wire-valid AT when `[inference]` is
+            // unset. A resolved inference request keeps `creds.api_key` (the
+            // custom Bearer key) even when `use_bearer_resolver` is true for
+            // catalog NotByok on a third-party host.
+            crate::agent::inference_override::reconstruct_turn_api_key(
+                use_bearer_resolver && ActiveAuthBackend::default().is_xai_authority(),
+                self.auth_manager
+                    .as_ref()
+                    .and_then(|am| am.current_wire_valid().map(|a| a.key)),
+                creds.api_key.clone(),
+            )
         };
         if api_key.as_ref().is_none_or(|key| key.trim().is_empty()) {
             api_key = self.sampler_handle.current_api_key().await;
@@ -872,22 +877,23 @@ impl SessionActor {
             stashed_bearer_resolver: None,
             session_bearer_resolver: None,
         };
-        if use_bearer_resolver
+        let ranked_auto_home = if use_bearer_resolver
             && !self.startup_hints.is_subagent
             && let Some(am) = self.auth_manager.as_ref()
             && am.grok_com_config().auto_use_included_limits
             && am.grok_com_config().preferred_method
                 != Some(xai_grok_login::PreferredAuthMethod::ApiKey)
-            && let Some(home) = am.auth_json_path().parent()
         {
-            apply_ranked_auto_turn_credentials(
-                home,
-                &mut sampling.api_key,
-                &mut sampling.failover_api_keys,
-                &mut sampling.session_identity_key,
-            );
-        }
-        crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
+            am.auth_json_path()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        } else {
+            None
+        };
+        crate::agent::inference_override::apply_reconstruct_turn_credentials(
+            &mut sampling,
+            ranked_auto_home.as_deref(),
+        );
         if sampling
             .api_key
             .as_ref()
@@ -901,7 +907,10 @@ impl SessionActor {
                 None,
             );
         }
-        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+        if crate::agent::inference_override::reconstruct_installs_inherited_session_bearer_resolver(
+            use_bearer_resolver,
+        ) && let Some(am) = self.auth_manager.as_ref()
+        {
             sampling.bearer_resolver = Some(
                 xai_grok_login::credential_provider::InheritedSessionBearerResolver::shared(
                     am.clone(),
@@ -2373,6 +2382,12 @@ impl SessionActor {
             }
             return;
         }
+        // Client-wide `[inference]` / GROK_API_* already chose a custom host and
+        // Bearer key. Do not write a SuperGrok JWT into chat-state, and do not
+        // fall through to the BYOK config.toml JWT branch.
+        if !crate::agent::inference_override::refresh_token_applies_session_jwt(true) {
+            return;
+        }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             // Gate on the stable classifier, not `creds.auth_type`; this also heals a transient `ApiKey` flip by writing the refreshed token into `creds.api_key` below
@@ -2384,14 +2399,20 @@ impl SessionActor {
                 .map(|c| (c.model, c.base_url))
                 .unwrap_or_default();
             // Same condition as the seed guard above, so without this the re-seed puts the key back.
-            if self.auth_gate(&model_id, &base_url).active()
-                && ActiveAuthBackend::default().is_xai_authority()
-            {
+            let session_gate = self.auth_gate(&model_id, &base_url).active()
+                && ActiveAuthBackend::default().is_xai_authority();
+            if crate::agent::inference_override::refresh_token_applies_session_jwt(session_gate) {
                 match am.get_valid_token().await {
                     Ok(key) => {
-                        if creds.api_key.as_deref() != Some(&key) {
+                        if let Some(new_key) =
+                            crate::agent::inference_override::refresh_token_overwrite_chat_api_key(
+                                session_gate,
+                                creds.api_key.as_deref(),
+                                &key,
+                            )
+                        {
                             let mut creds = creds;
-                            creds.api_key = Some(key);
+                            creds.api_key = Some(new_key);
                             self.chat_state_handle.update_credentials(creds);
                         }
                         // Re-enable auth-suppressed compact; waiting for a 200 deadlocks over-window
@@ -2749,35 +2770,12 @@ mod stream_drain_tests {
     }
 }
 
-fn apply_ranked_auto_turn_credentials(
-    home: &std::path::Path,
-    api_key: &mut Option<String>,
-    failover: &mut Vec<String>,
-    session_identity: &mut Option<String>,
-) {
-    let sessions = crate::auth::load_supergrok_session_candidates(home);
-    let console = crate::auth::xai_console::load_stored_console_api_keys(
-        &crate::auth::credentials_store::CredentialsStore::at_grok_home(home),
-    )
-    .unwrap_or_default();
-    let order = crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto(
-        &sessions, &console,
-    );
-    if let Some(primary) = order.primary {
-        *api_key = Some(primary);
-    }
-    *failover = order.failover;
-    if let Some(identity) = order.session_identity_key {
-        *session_identity = Some(identity);
-    }
-}
-
 /// Hermetic: per-turn reconstruct must align to ranked included SuperGrok
 /// period primary (Business sibling) before SuperGrok dollar credits on a
 /// full personal login. No live network.
 #[cfg(test)]
 mod ranked_auto_turn_tests {
-    use super::apply_ranked_auto_turn_credentials;
+    use crate::agent::inference_override::apply_ranked_auto_turn_credentials;
     use crate::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
     use crate::auth::xai_console::add_console_api_key;
     use crate::auth::{

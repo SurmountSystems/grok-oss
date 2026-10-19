@@ -108,9 +108,10 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
 
 /// Nested spawn resolver: the parent's `AuthManager` first, then the inherited session key.
 /// `WireValidBearerResolver` alone returns `None` when `current_wire_valid` is empty while the parent JWT still lives on `ctx.auth` or the frozen sampling config. That send is `X-XAI-Token-Auth` with no `Authorization`.
+/// Fallback is interior-mutable so recoveredBearer can restamp the live parent sampler JWT without replacing the `Arc`.
 pub struct InheritedSessionBearerResolver {
     inner: WireValidBearerResolver,
-    fallback: Option<String>,
+    fallback: std::sync::Mutex<Option<String>>,
 }
 
 impl InheritedSessionBearerResolver {
@@ -121,15 +122,23 @@ impl InheritedSessionBearerResolver {
     ) -> xai_grok_sampler::SharedBearerResolver {
         Arc::new(Self {
             inner: WireValidBearerResolver(auth_manager),
-            fallback: fallback.filter(|key| !key.is_empty()),
+            fallback: std::sync::Mutex::new(fallback.filter(|key| !key.is_empty())),
         })
+    }
+
+    fn fallback_key(&self) -> Option<String> {
+        self.fallback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|key| !key.trim().is_empty())
     }
 }
 
 impl std::fmt::Debug for InheritedSessionBearerResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InheritedSessionBearerResolver")
-            .field("fallback_present", &self.fallback.is_some())
+            .field("fallback_present", &self.fallback_key().is_some())
             .finish()
     }
 }
@@ -139,9 +148,7 @@ impl xai_grok_sampler::BearerResolver for InheritedSessionBearerResolver {
         // Nested POST stamps this resolver, not SamplingConfig.api_key.
         // AuthManager recovery can mint a different token that cli-chat-proxy still rejects
         // while the parent sampler JWT still talks. That fallback must win on the wire.
-        self.fallback
-            .clone()
-            .or_else(|| self.inner.current_bearer())
+        self.fallback_key().or_else(|| self.inner.current_bearer())
     }
 
     fn prepare_for_send(
@@ -150,15 +157,23 @@ impl xai_grok_sampler::BearerResolver for InheritedSessionBearerResolver {
         // A nested refresh rotates the CLI session. Then current_bearer still
         // sends the spawn-time fallback, and cli-chat-proxy returns
         // auth_kind=bearer … reason=no auth context while the parent talks.
-        if self
-            .fallback
-            .as_ref()
-            .is_some_and(|key| !key.trim().is_empty())
-        {
+        if self.fallback_key().is_some() {
             return Box::pin(async {});
         }
         self.inner.prepare_for_send()
     }
+
+    fn restamp_inherited_fallback(&self, jwt: Option<String>) {
+        *self.fallback.lock().unwrap_or_else(|e| e.into_inner()) =
+            jwt.filter(|key| !key.trim().is_empty());
+    }
+}
+
+/// After `_meta.recoveredBearer`, restamp inherit fallback with the live parent sampler JWT.
+/// Same winner as nested spawn: `parent_sampler_handle.current_api_key()` / `live_parent_sampler_jwt`.
+/// AuthManager recovered `current_wire_valid` / `current_or_expired` is not this JWT and must not be restamped.
+pub fn recovered_bearer_inherit_jwt(parent_sampler_jwt: Option<String>) -> Option<String> {
+    parent_sampler_jwt.filter(|key| !key.trim().is_empty())
 }
 
 /// Resolves a snapshot's `deployment_id` from an enterprise deployment key.
@@ -893,6 +908,130 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("xai-grok-cli"),
             "Token-Auth stays when Authorization is the live parent JWT"
+        );
+    }
+
+    /// Operator: `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)`
+    /// `And also you don't resume after login. You just sit there as if I've done nothing, which is not useful.`
+    /// After recoveredBearer, nested POST Authorization is the recovered parent sampler JWT.
+    /// SetApiKey on SamplingConfig.api_key is not enough: stamped_headers treats the inherit resolver as the sole auth source.
+    /// Recovered AuthManager still must not win over a still-talking parent JWT (see nested_post_uses_inherited_parent_jwt_as_authorization_bearer).
+    #[test]
+    fn nested_post_after_recovered_bearer_uses_recovered_parent_sampler_jwt_as_authorization() {
+        use reqwest::header::{AUTHORIZATION, HeaderName};
+        use xai_grok_sampler::{AuthScheme, BearerResolver, SamplerConfig, SamplingClient};
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("recovered-am-token", ChronoDuration::hours(1))),
+        );
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("spawn-time-jwt".into()));
+        resolver.restamp_inherited_fallback(Some("recovered-parent-jwt".into()));
+        let mut extra_headers = indexmap::IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: Some("recovered-am-token".into()),
+            extra_headers,
+            bearer_resolver: Some(resolver),
+            auth_scheme: AuthScheme::Bearer,
+            base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+            model: "test".into(),
+            context_window: 256_000,
+            ..Default::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let headers = client.post_headers();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer recovered-parent-jwt"),
+            "after recoveredBearer, nested POST Authorization must be the recovered parent sampler JWT, not spawn-time JWT and not a recovered AuthManager token. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context). And also you don't resume after login. You just sit there as if I've done nothing, which is not useful."
+        );
+        assert_ne!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer recovered-am-token"),
+            "recovered AuthManager must not win over the recovered parent sampler JWT"
+        );
+        assert_ne!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer spawn-time-jwt"),
+            "spawn-time inherit fallback must not stay on the wire after recoveredBearer"
+        );
+        assert_eq!(
+            headers
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .and_then(|v| v.to_str().ok()),
+            Some("xai-grok-cli"),
+            "Token-Auth stays when Authorization is the recovered parent sampler JWT"
+        );
+    }
+
+    /// RecoveredBearer restamp drives `SamplerCommand::SetApiKey` on the nested sampler.
+    /// Inherit fallback starts as spawn-time-jwt; AuthManager has recovered-am-token;
+    /// SetApiKey restamps recovered-parent-jwt. Nested POST Authorization must be that JWT.
+    #[tokio::test]
+    async fn nested_post_after_set_api_key_uses_recovered_parent_sampler_jwt_as_authorization() {
+        use reqwest::header::{AUTHORIZATION, HeaderName};
+        use xai_grok_sampler::{AuthScheme, SamplerActor, SamplerConfig, SamplingClient};
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("recovered-am-token", ChronoDuration::hours(1))),
+        );
+        let resolver = InheritedSessionBearerResolver::shared(mgr, Some("spawn-time-jwt".into()));
+        let mut extra_headers = indexmap::IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: Some("recovered-am-token".into()),
+            extra_headers,
+            bearer_resolver: Some(resolver),
+            auth_scheme: AuthScheme::Bearer,
+            base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+            model: "test".into(),
+            context_window: 256_000,
+            ..Default::default()
+        };
+        let client = SamplingClient::new(cfg.clone()).expect("client should build");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = SamplerActor::spawn(cfg, Default::default(), event_tx);
+        handle.set_api_key(Some("recovered-parent-jwt".into()));
+        let flushed = handle.current_api_key().await;
+        assert_eq!(
+            flushed.as_deref(),
+            Some("recovered-parent-jwt"),
+            "SamplerCommand::SetApiKey must restamp the inherit fallback with the recovered parent sampler JWT"
+        );
+        let headers = client.post_headers();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer recovered-parent-jwt"),
+            "nested POST Authorization must be the recovered parent sampler JWT after SetApiKey, not spawn-time-jwt and not recovered-am-token. Operator live paste: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+        );
+        assert_ne!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer recovered-am-token"),
+            "recovered AuthManager must not win over the recovered parent sampler JWT"
+        );
+        assert_ne!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer spawn-time-jwt"),
+            "spawn-time inherit fallback must not stay on the wire after SetApiKey"
+        );
+        assert_eq!(
+            headers
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .and_then(|v| v.to_str().ok()),
+            Some("xai-grok-cli"),
+            "Token-Auth stays when Authorization is the recovered parent sampler JWT"
         );
     }
 
