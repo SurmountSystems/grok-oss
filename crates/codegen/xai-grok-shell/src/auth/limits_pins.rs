@@ -442,6 +442,12 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 /// next request is withheld. Personal cents stay put. A 100% printout does not
 /// withhold.
 pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::SamplerConfig) {
+    // Client-wide `[inference]` / GROK_API_* / OPENAI_* already chose a custom
+    // host and Bearer key. SuperGrok and console pin swaps must not replace
+    // that key with a stored session JWT.
+    if xai_grok_config::resolve_configured_inference().is_some() {
+        return;
+    }
     if xai_grok_sampler::withhold_model_request_when_both_refused(config) {
         return;
     }

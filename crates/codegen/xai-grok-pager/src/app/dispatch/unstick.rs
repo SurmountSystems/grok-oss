@@ -203,6 +203,8 @@ pub(super) fn dispatch_unstick_last_l1_prompt(app: &mut AppView) -> Vec<Effect> 
         prompt_id,
         images: last.images,
         images_dir,
+        recovered_bearer: false,
+        recovered_bearer_jwt: None,
     }]
 }
 

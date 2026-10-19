@@ -1439,6 +1439,7 @@ pub(crate) async fn spawn_session_actor(
     save_prompt_context(&session_info, &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
     let session_non_interactive = startup_hints.non_interactive;
+    let parent_session_id_for_handle = startup_hints.parent_session_id.clone();
     install_system_prompt(
         &mut conversation,
         &mut startup_hints.inherited_prefix_len,
@@ -2524,6 +2525,7 @@ pub(crate) async fn spawn_session_actor(
         tools_notification_handle: Some(tools_notification_handle.clone()),
         scheduler_handle: scheduler_handle_for_handle,
         sampler_handle: sampler_handle.clone(),
+        parent_session_id: parent_session_id_for_handle,
     };
     Ok((
         SessionInitResult {

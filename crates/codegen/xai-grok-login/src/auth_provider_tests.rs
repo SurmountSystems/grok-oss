@@ -746,6 +746,8 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         "GROK_AUTH",
         "GROK_AUTH_PATH",
         "XAI_API_KEY",
+        "GROK_API_KEY",
+        "OPENAI_API_KEY",
         "GROK_DEPLOYMENT_KEY",
         "GROK_CODE_XAI_API_KEY",
         "GROK_EXTRA_AUTH_KEY",

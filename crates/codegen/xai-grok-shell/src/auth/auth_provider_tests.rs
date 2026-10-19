@@ -768,11 +768,13 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
     // The credentials a BYOK helper must never inherit. Editing this list is the
     // audit checkpoint: it must equal the production scrub const.
     const EXPECTED: &[&str] = &[
-        "XAI_API_KEY",
-        "GROK_CODE_XAI_API_KEY",
         "GROK_AUTH",
         "GROK_AUTH_PATH",
+        "XAI_API_KEY",
+        "GROK_API_KEY",
+        "OPENAI_API_KEY",
         "GROK_DEPLOYMENT_KEY",
+        "GROK_CODE_XAI_API_KEY",
         "GROK_EXTRA_AUTH_KEY",
         "GROK_TRACE_UPLOAD_CREDENTIALS_FILE",
         "OTEL_EXPORTER_OTLP_HEADERS",

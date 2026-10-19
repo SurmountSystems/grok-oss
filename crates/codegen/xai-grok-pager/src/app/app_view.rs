@@ -335,6 +335,26 @@ pub enum AuthMode {
     /// RFC 8628 device flow: device code and copyable URL, no paste box.
     Device,
 }
+/// Named wait for the Connecting... splash (`AuthMode::Pending` with no URL).
+/// Last-session restore and a hung `x.ai/auth/get_url` must not keep this splash past this budget.
+pub(crate) const CONNECTING_SPLASH_WAIT: Duration =
+    xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT;
+/// Operator-facing copy when that splash wait ends without a URL or AuthComplete.
+pub(crate) const CONNECTING_SPLASH_TIMEOUT_ERROR: &str =
+    "Login did not start. Press l to try again.";
+impl AuthState {
+    /// True while the welcome screen paints `Connecting...` (pending mode, no auth URL yet).
+    pub(crate) fn is_connecting_splash(&self) -> bool {
+        matches!(
+            self,
+            Self::Authenticating {
+                mode: AuthMode::Pending,
+                auth_url: None,
+                ..
+            }
+        )
+    }
+}
 /// Folder-trust state for the welcome screen.
 /// Mirrors [`AuthState`]: a welcome sub-state that drives the "Do you trust the contents of this directory?" question.
 /// When the feature flag is off `decide` returns trusted, so this is always [`TrustState::Done`].

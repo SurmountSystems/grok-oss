@@ -101,6 +101,12 @@ impl SamplerHandle {
         });
     }
 
+    /// Nested resume after login: restamp the inherit resolver fallback with the recovered parent sampler JWT.
+    /// Writing `SamplerConfig.api_key` alone is not enough: nested POST Authorization comes from the resolver.
+    pub fn set_api_key(&self, api_key: Option<String>) {
+        let _ = self.cmd_tx.send(SamplerCommand::SetApiKey { api_key });
+    }
+
     /// Query whether a request is still in flight.
     /// Returns `false` for unknown / finished / cancelled ids.
     pub async fn is_active(&self, request_id: RequestId) -> bool {

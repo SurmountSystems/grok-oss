@@ -139,17 +139,11 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-/// Awaits the auth URL from the oneshot channel (blocks until ready).
+/// Awaits the auth URL from the oneshot channel, bounded so Connecting... cannot hang forever.
 async fn handle_get_url(agent: &MvpAgent) -> ExtResult {
     let rx = agent.interactive_auth.take_url_rx();
-    // `None` when no URL was sent (cached credentials, early error, second poll): report mode as `null` rather than mislabeling it `loopback`
-    let (auth_url, mode) = match rx {
-        Some(rx) => match rx.await {
-            Ok(info) => (Some(info.url), Some(info.mode)),
-            Err(_) => (None, None),
-        },
-        None => (None, None),
-    };
+    let (auth_url, mode) =
+        recv_auth_url_within(rx, crate::http::STARTUP_AUTH_REFRESH_TIMEOUT).await;
     to_raw_response(&serde_json::json!({
         "auth_url": auth_url,
         // `external_provider` kept for older clients; `mode` is authoritative.
@@ -158,6 +152,20 @@ async fn handle_get_url(agent: &MvpAgent) -> ExtResult {
         }),
         "mode": mode.map(|m| m.as_wire_str()),
     }))
+}
+
+/// `None` when no URL was sent (cached credentials, early error, second poll, or the wait expired).
+async fn recv_auth_url_within(
+    rx: Option<tokio::sync::oneshot::Receiver<xai_grok_login::AuthUrlInfo>>,
+    wait: std::time::Duration,
+) -> (Option<String>, Option<xai_grok_login::AuthUrlMode>) {
+    let Some(rx) = rx else {
+        return (None, None);
+    };
+    match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(info)) => (Some(info.url), Some(info.mode)),
+        _ => (None, None),
+    }
 }
 
 async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -195,7 +203,7 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 /// Returns the updated auth response with gate info so the pager can refresh the gate state.
 async fn handle_check_subscription(agent: &MvpAgent) -> ExtResult {
     agent.retry_subscription_check().await;
-    let response = agent.auth_response_with_meta();
+    let response = agent.auth_response_with_meta().await;
     to_raw_response(&serde_json::json!({
         "authenticated": response.meta.is_some(),
         "meta": response.meta,
@@ -270,4 +278,52 @@ fn handle_info(agent: &MvpAgent) -> ExtResult {
             .map(|a| a.coding_data_retention_opt_out)
             .unwrap_or_else(xai_grok_login::default_coding_data_retention_opt_out),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_login::{AuthUrlInfo, AuthUrlMode};
+
+    #[tokio::test]
+    async fn recv_auth_url_times_out_when_oneshot_never_fires() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<AuthUrlInfo>();
+        let wait = std::time::Duration::from_millis(20);
+        let started = std::time::Instant::now();
+        let (url, mode) = recv_auth_url_within(Some(rx), wait).await;
+        assert!(url.is_none());
+        assert!(mode.is_none());
+        assert!(
+            started.elapsed() >= wait,
+            "get_url must not wait forever for a URL that never arrives"
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_auth_url_returns_url_when_ready() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // send's Err is AuthUrlInfo; that type is not Debug.
+        match tx.send(AuthUrlInfo {
+            url: "https://accounts.x.ai/oauth2/device".into(),
+            mode: AuthUrlMode::Device,
+        }) {
+            Ok(()) => {}
+            Err(_) => panic!("recv_auth_url_returns_url_when_ready: oneshot receiver dropped"),
+        }
+        let (url, mode) = recv_auth_url_within(Some(rx), std::time::Duration::from_secs(1)).await;
+        assert_eq!(url.as_deref(), Some("https://accounts.x.ai/oauth2/device"));
+        assert_eq!(mode, Some(AuthUrlMode::Device));
+    }
+
+    #[tokio::test]
+    async fn recv_auth_url_none_receiver_is_immediate_miss() {
+        let started = std::time::Instant::now();
+        let (url, mode) = recv_auth_url_within(None, std::time::Duration::from_secs(30)).await;
+        assert!(url.is_none());
+        assert!(mode.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "no receiver must not wait the splash budget"
+        );
+    }
 }

@@ -1736,28 +1736,36 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 
 ### Packaging and build
 
-- [x] **syntect path patch drops dump-load bincode (RUSTSEC-2025-0141).**
-  Workspace `[patch.crates-io]` is `third_party/syntect` (5.3.0). `parsing`
-  does not enable dump-load/dump-create. yaml-load uses yaml-rust2. Markdown
-  ships `.sublime-syntax` files and yaml-loads them. two-face dump binaries
-  are gone. Named tests stay:
+- [x] **syntect git pin 1932e0e; yaml-load is crate yaml-rust2; lock still has yaml-rust (2026-10-18).**
+  Workspace `[patch.crates-io]` pins `syntect` to official git rev
+  `1932e0ebb201b78a4e0f3afb31ca453246a3ce37` (syntect
+  [PR #602](https://github.com/trishume/syntect/pull/602) merge, accessed:
+  2026-10-18). That rev is still version 5.3.0, dump structs still 5.3.0
+  (two-face 0.4.5 compatible), and yaml-load uses
+  `yaml-rust = { package = "yaml-rust2", version = "0.10.4", optional = true,
+  default-features = false }`. Not a grok-oss path copy. Workspace
+  `syntect = { version = "5.3", default-features = false, features = ["default-onig"] }`
+  stays. Workspace `Cargo.lock` still has `name = "yaml-rust"` 0.4.5
+  ([RUSTSEC-2024-0320](https://rustsec.org/advisories/RUSTSEC-2024-0320.html),
+  accessed: 2026-10-18) until a permitted host runs `cargo update -p syntect`
+  against menhera-cooldown. Do not claim the yaml-rust row is dropped while
+  the lock still has it. Optional `bincode` 1.0 remains
+  ([RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html),
+  accessed: 2026-10-18). paste, smartstring, and bincode stay remaining
+  (parents have no drop; no ignore; no vendor). GitHub syntect HEAD is not
+  dump-format compatible with two-face 0.4.5. Do not path-vendor
+  `third_party/syntect`. Do not `cargo audit --ignore`. Named tests stay:
   `highlight_lines_for_fence_info_still_accepts_rust_token`,
   `highlight_lines_for_fence_info_resolves_citation_path_to_rust`,
-  `highlight_lines_for_token_json_from_bundled_syntax`. Advisory:
-  [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html)
-  (accessed: 2026-08-27).
-- [x] **async-openai path patch keeps `ReasoningEffort::Max` without `backoff`.**
-  Workspace `[patch.crates-io]` is `third_party/async-openai` (0.33.1 plus
-  Max from our-forks rev `95b52ebdedf42143083cf3d6f0e0be7c84e9c808`).
-  crates.io 0.41 dropped Max. Named tests stay:
+  grok-nix-helper `justfile_contracts`
+  `workspace_manifest_patches_syntect_to_dump_compatible_git_rev`.
+- [x] **async-openai is crates.io 0.42.1; backoff/instant are gone (reconciled 2026-10-18).**
+  Workspace `async-openai = { version = "0.42.1", features = ["responses"] }`.
+  There is no `[patch.crates-io]` path copy. Do not path-vendor
+  `third_party/async-openai`. Named tests stay:
   `test_chat_completion_request_carries_reasoning_effort_top_level`,
   `xai-grok-sampling-types` Responses/messages effort maps, pager
-  `effort_levels`. Retry 429 / 5xx uses `tokio::time`, not `backoff` 0.4
-  ([RUSTSEC-2025-0012](https://rustsec.org/advisories/RUSTSEC-2025-0012.html),
-  accessed: 2026-08-27) / `instant`
-  ([RUSTSEC-2024-0384](https://rustsec.org/advisories/RUSTSEC-2024-0384.html),
-  accessed: 2026-08-27). Not a workspace member. Operator can later push
-  this tree to our-forks and switch the patch back to git+rev.
+  `effort_levels`.
 - [x] **AUR** sources under `packaging/aur/`
 - [x] **Nix flake**: `nix build .#grok-oss`, dev shells (human packaging, not
   GHA release artifacts). `flake.nix` and `flake/` are in `FORK_PATHS`.
@@ -1833,27 +1841,20 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `workspace_root_members_include_cargo_mem_guard_and_grok_nix_helper`,
   `workspace_quality_deps_cargo_check_stays_locked`,
   `workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests`.
-- [x] **Vendored bm25 uses rustc-hash, not fxhash (pinned 2026-08-27).**
-  crates.io `bm25` 2.3.2 depends on unmaintained `fxhash` 0.2.1
-  ([RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057.html),
-  accessed: 2026-08-27). There is no published bm25 bump. Workspace
-  `[patch.crates-io]` points `bm25` at [`third_party/bm25`](third_party/bm25)
-  (library-only 2.3.2, token ids via `rustc-hash`). Shell tool-search
-  named tests stay. Do not `cargo audit --ignore RUSTSEC-2025-0057`.
-  Named test: grok-nix-helper `justfile_contracts`
-  `workspace_lockfile_has_no_unmaintained_fxhash`.
-- [x] **Vendored rhai uses compact_str, not smartstring (pinned 2026-08-27).**
-  crates.io `rhai` 1.25.1 and 1.26.0 depend on unmaintained `smartstring`
-  1.0.1
+- [x] **fxhash is gone from the lock without a bm25 path vendor (reconciled 2026-10-18).**
+  Shell search uses in-tree `search_okapi_bm25`. Do not path-vendor
+  `third_party/bm25`. Do not `cargo audit --ignore RUSTSEC-2025-0057`.
+- [x] **rhai stays crates.io; smartstring remains (reconciled 2026-10-18).**
+  Lock `rhai` 1.26.1 still depends on unmaintained `smartstring` 1.0.1
   ([RUSTSEC-2026-0249](https://rustsec.org/advisories/RUSTSEC-2026-0249.html),
-  accessed: 2026-08-27). The menhera 10-day cooldown index has 1.25.1;
-  1.26.0 does not drop smartstring. Workspace `[patch.crates-io]` and
-  workspace `rhai` point at [`third_party/rhai`](third_party/rhai)
-  (library-only 1.25.1 from the cooldown cache, `SmartString` aliases
-  `compact_str::CompactString`). Not a workspace member. xai-workflow
-  named tests stay. Do not `cargo audit --ignore RUSTSEC-2026-0249`.
-  Named test: grok-nix-helper `justfile_contracts`
-  `workspace_lockfile_has_no_unmaintained_smartstring`.
+  accessed: 2026-10-18). Official rhai master (`version = "1.27.0"`)
+  still requires `smartstring = { version = "1.0.0", default-features = false }`.
+  `compact_str` is an optional extra feature, not a drop of that crate.
+  Do not path-vendor `third_party/rhai`. Do not `cargo audit --ignore
+  RUSTSEC-2026-0249`. Named test grok-nix-helper `justfile_contracts`
+  `workspace_lockfile_has_no_unmaintained_smartstring` asserts the
+  workspace must not path-vendor rhai. It does not assert `smartstring`
+  is absent from the lock.
 - [x] **Yanked aes / chacha20 / spin are gone from the lockfile (pinned 2026-08-27).**
   `cargo audit` yanked rows were `aes` 0.9.0, `chacha20` 0.10.0, `spin`
   0.9.8 and 0.10.0. Delayed-index bumps: `aes` 0.9.2 (pdf_oxide `aes = "0.9"`),
@@ -1870,23 +1871,29 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `cargo update` against crates.io to skip the cooldown. Named test:
   grok-nix-helper `justfile_contracts`
   `workspace_lockfile_has_no_yanked_aes_chacha20_spin`.
-- [x] **`aws-sdk-s3` / `lru` bump is deferred to fargo (pinned 2026-08-27).**
-  Operator order: do not bump `aws-sdk-s3` 1.141.0 to 1.144.0 in this
-  grok-oss wave. Remaining `lru` 0.16.4 (`RUSTSEC-2026-0253`) is not
-  forgotten. Resume in fargo. The delayed crate index still tops at
-  1.142.0. Do not fetch crates.io to skip that wait. fargo is not
-  specified in this tree. Dual-pin: `AGENTS.md` hard constraint 20;
-  `RESIDUAL.md` Open cargo-audit.
-- [x] **fargo must unwind grok-oss path vendoring (pinned 2026-08-27).**
-  Operator does not want grok-oss to vendor crates. Audit-wave
-  `[patch.crates-io]` path copies under `third_party/` (async-openai,
-  syntect, bm25, rhai, pdf_oxide, ttf-parser) are temporary. `chacha20`
-  is a git tag pin, not a path copy.
-  fargo replaces each with a delayed-index bump, a Surmount git fork
-  that later enters that index, or dropping the parent. Do not add more
-  path vendoring. Older mermaid/dagre copies in `third_party/` are a
-  separate history. Dual-pin: `AGENTS.md` hard constraint 21;
-  `RESIDUAL.md` Open fargo unwind.
+- [x] **`aws-sdk-s3` 1.152.0 / `lru` 0.18.5 are in this lock (reconciled 2026-10-18).**
+  `Cargo.lock` has `aws-sdk-s3` 1.152.0 and `lru` 0.18.5 only. There is
+  no `lru` 0.16.4 and no `aws-sdk-s3` 1.141.0. `lru` 0.18.5 is in the
+  patched range for
+  [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html)
+  (`>=0.18.2`, accessed: 2026-10-18). The 2026-08-27 fargo deferral of
+  1.141.0 / 0.16.4 is no longer the lock state. Remaining unmaintained
+  lock rows are `bincode` 1.3.3, `paste` 1.0.15, `smartstring` 1.0.1,
+  and `yaml-rust` 0.4.5. Cargo.toml now pins syntect git rev 1932e0e so
+  yaml-load is crate yaml-rust2. The lock still has `name = "yaml-rust"`
+  until a permitted host runs `cargo update -p syntect`. Do not claim that
+  row is dropped while the lock still has it. paste, smartstring, and
+  bincode stay remaining (parents have no drop; no ignore; no vendor).
+  Do not fetch crates.io to skip menhera-cooldown.
+  Dual-pin: `RESIDUAL.md` Open cargo-audit.
+- [x] **Do not add grok-oss path vendoring (pinned 2026-08-27; path copies gone).**
+  Audit-wave `[patch.crates-io]` path copies under `third_party/`
+  (async-openai, syntect, bm25, rhai, pdf_oxide, ttf-parser) were
+  deleted. `chacha20`, `rustls`, and `syntect` are official git pins, not path
+  copies. Helper `workspace_must_not_path_vendor_audit_crates` forbids
+  those paths returning. Do not add more path vendoring. Older
+  mermaid/dagre copies in `third_party/` are a separate history.
+  Dual-pin: host `AGENTS.md` hard constraint 21.
 - [x] **Test dependencies are supply chain (pinned 2026-08-27).** A
   vulnerability in `[dev-dependencies]`, test JWT minting, or an unused
   test crate is still in the developer lockfile and still in `build.rs`

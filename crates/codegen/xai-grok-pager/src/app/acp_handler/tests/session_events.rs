@@ -833,6 +833,40 @@
         assert_eq!(count_reauth_required(&scrollback), 0);
     }
 
+    /// Operator: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+    /// "And also you don't resume after login. You just sit there as if I've done nothing, which is not useful."
+    /// Nested bearer 401 must keep the parent in-flight prompt so login can resume.
+    #[test]
+    fn apply_retry_state_nested_bearer_no_auth_context_does_not_leave_parent_sitting_idle() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.in_flight_prompt = Some(InFlightPrompt {
+            text: "parent still talking".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(7),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            session.in_flight_prompt.is_some(),
+            "nested bearer+xai-grok-cli+no auth context 401 must not leave the parent sitting idle"
+        );
+        assert_eq!(
+            session.in_flight_prompt.as_ref().map(|p| p.text.as_str()),
+            Some("parent still talking")
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
+    }
+
     /// Operator: "This is a fucking lie btw: Re-authenticated. Resuming nested work…"
     /// A nested retry that still 401s with auth_kind=bearer plus reason=no auth context
     /// must strip that success sentence and keep the 401 visible.

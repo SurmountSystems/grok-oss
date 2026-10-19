@@ -3034,6 +3034,52 @@ mod tests {
     }
 
     #[test]
+    fn pending_auth_mode_paints_connecting_ellipsis() {
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_welcome_authenticating(
+            area,
+            &mut buf,
+            &theme,
+            logo_line_count(area.height),
+            None,
+            AuthMode::Pending,
+            "",
+            0,
+            None,
+            false,
+        );
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Connecting..."),
+            "AuthMode::Pending must paint Connecting..., got:\n{text}"
+        );
+        assert!(
+            text.contains("ctrl+q"),
+            "Connecting... splash must keep quit, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn connecting_splash_timeout_error_does_not_paint_connecting_ellipsis() {
+        let auth = AuthState::Pending {
+            error: Some(crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR.to_string()),
+        };
+        let trust = TrustState::Done;
+        let params = render_params(&auth, &trust, None);
+        let text = render_done_text(&params);
+        assert!(
+            !text.contains("Connecting..."),
+            "a real auth error must leave Connecting..., got:\n{text}"
+        );
+        assert!(
+            text.contains("Login did not start"),
+            "must show the auth error, got:\n{text}"
+        );
+    }
+
+    #[test]
     fn authenticating_welcome_returns_paired_overlay_clear() {
         let _guard = crate::terminal::image::set_protocol_for_test(
             crate::terminal::image::GraphicsProtocol::Kitty,

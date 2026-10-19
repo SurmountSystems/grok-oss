@@ -2951,6 +2951,43 @@ fn revise_send_success_commits_review_after_gates() {
     );
 }
 
+/// Operator: "Images still aren't sent to plans."
+#[test]
+fn revise_plan_sends_pasted_image_as_content_block() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    install_post_turn_review(&mut app, id);
+
+    assert!(
+        agent_ref(&app, id).prompt.images.is_empty(),
+        "composer chips stay empty; the send must not depend on insert_image"
+    );
+
+    let effects = dispatch(
+        Action::RevisePlan {
+            text: "add a rollback".into(),
+            images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+        },
+        &mut app,
+    );
+    let sent_image = effects.iter().any(|e| match e {
+        Effect::SendPromptBlocks { blocks, .. } | Effect::SendPromptNow { blocks, .. } => blocks
+            .iter()
+            .any(|b| matches!(b, acp::ContentBlock::Image(_))),
+        Effect::SendInterject {
+            blocks: Some(blocks),
+            ..
+        } => blocks
+            .iter()
+            .any(|b| matches!(b, acp::ContentBlock::Image(_))),
+        _ => false,
+    });
+    assert!(
+        sent_image,
+        "Images still aren't sent to plans. effects = {effects:?}"
+    );
+}
+
 #[test]
 fn published_cycle_leave_abandons_and_blocks_approve() {
     let mut app = test_app_with_agent();

@@ -447,6 +447,27 @@ pub(super) fn handle_session_notification_with_origin(
             };
             if nested_missing_auth {
                 agent.nested_resume_prompt_ids.clear();
+                let message = match &retry {
+                    xai_grok_shell::extensions::notification::RetryState::Failed {
+                        message,
+                        ..
+                    } => message.as_str(),
+                    xai_grok_shell::extensions::notification::RetryState::Exhausted {
+                        reason,
+                        ..
+                    } => reason.as_str(),
+                    _ => "",
+                };
+                // Stamp only the L2 whose session_id emitted this 401. Child
+                // RetryState is handled in handle_child_session_notification.
+                // Stamping every unfinished depth-1 row made AuthComplete
+                // resume L2s that never 401'd.
+                if let Some(info) = agent.subagent_sessions.get_mut(root_session_id) {
+                    let status = info.status.as_deref().or(info.attempt.status.as_deref());
+                    if !matches!(status, Some("completed") | Some("cancelled")) {
+                        info.attempt.error = Some(std::sync::Arc::from(message));
+                    }
+                }
             }
             true
         }
@@ -1741,6 +1762,28 @@ pub(super) fn handle_child_session_notification(
             {
                 agent.close_subagent_fullscreen();
             }
+            if let XaiSessionUpdate::RetryState(retry) = &update {
+                let message = match retry {
+                    xai_grok_shell::extensions::notification::RetryState::Failed {
+                        message,
+                        ..
+                    } => Some(message.as_str()),
+                    xai_grok_shell::extensions::notification::RetryState::Exhausted {
+                        reason,
+                        ..
+                    } => Some(reason.as_str()),
+                    _ => None,
+                };
+                if let Some(message) = message.filter(|m| {
+                    xai_grok_shell::extensions::notification::is_nested_missing_auth_context(m)
+                }) && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
+                {
+                    let status = info.status.as_deref().or(info.attempt.status.as_deref());
+                    if !matches!(status, Some("completed") | Some("cancelled")) {
+                        info.attempt.error = Some(std::sync::Arc::from(message));
+                    }
+                }
+            }
             let mut changed = false;
             if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
                 changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
@@ -2494,6 +2537,7 @@ pub(super) fn apply_retry_state_with_nested(
 ) {
     let mut is_credit_limit = false;
     let mut is_reauth = false;
+    let mut nested_missing_auth = false;
     use xai_grok_shell::extensions::notification::RetryState;
     match retry {
         RetryState::Retrying {
@@ -2542,6 +2586,7 @@ pub(super) fn apply_retry_state_with_nested(
         } => {
             if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(reason) {
                 crate::app::dispatch::strip_resuming_nested_work_copy(scrollback);
+                nested_missing_auth = true;
             }
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
@@ -2589,6 +2634,7 @@ pub(super) fn apply_retry_state_with_nested(
         } => {
             if xai_grok_shell::extensions::notification::is_nested_missing_auth_context(message) {
                 crate::app::dispatch::strip_resuming_nested_work_copy(scrollback);
+                nested_missing_auth = true;
             }
             session.set_retry_activity(None);
             let wire = crate::app::error_display::WireErrorType::parse(Some(error_type.as_str()));
@@ -2643,7 +2689,7 @@ pub(super) fn apply_retry_state_with_nested(
                 .map(|m| m.0.to_string())
                 .unwrap_or_default(),
         });
-    } else if !is_reauth {
+    } else if !is_reauth && !nested_missing_auth {
         session.in_flight_prompt = None;
     }
 }

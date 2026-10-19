@@ -311,6 +311,11 @@ pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
+
+    /// Nested recoveredBearer: replace the inherit fallback with the live parent sampler JWT.
+    /// `SetApiKey` on `SamplerConfig.api_key` is not enough: [`crate::SamplingClient`] treats the resolver as the sole auth source.
+    /// Default: no-op (`WireValidBearerResolver` and static test resolvers ignore it).
+    fn restamp_inherited_fallback(&self, _jwt: Option<String>) {}
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;

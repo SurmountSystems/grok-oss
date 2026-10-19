@@ -2110,8 +2110,13 @@ impl MvpAgent {
                 &model.info().base_url,
                 credentials.api_key.as_deref(),
             );
+        let keep_inference_key =
+            crate::agent::inference_override::inference_request_keeps_resolved_api_key(
+                credentials.api_key.as_deref(),
+            );
         if prefers_oidc
             && !keep_openrouter_key
+            && !keep_inference_key
             && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
             && credentials.failover_api_keys.is_empty()
@@ -2119,6 +2124,7 @@ impl MvpAgent {
             // OIDC pin with only a static key and no dual-auth failover:
             // force session identity (historical exclusive behavior).
             // A resolved OpenRouter key stays. That host does not take an xAI session.
+            // A resolved client-wide inference key stays the same way.
             credentials.api_key = None;
             credentials.auth_type = xai_chat_state::AuthType::SessionToken;
         }
@@ -2131,6 +2137,7 @@ impl MvpAgent {
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
             && !model.has_own_credentials()
             && !keep_openrouter_key
+            && !keep_inference_key
             && is_session_based_auth
         {
             tracing::info!(

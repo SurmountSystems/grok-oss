@@ -709,6 +709,8 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// Connecting... splash wait ended with no auth URL. Show a real auth error; do not wait on last-session restore.
+    ConnectingSplashTimeout,
     /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit the app or lose the open session.
     CancelLogin,
@@ -1719,6 +1721,12 @@ pub enum Effect {
         /// WAL `images/` file ids. Sent as resource links, never data URLs.
         images: Vec<xai_grok_shell::session::prompt_wal::PromptWalImage>,
         images_dir: Option<std::path::PathBuf>,
+        /// After AuthComplete, nested POST must use the recovered parent sampler JWT.
+        recovered_bearer: bool,
+        /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`).
+        /// Nested `_meta.recoveredBearerJwt` when present. None still sends
+        /// recoveredBearer true so nested can resolve the resident parent JWT.
+        recovered_bearer_jwt: Option<String>,
     },
     /// `session/prompt` with `_meta.executePlan` after a post-turn plan approve
     ExecutePlan {

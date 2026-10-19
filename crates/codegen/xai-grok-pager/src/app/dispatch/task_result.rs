@@ -1,7 +1,7 @@
 //! Async task-result application: routes task results into state.
 use super::auth::{
     ensure_login_method, handle_auth_complete, handle_auth_url_ready, handle_mcp_auth_trigger_done,
-    handle_mcp_setup_submit_done,
+    handle_mcp_setup_submit_done, retry_nested_resume_after_missing_auth,
 };
 use super::billing::{
     PAYWALL_AUTO_CHECK_TIMEOUT, apply_auto_topup, handle_billing_fetched,
@@ -854,8 +854,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => {
-            let effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
+            let nested_missing = result.as_ref().err().is_some_and(|error| {
+                xai_grok_shell::extensions::notification::is_nested_missing_auth_context(error)
+            });
+            let had_nested_resume = prompt_id.as_ref().is_some_and(|pid| {
+                app.agents
+                    .get(&agent_id)
+                    .is_some_and(|agent| agent.nested_resume_prompt_ids.iter().any(|id| id == pid))
+            });
+            let mut effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
             app.refresh_status_line_for(agent_id);
+            if nested_missing && had_nested_resume {
+                if let Some(agent) = app.agents.get_mut(&agent_id) {
+                    effects.extend(retry_nested_resume_after_missing_auth(agent));
+                }
+            }
             effects
         }
         TaskResult::SendPromptNowFailed {

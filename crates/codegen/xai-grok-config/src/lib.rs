@@ -29,6 +29,7 @@ mod endpoints;
 mod env_overlay;
 pub mod fs_atomic;
 pub mod global_hook_sources;
+mod inference;
 mod loader;
 mod macos_managed;
 mod managed_cache;
@@ -72,6 +73,13 @@ pub use distribution::{Capability, Distribution};
 pub use endpoints::{CLI_CHAT_PROXY_BASE_URL_DEFAULT, EndpointsConfig};
 pub use env_overlay::{
     GROK_CONFIG_ENV, GROK_CONFIG_PATH_ENV, OverlaySource, ResolvedOverlay, resolved_env_overlay,
+};
+pub use inference::{
+    GROK_API_BASE_ENV, GROK_API_KEY_ENV, InferenceChatCompletionsRequest, InferenceFileConfig,
+    OPENAI_API_KEY_ENV, OPENAI_BASE_URL_ENV, ResolvedInference, bearer_authorization,
+    chat_completions_url, inference_chat_completions_request, normalize_inference_base,
+    overlay_inference_endpoint_and_key, parse_inference_table, resolve_configured_inference,
+    resolve_inference,
 };
 
 #[cfg(unix)]

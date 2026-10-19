@@ -120,6 +120,17 @@ impl SamplerActor {
             SamplerCommand::UpdateConfig { config } => {
                 self.state.update_config(*config);
             }
+            SamplerCommand::SetApiKey { api_key } => {
+                // Nested inherit resolver is the sole Authorization source.
+                // Writing api_key alone leaves the spawn-time fallback on the wire.
+                if let Some(resolver) = &self.state.config.bearer_resolver {
+                    resolver.restamp_inherited_fallback(api_key.clone());
+                }
+                if let Some(resolver) = &self.state.config.session_bearer_resolver {
+                    resolver.restamp_inherited_fallback(api_key.clone());
+                }
+                self.state.config.api_key = api_key;
+            }
             SamplerCommand::IsActive { request_id, reply } => {
                 let _ = reply.send(self.state.active_requests.contains_key(&request_id));
             }

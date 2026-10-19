@@ -263,6 +263,7 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     let mut retry_effects = Vec::new();
     let mut page_flips = Vec::new();
     for agent in app.agents.values_mut() {
+        agent.nested_auth_resume_retries = 0;
         strip_trailing_auth_error_blocks(agent);
         if let Some(prompt) = take_prompt_to_retry_after_auth(agent) {
             agent.scrollback.push_block(RenderBlock::system(
@@ -281,17 +282,21 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     retry_effects
 }
 
-/// Nested L2s that died on 401 stay failed unless AuthComplete resumes them.
+/// Nested L2s that 401'd stay stuck unless AuthComplete resumes them.
 /// Completed and cancelled rows stay put. L3s stay with their L2.
+/// Resume the L2 that 401'd (`attempt.error` missing-auth), finished or still
+/// running. Do not resume every finished depth-1 row.
 fn nested_l2_needs_auth_resume(info: &crate::app::subagent::SubagentInfo) -> bool {
     if info.attempt.depth.is_some_and(|depth| depth != 1) {
         return false;
     }
-    if !info.finished {
+    let status = info.status.as_deref().or(info.attempt.status.as_deref());
+    if matches!(status, Some("completed") | Some("cancelled")) {
         return false;
     }
-    let status = info.status.as_deref().or(info.attempt.status.as_deref());
-    !matches!(status, Some("completed") | Some("cancelled"))
+    info.attempt.error.as_deref().is_some_and(|error| {
+        xai_grok_shell::extensions::notification::is_nested_missing_auth_context(error)
+    })
 }
 
 /// Operator 2026-10-17: this sentence is true only after a nested POST with the
@@ -394,6 +399,12 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
         info.status = None;
         info.attempt.status = None;
     }
+    let recovered_bearer_jwt = agent
+        .parent_sampler_jwt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let mut effects = Vec::new();
     for (child_sid, text) in resumes {
         if text.is_empty() {
@@ -408,9 +419,39 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
             prompt_id,
             images: Vec::new(),
             images_dir: None,
+            recovered_bearer: true,
+            recovered_bearer_jwt: recovered_bearer_jwt.clone(),
         });
     }
+    if !effects.is_empty() && agent.session.state.is_idle() {
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    }
     effects
+}
+
+/// Nested bearer + xai-grok-cli + no auth context 401 after AuthComplete.
+/// Resend the interrupted nested prompt with recovered Bearer once. Do not sit idle.
+pub(super) fn retry_nested_resume_after_missing_auth(agent: &mut AgentView) -> Vec<Effect> {
+    if agent.nested_auth_resume_retries >= 1 {
+        return vec![];
+    }
+    agent.nested_auth_resume_retries = agent.nested_auth_resume_retries.saturating_add(1);
+    for info in agent.subagent_sessions.values_mut() {
+        if info.attempt.depth.is_some_and(|depth| depth != 1) {
+            continue;
+        }
+        let status = info.status.as_deref().or(info.attempt.status.as_deref());
+        if matches!(status, Some("completed") | Some("cancelled")) {
+            continue;
+        }
+        if info.prompt.as_deref().is_none_or(str::is_empty) {
+            continue;
+        }
+        info.finished = true;
+        info.status = Some("failed".into());
+        info.attempt.status = Some("failed".into());
+    }
+    enqueue_nested_resume_after_auth(agent)
 }
 
 /// Start an interactive login flow. Triggered by pressing 'l' on the welcome screen or by the `/login` slash command.
@@ -493,6 +534,28 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     }
 }
 
+/// Connecting... splash wait ended: show a real auth error. Last-session restore stays deferred.
+pub(super) fn dispatch_connecting_splash_timeout(app: &mut AppView) -> Vec<Effect> {
+    if !app.auth_state.is_connecting_splash() {
+        return vec![];
+    }
+    let cancel_seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => Some(*request_seq),
+        _ => None,
+    };
+    abort_prior_auth(app);
+    app.next_auth_request_seq += 1;
+    app.auth_state = AuthState::Pending {
+        error: Some(crate::app::app_view::CONNECTING_SPLASH_TIMEOUT_ERROR.to_string()),
+    };
+    app.auth_show_raw_url = false;
+    app.auth_code_input.reset();
+    match cancel_seq {
+        Some(request_seq) => vec![Effect::CancelAuth { request_seq }],
+        None => vec![],
+    }
+}
+
 /// User submitted a manually-pasted auth token in loopback mode.
 pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<Effect> {
     let request_seq = match &app.auth_state {
@@ -504,6 +567,42 @@ pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<
 }
 
 // TaskResult handlers.
+
+/// Live parent sampler JWTs from AuthenticateResponse `_meta`.
+/// Nested recoveredBearer uses these, not AuthManager.
+fn apply_recovered_parent_sampler_jwts(app: &mut AppView, meta: Option<&serde_json::Value>) {
+    let Some(obj) = meta.and_then(|v| v.as_object()) else {
+        return;
+    };
+    if let Some(map) = obj.get("parentSamplerJwts").and_then(|v| v.as_object()) {
+        for agent in app.agents.values_mut() {
+            if let Some(sid) = agent.session.session_id.as_ref()
+                && let Some(jwt) = map
+                    .get(sid.0.as_ref())
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            {
+                agent.parent_sampler_jwt = Some(jwt.to_string());
+            }
+        }
+    }
+    for key in ["recoveredBearerJwt", "parentSamplerJwt"] {
+        if let Some(jwt) = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for agent in app.agents.values_mut() {
+                if agent.parent_sampler_jwt.is_none() {
+                    agent.parent_sampler_jwt = Some(jwt.to_string());
+                }
+            }
+            break;
+        }
+    }
+}
 
 pub(super) fn handle_auth_complete(
     app: &mut AppView,
@@ -522,6 +621,7 @@ pub(super) fn handle_auth_complete(
         {
             app.apply_auth_meta(&auth_meta);
         }
+        apply_recovered_parent_sampler_jwts(app, meta.as_ref());
 
         app.auth_state = AuthState::Done;
         app.auth_show_raw_url = false;
@@ -588,6 +688,18 @@ pub(super) fn handle_auth_url_ready(
     external: bool,
     mode: Option<String>,
 ) -> Vec<Effect> {
+    let splash_miss = matches!(
+        &app.auth_state,
+        AuthState::Authenticating {
+            request_seq: current_seq,
+            mode: AuthMode::Pending,
+            auth_url: None,
+            ..
+        } if *current_seq == request_seq
+    ) && auth_url.is_none();
+    if splash_miss {
+        return dispatch_connecting_splash_timeout(app);
+    }
     if let AuthState::Authenticating {
         request_seq: current_seq,
         auth_url: current_url,
