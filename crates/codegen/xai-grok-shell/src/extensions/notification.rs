@@ -1344,9 +1344,13 @@ pub enum RetryState {
 /// Whether a terminal retry failure is a recoverable authentication error (expired/invalid credentials, 401). The user can fix those by signing in again; this drives the actionable re-auth banner.
 /// `legacy_auth` is excluded: its message carries its own migration guidance (`grok update` / `grok logout` / `grok login`), shown verbatim.
 /// `auth_transient` is excluded for the opposite reason: it is emitted only when the failure self-heals (`AuthManager::requires_manual_reauth`). Its message already says it recovers on its own, so no `/login` banner is shown.
+/// `nested_auth` is excluded: nested give-up while the parent session still talks is recoveredBearer, not Operator `/login`.
 /// Nested spawn that sent no Bearer (`auth_kind=other`, `reason=no auth context`) is an inherit defect while the parent session still talks. That must not paint `/login`. A real expired JWT is `auth_kind=bearer`.
 pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if matches!(error_type, Some("legacy_auth") | Some("auth_transient")) {
+    if matches!(
+        error_type,
+        Some("legacy_auth") | Some("auth_transient") | Some("nested_auth")
+    ) {
         return false;
     }
     if is_nested_missing_auth_context(message) {

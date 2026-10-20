@@ -1953,6 +1953,191 @@
         );
     }
 
+    const PR219_NESTED_401: &str = "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+
+    fn painted_chrome(sb: &ScrollbackState) -> String {
+        let mut out = String::new();
+        for i in 0..sb.len() {
+            match sb.get(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(ev)) => {
+                    out.push_str(&format!("{:?}", ev.event));
+                }
+                Some(RenderBlock::System(sys)) => out.push_str(&sys.text),
+                Some(other) => out.push_str(&format!("{other:?}")),
+                None => {}
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn assert_no_forbidden_nested_401_chrome(painted: &str) {
+        assert!(
+            !painted.contains("Authentication temporarily unavailable"),
+            "Operator screenshot 2026-10-19: orange Authentication temporarily unavailable must not paint while the parent still talks, got {painted}"
+        );
+        assert!(
+            !painted.contains("Try sending again in a moment"),
+            "AuthTransient action copy must not replace nested resume, got {painted}"
+        );
+        assert!(
+            !painted.contains("Logging in..."),
+            "Operator screenshot 2026-10-19: Logging in... must not paint on the nested view while the parent still talks, got {painted}"
+        );
+        assert!(
+            !painted.contains("ReAuthRequired"),
+            "nested bearer + no auth context must not tell the Operator to /login while the parent still talks, got {painted}"
+        );
+    }
+
+    /// Operator screenshot 2026-10-19: nested "Resolve PR 219 merge conflicts"
+    /// sat Waiting for the model 8m 3s / 3m 18s while the parent still talks.
+    /// Live grok-oss 1.0.45 painted orange Authentication temporarily unavailable
+    /// and Logging in... The passing child retry test seeded prompt + JWT and
+    /// skipped handle() / child_view / empty prompt. First 401 must queue
+    /// recoveredBearer from the description when prompt is still None.
+    #[test]
+    fn handle_nested_pr219_bearer_no_auth_context_401_does_not_paint_orange_or_login() {
+        use crate::acp::tracker::TurnActivity;
+        use crate::app::app_view::AuthState;
+        use crate::app::error_display::{format_retry_activity_label, RetryLabelStyle};
+
+        let mut app = make_app_with_agent("root-sess");
+        let child_sid = "cs-pr219";
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.parent_sampler_jwt = None;
+            let mut info = make_subagent_info(child_sid);
+            info.attempt.depth = Some(1);
+            info.description = std::sync::Arc::from("Resolve PR 219 merge conflicts");
+            info.prompt = None;
+            agent.subagent_sessions.insert(child_sid.into(), info);
+            let mut child = make_agent(Some(child_sid));
+            child.session.state = AgentState::TurnRunning;
+            agent.insert_test_child(child_sid.into(), Box::new(child));
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::RetryState(RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "Authentication is temporarily unavailable (often a network blip right after wake). Your session is still signed in and will recover automatically".into(),
+                    error_type: Some("auth_transient".into()),
+                }),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let child = test_subagent(agent, child_sid);
+            if let Some(TurnActivity::Retrying {
+                attempt,
+                max_retries,
+                reason,
+                error_type,
+            }) = child.session.tracker.activity()
+            {
+                let label = format_retry_activity_label(
+                    attempt,
+                    max_retries,
+                    &reason,
+                    error_type.as_deref(),
+                    RetryLabelStyle::Compact,
+                );
+                assert!(
+                    !label.contains("Authentication temporarily unavailable"),
+                    "nested Retrying must not paint the orange AuthTransient title while the parent talks, got {label}"
+                );
+            }
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "auth_transient".into(),
+                    message: PR219_NESTED_401.into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        assert!(
+            !matches!(app.auth_state, AuthState::Authenticating { .. }),
+            "nested 401 must not start login chrome while the parent still talks"
+        );
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::UnstickResendPrompt {
+                    session_id,
+                    recovered_bearer: true,
+                    text,
+                    ..
+                } if session_id.0.as_ref() == child_sid
+                    && text == "Resolve PR 219 merge conflicts"
+            )),
+            "first nested 401 must queue UnstickResendPrompt recoveredBearer from the spawn description when prompt is still None, got {:?}",
+            app.pending_effects
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "parent must keep talking"
+        );
+        assert_no_forbidden_nested_401_chrome(&painted_chrome(&agent.scrollback));
+        let child = test_subagent(agent, child_sid);
+        assert_no_forbidden_nested_401_chrome(&painted_chrome(&child.scrollback));
+    }
+
+    /// Live nested RetryState is addressed to the child session id. Overlay
+    /// hydrate can lag `subagent_sessions`. Dropping that notification left
+    /// the nested row on Waiting for the model with no recoveredBearer POST.
+    #[test]
+    fn handle_nested_pr219_401_without_child_view_still_queues_recovered_bearer() {
+        let mut app = make_app_with_agent("root-sess");
+        let child_sid = "cs-pr219-noview";
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.parent_sampler_jwt = None;
+            let mut info = make_subagent_info(child_sid);
+            info.attempt.depth = Some(1);
+            info.description = std::sync::Arc::from("Resolve PR 219 merge conflicts");
+            info.prompt = None;
+            agent.subagent_sessions.insert(child_sid.into(), info);
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "auth".into(),
+                    message: PR219_NESTED_401.into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::UnstickResendPrompt {
+                    session_id,
+                    recovered_bearer: true,
+                    ..
+                } if session_id.0.as_ref() == child_sid
+            )),
+            "child RetryState must not drop when only subagent_sessions has the row, got {:?}",
+            app.pending_effects
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_no_forbidden_nested_401_chrome(&painted_chrome(&agent.scrollback));
+    }
+
     #[test]
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));

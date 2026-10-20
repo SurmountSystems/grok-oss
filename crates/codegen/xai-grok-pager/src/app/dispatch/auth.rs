@@ -294,9 +294,29 @@ fn nested_l2_needs_auth_resume(info: &crate::app::subagent::SubagentInfo) -> boo
     if matches!(status, Some("completed") | Some("cancelled")) {
         return false;
     }
-    info.attempt.error.as_deref().is_some_and(|error| {
-        xai_grok_shell::extensions::notification::is_nested_missing_auth_context(error)
-    })
+    info.attempt
+        .error
+        .as_deref()
+        .is_some_and(nested_inherit_auth_error)
+}
+
+/// Nested inherit miss, or the AuthTransient SelfHealing copy stamped on
+/// Retrying before the Failed body carries `reason=no auth context`.
+fn nested_inherit_auth_error(error: &str) -> bool {
+    xai_grok_shell::extensions::notification::is_nested_missing_auth_context(error)
+        || error
+            .to_ascii_lowercase()
+            .contains("authentication is temporarily unavailable")
+}
+
+/// Last nested prompt, or the spawn description when meta.json prompt still lags.
+fn nested_resume_text(info: &crate::app::subagent::SubagentInfo) -> String {
+    info.prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| info.description.trim().to_string())
 }
 
 /// Operator 2026-10-17: this sentence is true only after a nested POST with the
@@ -391,10 +411,7 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
         if !nested_l2_needs_auth_resume(info) {
             continue;
         }
-        resumes.push((
-            info.child_session_id.to_string(),
-            info.prompt.as_deref().unwrap_or("").to_string(),
-        ));
+        resumes.push((info.child_session_id.to_string(), nested_resume_text(info)));
         info.finished = false;
         info.status = None;
         info.attempt.status = None;
@@ -436,8 +453,11 @@ pub(crate) fn retry_nested_resume_after_missing_auth(agent: &mut AgentView) -> V
     if agent.nested_auth_resume_retries >= 1 {
         return vec![];
     }
-    agent.nested_auth_resume_retries = agent.nested_auth_resume_retries.saturating_add(1);
-    enqueue_nested_resume_after_auth(agent)
+    let effects = enqueue_nested_resume_after_auth(agent);
+    if !effects.is_empty() {
+        agent.nested_auth_resume_retries = agent.nested_auth_resume_retries.saturating_add(1);
+    }
+    effects
 }
 
 /// Start an interactive login flow. Triggered by pressing 'l' on the welcome screen or by the `/login` slash command.

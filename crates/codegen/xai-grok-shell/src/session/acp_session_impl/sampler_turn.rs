@@ -1327,8 +1327,9 @@ impl SessionActor {
         true
     }
 
-    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer, or a nested 401 after
-    /// recovery claimed success. Stamp the live sampler JWT and resubmit.
+    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the live
+    /// sampler JWT and resubmit. A nested 401 after recovery (plain Unauthorized) resumes
+    /// with the live sampler JWT in [`Self::try_resume_nested_401_with_live_sampler_jwt`].
     /// A parent (not nested) missing-auth stamp still fails closed on the same key.
     /// Parent `auth_kind=bearer` plus `reason=no auth context` does not stamp; that 401 keeps
     /// the WebLogin and OIDC hints. Nested still stamps. Empty-Bearer parent still stamps.
@@ -1370,6 +1371,37 @@ impl SessionActor {
         self.prepare_sampler_for_turn().await;
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
             credential: xai_grok_sampling_types::SentCredential::Sent,
+            store: RecoveredStore::SessionToken,
+        })
+    }
+
+    /// Nested 401 after recovery: resume with the JWT the live sampler is talking with.
+    /// Nested skips AuthManager `try_recover_unauthorized` (Unlock/Prompt) and auth_transient.
+    async fn try_resume_nested_401_with_live_sampler_jwt(
+        &self,
+        credential: xai_grok_sampling_types::SentCredential,
+    ) -> Option<SamplerFailureRecovery> {
+        if !self.startup_hints.is_subagent {
+            return None;
+        }
+        let key = self
+            .sampler_handle
+            .current_api_key()
+            .await
+            .filter(|key| !key.trim().is_empty())?;
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            "auth recovery: nested 401, stamping live sampler JWT, retrying"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth recovery: nested 401, stamping live sampler JWT, retrying",
+            Some(self.session_info.id.0.as_ref()),
+            None,
+        );
+        self.set_chat_api_key(key).await;
+        self.prepare_sampler_for_turn().await;
+        Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
+            credential,
             store: RecoveredStore::SessionToken,
         })
     }
@@ -1709,10 +1741,23 @@ impl SessionActor {
             );
         }
 
+        // Nested 401 while the parent sampler still talks: resume with that JWT.
+        // Nested skips AuthManager try_recover_unauthorized (Unlock/Prompt).
+        if self.startup_hints.is_subagent
+            && !crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
+            && auth_recovery_eligible
+            && let Some(recovery) = self
+                .try_resume_nested_401_with_live_sampler_jwt(error.credential)
+                .await
+        {
+            return Ok(recovery);
+        }
+
         // Last-resort recovery used to short-circuit on whatever is in memory, so it reported success with the bearer the server had just rejected.
         // That bearer was resubmitted until the turn's retry budget ran out. Recovery already walks disk adoption and the authority first.
         // Missing-auth-context already tried a one-shot stamp above. Do not park it.
-        if !crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
+        if !self.startup_hints.is_subagent
+            && !crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
             && auth_recovery_eligible
             && let Some(ref am) = self.auth_manager
         {
@@ -1734,17 +1779,7 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     None,
                 );
-                let nested_live = if self.startup_hints.is_subagent {
-                    self.sampler_handle.current_api_key().await
-                } else {
-                    None
-                };
-                if let Some(key) = nested_live.filter(|key| !key.is_empty()) {
-                    self.set_chat_api_key(key).await;
-                    self.prepare_sampler_for_turn().await;
-                } else {
-                    self.prepare_sampler_for_turn().await;
-                }
+                self.prepare_sampler_for_turn().await;
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                     credential: error.credential,
                     store: RecoveredStore::SessionToken,
@@ -1965,6 +2000,10 @@ impl SessionActor {
                 // is_reauthable_failure (nested check) still skips /login and
                 // the pager retries with the live parent sampler JWT.
                 ("auth", detailed_message)
+            } else if self.startup_hints.is_subagent {
+                // Nested 401 while the parent still talks is recoveredBearer,
+                // not AuthManager Unlock / SelfHealing auth_transient chrome.
+                (error_type, detailed_message)
             } else {
                 match self.auth_manager.as_ref() {
                     Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
