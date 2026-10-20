@@ -1617,30 +1617,49 @@ impl SessionActor {
                             )
                         })
                         .collect();
-                    let running_subagents = if let Some(ref event_tx) =
+                    let (running_subagents, completed_subagents) = if let Some(ref event_tx) =
                         self.tool_context.subagent_event_tx
                     {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
                         use xai_grok_tools::implementations::grok_build::task::types::{
                             SubagentEvent, SubagentListActiveRequest,
                         };
+                        let map_summary = |s: xai_grok_tools::implementations::grok_build::task::types::ActiveSubagentSummary| {
+                            crate::session::helpers::compaction_context::RunningSubagentSummary {
+                                subagent_id: s.subagent_id,
+                                subagent_type: s.subagent_type,
+                                description: s.description,
+                                elapsed_ms: s.elapsed_ms,
+                            }
+                        };
+                        let session_id = self.session_id_string();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
                         let _ =
                             event_tx.send(SubagentEvent::ListActive(SubagentListActiveRequest {
-                                parent_session_id: self.session_id_string(),
+                                parent_session_id: session_id.clone(),
                                 respond_to: tx,
                             }));
-                        rx.await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|s| crate::session::helpers::compaction_context::RunningSubagentSummary {
-                            subagent_id: s.subagent_id,
-                            subagent_type: s.subagent_type,
-                            description: s.description,
-                            elapsed_ms: s.elapsed_ms,
-                        })
-                        .collect()
+                        let running = rx
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(map_summary)
+                            .collect();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = event_tx.send(SubagentEvent::ListCompleted(
+                            SubagentListActiveRequest {
+                                parent_session_id: session_id,
+                                respond_to: tx,
+                            },
+                        ));
+                        let completed = rx
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(map_summary)
+                            .collect();
+                        (running, completed)
                     } else {
-                        vec![]
+                        (vec![], vec![])
                     };
                     let connected_mcp_servers = {
                         use crate::session::helpers::compaction_context::CompactionServerSummary;
@@ -1751,6 +1770,7 @@ impl SessionActor {
                         CompactionInputs {
                             running_tasks,
                             running_subagents,
+                            completed_subagents,
                             agent_edited_paths: edited_paths.clone(),
                             connected_mcp_servers,
                             todos,

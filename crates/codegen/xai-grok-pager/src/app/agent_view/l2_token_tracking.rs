@@ -415,6 +415,9 @@ pub fn shown_nested_count(session_id: &str, present: Option<u64>, past: u64) -> 
 /// L2 row total: that session's shown count plus each L3 count, once.
 ///
 /// `None` when every count is absent. A missing count adds nothing.
+/// GitHub #224: all L3 tokens contribute to the L2 cost. Job cost via
+/// `model_call_cost_for_sessions` is the ledger test
+/// `l3_model_call_tokens_contribute_to_l2_cost`.
 pub fn sum_shown_counts_once(own: Option<u64>, l3_counts: &[Option<u64>]) -> Option<u64> {
     let mut total = 0u64;
     let mut any = false;
@@ -1228,6 +1231,9 @@ mod tests {
     /// An L2 Subagents row is that L2's present plus past, plus each specialist
     /// once. The same cumulative tick does not increase the total. The specialist
     /// row is that specialist only. The L1 window is not that sum.
+    /// GitHub #224: all L3 tokens contribute to that L2 cost. See FORK.md.
+    /// Job cost via `model_call_cost_for_sessions` is
+    /// `l3_model_call_tokens_contribute_to_l2_cost`.
     #[test]
     fn each_l2_row_counts_present_and_past_and_each_specialist_once() {
         xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();

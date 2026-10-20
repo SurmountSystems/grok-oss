@@ -565,6 +565,194 @@ fn clicking_a_painted_session_board_row_opens_that_task() {
     );
 }
 
+/// Prompt-focused L1: a left click on a painted session-board row opens
+/// that task as a big tasks view. Completed rows are clickable. The
+/// focused-todo test is not this miss: live L1 stays on the prompt.
+#[test]
+fn clicking_a_painted_session_board_row_on_prompt_focused_l1_opens_the_big_tasks_view() {
+    let owed = "a left click on a painted session-board row on prompt-focused L1 opens that task as a big tasks view, not a 75% popup that can fail to paint under min height. Completed rows are clickable. Leftover Tasks chrome must not steal the click.";
+    let mut agent = make_agent();
+    assert_eq!(agent.active_pane, AgentPane::Prompt, "{owed}");
+    insert_running_task(&mut agent, "bg-leftover-chrome");
+    agent.tasks.overlay.visible = true;
+    agent.tasks.overlay.focused = false;
+    let area = Rect::new(0, 0, 80, 30);
+    let _ = draw_frame(&mut agent, area);
+    let leftover_chrome: Vec<Rect> = agent
+        .tasks
+        .view_button_rects
+        .iter()
+        .chain(agent.tasks.kill_button_rects.iter())
+        .map(|(_, rect)| *rect)
+        .collect();
+    assert!(
+        !leftover_chrome.is_empty(),
+        "{owed} first frame must paint Tasks chrome so leftover steal is real"
+    );
+    agent.tasks.overlay.visible = false;
+    agent.todo.update_todos(vec![
+        TodoItem {
+            content: "l1-board-pending-row".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        },
+        TodoItem {
+            content: "l1-board-still-running".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::InProgress,
+            meta: None,
+            size: None,
+        },
+        TodoItem {
+            content: "l1-board-review-me".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        },
+    ]);
+    agent.todo.overlay.visible = true;
+    agent.todo.overlay.focused = false;
+    assert_eq!(agent.active_pane, AgentPane::Prompt, "{owed}");
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("l1-board-review-me"),
+        "{owed} painted:\n{painted}"
+    );
+    assert!(
+        !agent.todo.row_hit_rects.is_empty(),
+        "{owed} session-board rows must be hit targets"
+    );
+    assert_eq!(agent.active_pane, AgentPane::Prompt, "{owed}");
+    let leftover_on_board = leftover_chrome.into_iter().find(|rect| {
+        agent
+            .todo
+            .row_hit_rects
+            .iter()
+            .any(|(_, row)| row.contains(ratatui::layout::Position::new(rect.x, rect.y)))
+    });
+    if let Some(rect) = leftover_on_board {
+        let outcome = click_left(&mut agent, rect.x, rect.y);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{owed} leftover-chrome cell got {outcome:?}"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::KillBgTask(_))
+                    | InputOutcome::Action(Action::KillSubagent(_))
+                    | InputOutcome::Action(Action::ClearCompletedTodos)
+            ),
+            "{owed} leftover-chrome cell got {outcome:?}"
+        );
+        let viewer = agent.line_viewer.as_ref().expect(owed);
+        assert!(
+            viewer.fullscreen,
+            "{owed} leftover-chrome click must open the big view"
+        );
+        assert_eq!(
+            viewer.path.file_name().and_then(|n| n.to_str()),
+            Some("session-board.md"),
+            "{owed}"
+        );
+        agent.line_viewer = None;
+        agent.block_viewer = None;
+        agent.active_subagent = None;
+    }
+    let (column, row) = find_phrase(&buf, "l1-board-review-me").expect(owed);
+    assert!(
+        agent
+            .pane_areas
+            .todo
+            .contains(ratatui::layout::Position::new(column, row)),
+        "{owed}"
+    );
+    assert!(
+        agent.pane_areas.tasks.area() == 0
+            || !agent
+                .pane_areas
+                .tasks
+                .contains(ratatui::layout::Position::new(column, row)),
+        "{owed} the click must be the session board, not the Tasks overlay"
+    );
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::KillBgTask(_))
+                | InputOutcome::Action(Action::KillSubagent(_))
+                | InputOutcome::Action(Action::ClearCompletedTodos)
+        ),
+        "{owed} got {outcome:?}"
+    );
+    assert!(agent.block_viewer.is_none(), "{owed}");
+    assert!(agent.active_subagent.is_none(), "{owed}");
+    let viewer = agent.line_viewer.as_ref().expect(owed);
+    assert!(
+        viewer.fullscreen,
+        "{owed} opened view must be the big tasks view, not a 75% popup"
+    );
+    assert_eq!(
+        viewer.path.file_name().and_then(|n| n.to_str()),
+        Some("session-board.md"),
+        "{owed}"
+    );
+    let review = viewer.markdown_content_for_test().expect(owed);
+    assert!(
+        review.contains("l1-board-review-me"),
+        "{owed} review:\n{review}"
+    );
+    assert!(
+        review.contains("Status: completed"),
+        "{owed} review:\n{review}"
+    );
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    let popup = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|viewer| viewer.last_popup_area)
+        .expect(owed);
+    assert!(
+        popup.height >= 5,
+        "{owed} big view must paint, popup={popup:?}"
+    );
+    assert!(
+        painted.contains("l1-board-review-me"),
+        "{owed} big view must paint the row:\n{painted}"
+    );
+    agent.line_viewer = None;
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "l1-board-still-running").expect(owed);
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} in_progress click got {outcome:?}"
+    );
+    let viewer = agent.line_viewer.as_ref().expect(owed);
+    assert!(
+        viewer.fullscreen,
+        "{owed} in_progress click must open the big view"
+    );
+    let review = viewer.markdown_content_for_test().expect(owed);
+    assert!(
+        review.contains("l1-board-still-running"),
+        "{owed} in_progress review:\n{review}"
+    );
+    assert!(
+        review.contains("Status: in_progress"),
+        "{owed} in_progress review:\n{review}"
+    );
+}
+
 /// Opening an L3 shows that specialist's own context. The L1 list stays L2
 /// rows plus a live L3 count. The click does not send KillSubagent. Do not
 /// paint the L1 window as the L3 context. Do not invent a context integer.

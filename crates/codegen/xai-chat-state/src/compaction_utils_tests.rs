@@ -975,6 +975,34 @@ async fn build_stores_running_subagents() {
     assert_eq!(at(&ctx.running_subagents, 0).elapsed_ms, 10_000);
 }
 #[tokio::test]
+async fn build_stores_completed_subagents() {
+    let conversation = vec![
+        ConversationItem::user("<user_query>\ntask\n</user_query>"),
+        ConversationItem::assistant("working"),
+    ];
+    let completed = vec![RunningSubagentSummary {
+        subagent_id: "l3".into(),
+        subagent_type: "explore".into(),
+        description: "implement the reader".into(),
+        elapsed_ms: 12_000,
+    }];
+    let ctx = CompactionStateContext::build(
+        &conversation,
+        CompactionInputs {
+            completed_subagents: completed,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(ctx.completed_subagents.len(), 1);
+    assert_eq!(at(&ctx.completed_subagents, 0).subagent_id, "l3");
+    assert_eq!(at(&ctx.completed_subagents, 0).subagent_type, "explore");
+    assert_eq!(
+        at(&ctx.completed_subagents, 0).description,
+        "implement the reader"
+    );
+}
+#[tokio::test]
 async fn build_stores_and_for_compaction_preserves_todos() {
     let conversation = vec![
         ConversationItem::user("<user_query>\ntask\n</user_query>"),
@@ -2196,6 +2224,7 @@ fn generation_zero_compaction_keeps_legacy_project_instructions() {
         agent_edited_paths: vec![],
         running_tasks: vec![],
         running_subagents: vec![],
+        completed_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
         scheduled_loops: vec![],
@@ -2227,6 +2256,7 @@ fn relocated_compaction_uses_destination_project_instructions() {
         agent_edited_paths: vec![],
         running_tasks: vec![],
         running_subagents: vec![],
+        completed_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
         scheduled_loops: vec![],
@@ -2258,6 +2288,7 @@ fn relocated_compaction_does_not_restore_source_instructions_when_destination_ha
         agent_edited_paths: vec![],
         running_tasks: vec![],
         running_subagents: vec![],
+        completed_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
         scheduled_loops: vec![],
@@ -2292,6 +2323,7 @@ fn build_compacted_history_tags_agents_md_with_project_instructions() {
         agent_edited_paths: vec![],
         running_tasks: vec![],
         running_subagents: vec![],
+        completed_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
         scheduled_loops: vec![],
@@ -2340,6 +2372,7 @@ fn build_compacted_history_omits_agents_md_when_none() {
         agent_edited_paths: vec![],
         running_tasks: vec![],
         running_subagents: vec![],
+        completed_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
         scheduled_loops: vec![],

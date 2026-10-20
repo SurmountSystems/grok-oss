@@ -2,9 +2,11 @@
 //!
 //! Grok 4.5 doubles input / output / cache-read prices once a request exceeds
 //! [`GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS`] (200K; catalog context remains
-//! 500K). Nested L2/L3 sessions use that 200k count as their sampling window.
-//! The main (L1) session uses the catalog window so AUTO compact does not fire
-//! at the old 200k L1 knee. Economic mode still gates implement-effort policy.
+//! 500K). Nested L2/L3 catalog may stay at that 200k cap. Nested live sampling
+//! is 40% of the nested catalog (200k catalog → 80k live; 1M catalog → 400k
+//! live). The main (L1) session uses the catalog window so AUTO compact does
+//! not fire at the old 200k L1 knee. Economic mode still gates implement-effort
+//! policy.
 //!
 //! **Implement-loop effort** (skill 1–5 thoroughness, not model reasoning
 //! effort, and not how many Review rows to launch) is a separate Token
@@ -22,21 +24,40 @@ use toml::Value as TomlValue;
 /// Pricing-tier soft cap (tokens). Same value as
 /// [`xai_grok_compaction::GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS`] and the
 /// settings modal's `200k` auto-compact preset — one source of truth for the
-/// cliff. Nested L2/L3 sampling uses this count; L1 uses the catalog window.
+/// cliff. Nested L2/L3 catalog may stay this count; nested live sampling is
+/// 40% of that catalog. L1 uses the catalog window.
 pub const ECONOMIC_CONTEXT_CAP: u64 =
     xai_grok_compaction::GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS;
 
-/// Nested L2/L3 sessions never exceed this sampling window.
+/// Nested L2/L3 catalog never exceeds this cap. Live sampling is 40% of that
+/// nested catalog, not this cap itself.
 pub const NESTED_SESSION_CONTEXT_CAP: u64 = xai_grok_compaction::NESTED_SESSION_CONTEXT_CAP;
 
-/// Keep-near attention target as a percent of this session's sampling window.
+/// Live nested sampling, and the keep-near attention target, as a percent of
+/// a catalog/sampling window.
 pub const SESSION_ATTENTION_TARGET_PERCENT: u8 =
     xai_grok_compaction::SESSION_ATTENTION_TARGET_PERCENT;
 
-/// Sampling/compaction window for the session that is running.
+/// Nested L2/L3 catalog window. May stay [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn nested_catalog_window(catalog: u64) -> u64 {
+    xai_grok_compaction::nested_catalog_window(catalog)
+}
+
+/// Nested L2/L3 live sampling: 40% of that session's catalog.
+pub fn nested_live_sampling_window(nested_catalog: u64) -> u64 {
+    xai_grok_compaction::nested_live_sampling_window(nested_catalog)
+}
+
+/// Stored catalog window. L1 uses the model catalog. Nested L2/L3 never store
+/// above [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn session_catalog_window(catalog: u64, is_nested: bool) -> u64 {
+    xai_grok_compaction::session_catalog_window(catalog, is_nested)
+}
+
+/// Live sampling/compaction window for the session that is running.
 ///
 /// L1 (parent TUI) uses the catalog window (500k on Grok 4.5). Nested L2/L3
-/// never exceed [`NESTED_SESSION_CONTEXT_CAP`].
+/// live sampling is 40% of the nested catalog.
 pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
     xai_grok_compaction::session_sampling_window(catalog, is_nested)
 }
@@ -146,21 +167,55 @@ mod tests {
         );
     }
 
-    /// L1 uses the catalog window. Nested L2/L3 never exceed 200k even when
-    /// the catalog is 500k. Economic mode must not recap L1 to the nested budget.
+    /// Nested stored catalog still caps at 200k. Live sampling is 40% of catalog.
     #[test]
-    fn session_sampling_window_is_catalog_on_l1_and_200k_when_nested() {
+    fn session_catalog_window_is_catalog_on_l1_and_200k_when_nested() {
+        assert_eq!(session_catalog_window(500_000, false), 500_000);
+        assert_eq!(session_catalog_window(500_000, true), 200_000);
+        assert_eq!(session_catalog_window(128_000, true), 128_000);
+        assert_eq!(
+            session_catalog_window(500_000, true),
+            NESTED_SESSION_CONTEXT_CAP
+        );
+    }
+
+    /// L1 uses the catalog window. Nested live sampling is 40% of catalog.
+    /// Economic mode must not recap L1 to the nested budget.
+    #[test]
+    fn session_sampling_window_is_catalog_on_l1_and_forty_percent_when_nested() {
         assert_eq!(session_sampling_window(500_000, false), 500_000);
         assert_eq!(session_sampling_window(500_000, true), 200_000);
-        assert_eq!(session_sampling_window(128_000, true), 128_000);
+        assert_eq!(session_sampling_window(128_000, true), 51_200);
         assert_eq!(
             session_sampling_window(500_000, false),
             xai_grok_compaction::GROK_45_CONTEXT_WINDOW_TOKENS
         );
-        assert_eq!(
-            session_sampling_window(500_000, true),
-            NESTED_SESSION_CONTEXT_CAP
-        );
+        assert_eq!(session_sampling_window(500_000, true), 200_000);
+    }
+
+    /// Nested L2 and L3 live sampling is 40% of the nested catalog window.
+    /// L1 stays on the catalog window.
+    #[test]
+    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+        let nested_cases = [(1_000_000_u64, 400_000_u64), (200_000, 80_000)];
+        for (catalog, live) in nested_cases {
+            assert_eq!(session_sampling_window(catalog, true), live);
+            assert_eq!(nested_live_sampling_window(catalog), live);
+        }
+        assert_eq!(session_sampling_window(500_000, false), 500_000);
+        assert_eq!(session_sampling_window(1_000_000, false), 1_000_000);
+        let nested_live = session_sampling_window(200_000, true);
+        assert_eq!(nested_live, 80_000);
+        assert!(!xai_token_estimation::exceeds_threshold(
+            75_999,
+            nested_live,
+            95
+        ));
+        assert!(xai_token_estimation::exceeds_threshold(
+            76_000,
+            nested_live,
+            95
+        ));
     }
 
     #[test]

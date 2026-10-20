@@ -1,8 +1,21 @@
 # Subagents and Personas
 
-Subagents are independent child sessions that handle tasks in parallel. Each subagent has its own context window, so the main agent can delegate work (research, implementation, testing, and code review) without consuming its own context. A subagent reports a summary back to the parent when it finishes.
+Nested agents are **L1**, **L2**, and **L3**. **L0** is the dashboard, one level above L1 (the `grok-oss gui` window; see [Agent Dashboard](23-dashboard.md)). Speaker labels are **Operator** and **Agent**. Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2. Do not analogize nested agents to OS process trees.
+
+Each nested session has its own context window, so L1 can delegate research, implementation, testing, and review without filling L1. Discarded L2 and L3 contexts do not have to be compacted into L1. They report up to L1. That is why hierarchical subagents are token efficient. All tokens in an L3 contribute to the token costs of the L2. All layers can talk to the layers above and below.
 
 Subagents are enabled by default.
+
+## Layers
+
+- **L0** is the dashboard, one level above L1. It is the `grok-oss gui` window. It is not this pager `/dashboard` and not `/running`.
+- **L1** is the context where the agent talks to the Operator.
+- **L2** is a coordinator. The Operator can still prompt an L2 they are watching.
+- **L3** implements and reviews. An L3 does not spawn. There is no L4.
+
+Default flow, almost always: L1 spawns a coordinator L2 to accomplish the task. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. L2 always spawns an L3 for implement, diagnosis, edit, or review.
+
+The **Hierarchical fast path** on L1 is the exception: one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path.
 
 ---
 
@@ -46,13 +59,13 @@ Only an explicit `enabled = false` turns subagents off. A `[subagents]` table th
 
 ## How Subagents Work
 
-When the main agent identifies work to delegate, it calls the `spawn_subagent` tool to start a child session. The child runs with:
+Default accomplishment is L1 spawn of an L2, not L1 doing the multi-file job. When L1 identifies work to delegate, it calls the `spawn_subagent` tool to start an L2. That L2 spawns and manages L3s. The nested session runs with:
 
-- Its own context window, independent of the parent
+- Its own context window, independent of the session that spawned it
 - A toolset determined by its agent type and optional capability mode
 - Optional persona instructions applied during resolution
 
-The parent receives the child's output -- usually a summary -- when the child finishes.
+The session that spawned it receives a short report when the nested session finishes. L3 model-call tokens contribute to the L2 cost.
 
 ---
 
@@ -68,7 +81,7 @@ Built-in types still exist as host types. The model cannot pick them by name. An
 
 Project- or user-defined agents can add new types or shadow these built-ins by name.
 
-`spawn_subagent` has an optional `subagent_type` enum when plugin, project, or user agents exist. Its values are those agents, for example `my-plugin:reviewer`. Built-in names and xAI-bundled agents are not listed. If a parent's `tools` list restricts spawning with `Agent(...)`, the enum shows only the allowed types. An unknown type fails the call with the list of valid types.
+`spawn_subagent` has an optional `subagent_type` enum when plugin, project, or user agents exist. Its values are those agents, for example `my-plugin:reviewer`. Built-in names and xAI-bundled agents are not listed. If the spawning session's `tools` list restricts spawning with `Agent(...)`, the enum shows only the allowed types. An unknown type fails the call with the list of valid types.
 
 ---
 
@@ -94,7 +107,7 @@ Each file defines one persona, and the file name (without the extension) becomes
 
 Manage personas in the Personas tab of the agents modal (`/personas`). Bundled personas are read-only; personas you define are editable.
 
-> **Note:** Grok Build applies personas through subagent resolution and roles, not through a `spawn_subagent` parameter. The main agent does not pass a persona name when it spawns a child.
+> **Note:** Grok Build applies personas through subagent resolution and roles, not through a `spawn_subagent` parameter. The main agent does not pass a persona name when it spawns a nested session.
 
 ### Persona Fields
 
@@ -110,7 +123,7 @@ Manage personas in the Personas tab of the agents modal (`/personas`). Bundled p
 
 ### Input/Output Contracts
 
-A persona can declare the inputs it expects and the outputs it produces. The parent agent reads these to know what context to supply and what artifacts to expect. This lets you chain personas, so one persona's output file becomes the next persona's input:
+A persona can declare the inputs it expects and the outputs it produces. The spawning session reads these to know what context to supply and what artifacts to expect. This lets you chain personas, so one persona's output file becomes the next persona's input:
 
 ```toml
 [[subagents.personas.reviewer.inputs]]
@@ -137,7 +150,7 @@ When a persona applies, Grok Build resolves the effective model and reasoning ef
 3. Persona default
 4. Parent session
 
-Isolation follows the same order for the first three steps but defaults to `none` (no worktree) rather than inheriting from the parent session.
+Isolation follows the same order for the first three steps but defaults to `none` (no worktree) rather than inheriting from the session that spawned it.
 
 If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails.
 
@@ -154,7 +167,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `run_in_background` | Run in the background and return a subagent ID. Defaults to `true`. |
 | `isolation`         | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
 | `resume_from`       | Continue a completed subagent's conversation. Pass its subagent ID. |
-| `cwd`               | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
+| `cwd`               | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed nested session inherits its source's directory). |
 
 When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
 
@@ -162,14 +175,14 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 The `send_subagent_message` tool is off by default. Enable it with `GROK_ACTIVE_AGENT_MESSAGES` or `[features] active_agent_messages`.
 
-The root session can send a follow-up to a subagent it owns. When the flag is on, a granted child also receives the tool:
+L1 can send a follow-up to an L2 it owns. When the flag is on, a granted nested session also receives the tool:
 
-- `subagent_id: "parent"` targets that child's active parent subagent.
-- A durable agent id targets another local subagent. An eligible completed subagent resumes with the same identity.
+- `subagent_id: "parent"` is the wire name for the layer above (L2 from an L3, L1 from an L2).
+- A durable agent id targets another local nested session. An eligible completed nested session resumes with the same identity.
 
-A child whose parent is the root session cannot message the root. Curated harness toolsets never receive the tool. A capability mode that excludes this kind also removes it.
+An L2 spawned from L1 cannot message L1 through this tool. Curated harness toolsets never receive the tool. A capability mode that excludes this kind also removes it.
 
-Child senders are bounded: 4 in-flight messages per sender-target pair, and 32 outbound messages per sender attempt. A send over the limit returns `QuotaExceeded`.
+Nested senders are bounded: 4 in-flight messages per sender-target pair, and 32 outbound messages per sender attempt. A send over the limit returns `QuotaExceeded`.
 
 An inactive subagent always wakes with the message as its next turn. For an active subagent, the optional `delivery` parameter controls how the message lands:
 
@@ -185,7 +198,7 @@ The transcript shows each send as a one-line `Message` row: a verb for the outco
 - `Message queued for Subagent “find callers”` / `Message interjected to Subagent “find callers”`
 - `Message sending to …` with an animated bullet while the send is in flight
 - `Message rejected · Subagent “find callers”` for a refused send, `Message unconfirmed · Subagent “find callers”` for one the shell could not confirm
-- `Message sent to parent` when a child messages its parent
+- `Message sent to parent` when a nested session messages the layer above (the wire name stays `parent`)
 
 The collapsed row never shows the message or the reason. **Right** (or `l`/`e` in vim mode) expands the row to show the requested delivery, the full message text, and the reason of a rejected or unconfirmed send; **Left** (or `h`) collapses it again. **Enter**, **Ctrl+F**, or a double-click on the row opens that subagent's view, exactly as on its `Subagent` row (Right/Left still fold it). If the subagent was never spawned in this session (a headless `grok export`, or an id from another session), the row names it `subagent …xxxxxxxx` from the last 8 characters of its id, shows the raw `Subagent ID:` when expanded, and cannot open it.
 
@@ -193,7 +206,7 @@ The collapsed row never shows the message or the reason. **Right** (or `l`/`e` i
 
 ## Capability Modes
 
-Capability mode is not a spawn argument. A child's tools come from its **agent type** and any **role / definition default**. `general-purpose` is unrestricted (`all`). The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files.
+Capability mode is not a spawn argument. A nested session's tools come from its **agent type** and any **role / definition default**. `general-purpose` is unrestricted (`all`). The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files.
 
 | Mode         | Read | Write | Execute | Description                                  |
 | ------------ | ---- | ----- | ------- | -------------------------------------------- |
@@ -231,18 +244,18 @@ L1, L2, and L3 can tell the harness what failed. That includes an early exit, a 
 
 ### MCP inheritance
 
-The primary session overlays the active agent’s `mcpServers` frontmatter onto the disk/client merge by name (agent.md headers beat `config.toml`). Switching the primary agent replaces that overlay with the new seat only. Child inline `mcpServers` still become owned clients and beat inherited shared clients. Plugin agents cannot declare `mcpServers`.
+The primary session overlays the active agent’s `mcpServers` frontmatter onto the disk/client merge by name (agent.md headers beat `config.toml`). Switching the primary agent replaces that overlay with the new seat only. Nested inline `mcpServers` still become owned clients and beat inherited shared clients. Plugin agents cannot declare `mcpServers`.
 
-Subagents inherit the parent session’s **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The child discovers and calls those tools with `search_tool` / `use_tool` the same way the parent does.
+Nested sessions inherit the spawning session's **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The nested session discovers and calls those tools with `search_tool` / `use_tool` the same way the spawning session does.
 
 Control inheritance with agent frontmatter `mcpInheritance`:
 
 | Value | Effect |
 | ----- | ------ |
-| `all` (default if omitted) | Inherit every parent-connected MCP server |
-| `none` | Inherit no parent MCP servers |
+| `all` (default if omitted) | Inherit every MCP server already connected on the spawning session |
+| `none` | Inherit no MCP servers from the spawning session |
 | `named: [server, …]` | Inherit only the listed server names |
-| `except: [server, …]` | Inherit all parent servers except the listed names |
+| `except: [server, …]` | Inherit all spawning-session servers except the listed names |
 
 Example:
 
@@ -257,23 +270,23 @@ mcpInheritance:
 ---
 ```
 
-**Plugin agents** inherit parent MCP the same way. For security they still cannot:
+**Plugin agents** inherit MCP from the spawning session the same way. For security they still cannot:
 
 - Declare their own `mcpServers` in agent frontmatter (ignored with a warning)
 - Declare hooks in agent frontmatter
 - Set `permissionMode: bypassPermissions`
 
-Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/session** after the plugin is trusted — they are not a child-only frontmatter declaration. See [Plugins](09-plugins.md) and [MCP Servers](07-mcp-servers.md).
+Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **spawning session** after the plugin is trusted. They are not a nested-only frontmatter declaration. See [Plugins](09-plugins.md) and [MCP Servers](07-mcp-servers.md).
 
 ---
 
 ## Isolation: Worktree Mode
 
-By default, subagents share the parent workspace (`isolation: none`). For tasks that must keep edits separate from the parent, request an isolated git worktree with `isolation: worktree`:
+By default, nested sessions share the workspace of the session that spawned them (`isolation: none`). For tasks that must keep edits separate from that workspace, request an isolated git worktree with `isolation: worktree`:
 
-- The subagent works in its own copy of the working tree.
-- Its changes stay isolated from the parent until you merge them.
-- The subagent's result includes the worktree path.
+- The nested session works in its own copy of the working tree.
+- Its changes stay isolated from the spawning session until you merge them.
+- The nested session's result includes the worktree path.
 
 Grok OSS manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
 
@@ -313,11 +326,11 @@ plan = false                         # disable the plan subagent
 explore = "grok-4.6"                 # route explore to a specific model
 ```
 
-Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
+Per-type model overrides apply for any spawning session. Without an override, a nested session inherits the model of the session that spawned it.
 
 ### Model Selection by the Agent
 
-The `spawn_subagent` tool offers the agent a `model` argument, and its description lists the models you can pick, for when you explicitly ask for a subagent on a different model. With `[features] subagent_model_inheritance = true` (or `GROK_SUBAGENT_MODEL_INHERITANCE=1`), both are hidden whenever every model in your picker is an xAI model: subagents then always inherit the parent's model, and a spawn that still names one fails with a message asking the agent to retry without it. Catalogs with a third-party model, a model with no declared family, or a catalog still loading keep the argument. `[subagents.models]` pins, roles, and personas are unaffected. Read when a session starts; changing it requires a restart. Precedence: a `requirements.toml`/MDM pin, then the environment variable, then `config.toml`, then remote settings, then the default (off).
+The `spawn_subagent` tool offers the agent a `model` argument, and its description lists the models you can pick, for when you explicitly ask for a subagent on a different model. With `[features] subagent_model_inheritance = true` (or `GROK_SUBAGENT_MODEL_INHERITANCE=1`), both are hidden whenever every model in your picker is an xAI model: nested sessions then always inherit the model of the session that spawned them, and a spawn that still names one fails with a message asking the agent to retry without it. Catalogs with a third-party model, a model with no declared family, or a catalog still loading keep the argument. `[subagents.models]` pins, roles, and personas are unaffected. Read when a session starts; changing it requires a restart. Precedence: a `requirements.toml`/MDM pin, then the environment variable, then `config.toml`, then remote settings, then the default (off).
 
 You can also toggle it from `/settings` → Models → **Subagent model inheritance**:
 
@@ -325,7 +338,7 @@ You can also toggle it from `/settings` → Models → **Subagent model inherita
 - Off: Grok may choose a different model for a subagent. Takes effect after restart.
 - NOTE: This setting only applies when all models are xAI "model_family". You likely don't need to configure this setting.
 
-The row shows the value that applies after restart. Toggling writes `[features] subagent_model_inheritance = true` or `= false` (an explicit `false` overrides a remote `true`); `d` (reset) deletes the key so `managed_config.toml`, remote settings, or the default apply again. Agents already running keep the mode they started with. When a layer your `config.toml` cannot override decides the value — a `requirements.toml`/MDM pin, the environment variable, the `GROK_CONFIG` overlay, or an active campaign — both the toggle and the reset are refused with a toast that names that layer.
+The row shows the value that applies after restart. Toggling writes `[features] subagent_model_inheritance = true` or `= false` (an explicit `false` overrides a remote `true`); `d` (reset) deletes the key so `managed_config.toml`, remote settings, or the default apply again. Agents already running keep the mode they started with. When a layer your `config.toml` cannot override decides the value (a `requirements.toml`/MDM pin, the environment variable, the `GROK_CONFIG` overlay, or an active campaign), both the toggle and the reset are refused with a toast that names that layer.
 
 ### Custom Roles and Personas
 
@@ -368,48 +381,48 @@ Subagents appear at the top of the tasks pane in their own collapsible "Subagent
 
 Subagents appear in several places in the interactive TUI:
 
-### Scrollback (parent conversation history)
+### Scrollback (L1 conversation history)
 
-When a subagent is spawned, a compact lifecycle block is added to the *parent's* scrollback:
+When a nested session is spawned, a compact lifecycle block is added to the L1 scrollback:
 
 - `Subagent running: "do the thing" (Implementer · grok-4.6) · Thinking`
-- Or for background subagents: `Subagent started: "..."`
+- Or for background nested sessions: `Subagent started: "..."`
 
-While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the child's turn tracker. The bullet animates (or is colored) according to state.
+While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the nested session's turn tracker. The bullet animates (or is colored) according to state.
 
-Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
+Press **Enter** (or Ctrl-F) on the block to open the nested session's full transcript.
 
-For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in 15m43s: "..."` block is appended when the wait is a minute or more. Times under 60 seconds stay in seconds (`11.7s`). Do not write 943 seconds or `943s` in status or agent reports. SuperGrok is a paid product. When the prepaid SuperGrok top-up meter is meant, say SuperGrok dollar credits.
+For blocking nested sessions the single entry updates its bullet color when that session finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in 15m43s: "..."` block is appended when the wait is a minute or more. Times under 60 seconds stay in seconds (`11.7s`). Do not write 943 seconds or `943s` in status or agent reports. SuperGrok is a paid product. When the prepaid SuperGrok top-up meter is meant, say SuperGrok dollar credits.
 
 ### Tasks pane (Ctrl+G)
 
-As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all. `[clear]` on the Subagents list removes completed rows and leaves a running row. A left click on the painted `[clear]` removes completed rows and leaves the running row. `[clear]` rests yellow and turns white on hover. A left click on the `1 specialist` count opens that running L3 transcript, the L2 row stays, the count stays, and Esc or q from the L3 returns to the L2.
+The tasks pane groups these rows under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all. `[clear]` on the Subagents list removes completed rows and leaves a running row. A left click on the painted `[clear]` removes completed rows and leaves the running row. `[clear]` rests yellow and turns white on hover. A left click on the `1 specialist` count opens that running L3 transcript, the L2 row stays, the count stays, and Esc or q from the L3 returns to the L2.
 
 ### Dock (when enabled)
 
-The dock above the prompt lists subagents. With the dock focused, `h` toggles hide-completed / show-all (same filter as the tasks pane). Left / Right collapse and expand a section header.
+The dock above the prompt lists nested sessions. With the dock focused, `h` toggles hide-completed / show-all (same filter as the tasks pane). Left / Right collapse and expand a section header.
 
-### Fullscreen framed view (the child transcript)
+### Fullscreen framed view (the nested transcript)
 
-When you open a subagent (from a scrollback block or the tasks pane), a bordered frame replaces the parent view and shows the child's full transcript:
+When you open a nested session (from a scrollback block or the tasks pane), a bordered frame replaces the L1 view and shows that nested session's full transcript:
 
 - Title bar inside the frame: status icon (spinner / ✓ / ✗), label + bold description + model, optional "resumed"/"forked" badge, live activity · elapsed time, and [✗] close button.
-- The child's own scrollback, thinking, and tool calls render inside the frame.
-- The parent tasks pane, todos pane, and dock hide for the duration of the view.
+- The nested session's own scrollback, thinking, and tool calls render inside the frame.
+- The L1 tasks pane, todos pane, and dock hide for the duration of the view.
 
 An L2 coordinator view has a floor prompt. That prompt is the Operator box on that view. Enter with text in that box sends the text to that L2 and does not start a new L1 turn. An L3 specialist view has no prompt. Empty Enter on the L2 floor opens the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count and does not list specialist names in place of that count. Enter:open stays when the floor is empty.
 
 **What still works**
 
-- Scroll, fold, copy, open links, and open the block viewer on the child's transcript.
-- `Ctrl+C` cancels **this child's** turn. It does not cancel the parent.
-- `Ctrl+.` / `Ctrl+X` opens the shortcuts cheatsheet for the child's keys.
-- The child view paints no `[Dashboard]` button. Inside the dashboard overlay the button is the way back.
-- Idle `Enter` in the **block viewer** quotes the selected line into the parent composer and closes the view.
+- Scroll, fold, copy, open links, and open the block viewer on the nested transcript.
+- `Ctrl+C` cancels **this nested session's** turn. It does not cancel L1.
+- `Ctrl+.` / `Ctrl+X` opens the shortcuts cheatsheet for the nested session's keys.
+- The nested view paints no `[Dashboard]` button. Inside the dashboard overlay the button is the way back.
+- Idle `Enter` in the **block viewer** quotes the selected line into the L1 Operator box and closes the view.
 
 **What does nothing (fail closed)**
 
-Root-only chords never start on this surface. They do not open a modal on the child, and they do not leak to the parent:
+Root-only chords never start on this surface. They do not open a modal on the nested view, and they do not leak to L1:
 
 - Command palette (`Ctrl+P`), model picker (`Ctrl+M`), session picker (`Ctrl+R`)
 - Settings, extensions, always-approve (`Ctrl+O`), send-to-background (`Ctrl+B`)
@@ -417,7 +430,7 @@ Root-only chords never start on this surface. They do not open a modal on the ch
 
 A denied action is a silent redraw. There is no toast.
 
-If a prompt-queue overlay appears, it is a **read-only mirror**. You cannot edit, send-now, or remove rows. Queue RPCs always target the parent session.
+If a prompt-queue overlay appears, it is a **read-only mirror**. You cannot edit, send-now, or remove rows. Queue RPCs always target the L1 session.
 
 **How to leave**
 
@@ -426,45 +439,53 @@ If a prompt-queue overlay appears, it is a **read-only mirror**. You cannot edit
 - If scrollback search is open, `q` / `Esc` closes search first. A later press closes the view.
 - `Ctrl+Q` always quits Grok. It is never swallowed here.
 
-The parent's scrollback keeps showing the subagent's status after you close.
+The L1 scrollback keeps showing the nested session's status after you close.
 
 ---
 
 ## Depth Limits
 
-The default nesting limit is two. The main thread (L1) can spawn subagents (L2). An L2 can spawn specialists (L3). An L3 at that default cannot spawn further (no L4). If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only the main thread should spawn. The main-thread Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names.
+The default nesting limit is two. L1 spawns coordinators (L2). That L2 spawns and manages specialists (L3). An L3 cannot spawn. There is no L4. If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only L1 should spawn. The L1 Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names.
+
+Named tests keep these contracts: `l2_after_compact_still_resumes_its_l3s`, `default_accomplishment_is_l1_spawn_of_l2_not_l1_doing_the_multi_file_job`, `hierarchical_fast_path_exceptions_are_named_command_read_report_or_one_line_edit`, `l3_model_call_tokens_contribute_to_l2_cost`, and `l2_after_compact_still_receives_l3_completion_report`.
 
 ## Token efficiency
 
-Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, spawn an L2 so the main thread stays a coordinator. An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing.
+Hierarchical subagents are token efficient because discarded L2 and L3 contexts do not have to be compacted into L1. They report up to L1. All tokens in an L3 contribute to the token costs of the L2. All layers can talk to the layers above and below.
 
-**Hierarchical fast path.** The main thread may do these three things without spawning a subagent:
+Default accomplishment is L1 spawn of an L2, not L1 doing the multi-file job. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 always spawns an L3 for implement, diagnosis, edit, or review. The L2 can restart and compact its L3s when those L3s are doing well. L2 does not fill 200k implementing.
+
+**Hierarchical fast path.** L1 may do these four things without spawning an L2:
 
 1. A one-command host question (for example `journalctl` or `last`).
-2. A single known-path read that you or the prompt already named.
+2. A single known-path read that the Operator or the prompt already named.
 3. Read and quote the short on-disk report that this thread asked for.
+4. A single already-named one-line file edit (one number, one string, one known path).
+
+"Just a quick look" is not that path.
 
 Write the short report under `~/.agents/reports/` on this machine. Do not add report files to the git tree.
 
-That is not a license to diagnose or implement in the main thread.
+That is not a license to diagnose or implement on L1.
 
 | Depth | Does | Does not |
 | ----- | ---- | -------- |
-| **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. Spawn L3 for greps, reads, and product edits; do not fill 200k implementing. Explore and plan L2 stay read-only specialists that may still grep and read. Stay token-efficient. Discard context after a report goes up. Operator-facing nested view: you can ask or clarify in that L2 overlay. | Spawn L4. Show raw edits as if this were the main thread. |
-| **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (forbidden). Operator chat does not barge into a live L3. |
+| **L0 dashboard** | `grok-oss gui` window, one level above L1. | This pager `/dashboard`. Session-board residual. |
+| **L1 main** | Status to the Operator. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
+| **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. Can restart and compact L3s that are doing well. Discard context after a report goes up. Operator-facing nested view: the Operator can ask or clarify in that L2 overlay. All tokens in an L3 contribute to this L2 cost. | Grep, diagnose, edit, implement, or review itself. Spawn L4. Show raw edits as if this were L1. |
+| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except it cannot spawn. | Coordinate. Spawn L4 (forbidden). Operator chat does not barge into a live L3. |
 
-L3 is not a weaker agent. L3 still does the tools. The hard cap is no L4. L2's extra job versus L3 is spawning L3 specialists and being the nested view you talk to. L3's extra job versus L2 is doing the tools.
+L3 is not a weaker agent. L3 still does the tools. The hard cap is no L4. L2's extra job versus L3 is spawning L3 specialists and being the nested view the Operator talks to. L3's extra job versus L2 is doing the tools.
 
-Spawn an L2 when the job needs isolation from the main thread: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
+Spawn an L2 when the job needs isolation from L1: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill L1. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
 
-L2 parallelizes, spawns L3 for greps, reads, and product edits, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. L2 does not fill 200k implementing. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
+L2 spawns L3 for greps, reads, and product edits, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. L2 does not fill 200k implementing. L1 reads that L2 report only and talks to the Operator. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
 
-The main (L1) session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact (95% of nested 200k). Nested L3 sampling also stays 200k. An L2 may compact a specialist it spawned when that specialist is near the 200k sampling window. The specialist must not compact itself and continue. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
+The L1 session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact (95% of nested 200k). Nested L3 sampling also stays 200k. An L2 may compact a specialist it spawned when that specialist is near the 200k sampling window. The specialist must not compact itself and continue. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
 
-L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. Ordinary L2 still AUTO compact at 95% of nested 200k.
+L1 and L2 may still spawn nested sessions, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. An L2 coordinator always spawns an L3 for implement, diagnosis, edit, or review. Ordinary L2 still AUTO compact at 95% of nested 200k.
 
-See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the main thread stays small.
+See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when L1 stays small.
 
 ## Live job actual tokens
 
@@ -472,7 +493,7 @@ Actual tokens on a live job row come from the host session-usage figure for that
 
 If the host has not returned a figure yet, the row omits the token clause. It does not print a placeholder. The wall-clock estimate and the token estimate stay labeled as estimates. Do not copy the estimate into the token count. A standing estimate such as 19.4 minutes and 167.0k is still an estimate until the host returns a figure. Do not invent a count.
 
-When the host has returned a figure, the row shows that figure. Showing the row does not add that figure again into the L1 total or into the grok-oss sqlite session record. Nested spend stays on the nested row. The footer sampling window for the main thread is not that figure.
+When the host has returned a figure, the row shows that figure. All tokens in an L3 contribute to the token costs of the L2. Showing the L2 row does not add that figure again into the L1 total or into the grok-oss sqlite session record. Nested spend stays on the nested row. The footer sampling window for L1 is not that figure.
 
 The tasks pane paints each running job row by calling `display_live_job_row` and showing that row's labeled estimates and, when the host returned a figure, that figure. `/tasks` uses the same formatter. Neither path adds the row figure to the L1 total or to the grok-oss sqlite session record.
 
@@ -482,12 +503,12 @@ The tasks pane paints each running job row by calling `display_live_job_row` and
 
 **Good use cases:**
 
-- Researching a codebase while the main thread stays free for you
+- Researching a codebase while L1 stays free for the Operator
 - Running tests in parallel with other specialists
 - Reviewing generated changes before you commit them
 - Delegating independent tasks that do not depend on each other
 
 **When not to use:**
 
-- Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one-command host question, a single known-path read already named, or reading the asked-for report). Implement work, multi-file diagnosis, CI, and regressions still spawn an L2. L2 spawns L3 only if the problem is actually hard.
+- Tasks that require tight back-and-forth with the Operator, since a nested session runs autonomously and is not suited to interactive exchanges
+- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit). "Just a quick look" is not that path. Implement work, multi-file diagnosis, CI, and regressions still spawn an L2. That L2 always spawns an L3 for implement, diagnosis, edit, or review.

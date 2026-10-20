@@ -154,11 +154,11 @@ This is **not** `/finish` (session post-mortem) and **not** `/reports` (a checkp
 
 ### `/subagent`
 
-Spawn one L2 coordinator for this job. The L1 main thread does not do the job. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/subagent/`) into `~/.grok/bundled/skills/subagent/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/subagent/`.
+Spawn one L2 coordinator for this job. The L1 main thread does not do the job. That L2 spawns and manages L3s. L2 always spawns an L3 for implement, diagnosis, edit, or review. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/subagent/`) into `~/.grok/bundled/skills/subagent/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/subagent/`.
 
 Type `/subagent this ...` or `/subagent ...`. The rest of the line is the job passed to that L2 as a self-contained prompt.
 
-This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff). It is not the Hierarchical fast path on L1.
+This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff). It is not the Hierarchical fast path on L1 (one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit). "Just a quick look" is not that path.
 
 ```
 /subagent this diagnose the compact occupancy

@@ -28,30 +28,58 @@ pub const GROK_45_CONTEXT_WINDOW_TOKENS: u64 = 500_000;
 /// this cliff keeps short-context pricing.
 pub const GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS: u64 = 200_000;
 
-/// Nested L2/L3 sessions never exceed this sampling/compaction window, even
-/// when the model catalog is larger (500k on Grok 4.5). Same token count as
-/// the long-context price cliff. The main (L1) session does not use this cap.
+/// Nested L2/L3 catalog window never exceeds this cap, even when the model
+/// catalog is larger (500k on Grok 4.5). Same token count as the long-context
+/// price cliff. Live sampling is 40% of that nested catalog, not this cap
+/// itself. The main (L1) session does not use this cap.
 pub const NESTED_SESSION_CONTEXT_CAP: u64 = GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS;
 
-/// Keep-near attention target as a percent of this session's sampling window.
-/// Main session: 40% of 500k = 200k. Nested: 40% of 200k = 80k.
+/// Live nested sampling, and the keep-near attention target, as a percent of
+/// a catalog/sampling window. Nested L2/L3 live = 40% of nested catalog
+/// (1M → 400k, 200k → 80k). L1 live stays the catalog window (500k today).
 pub const SESSION_ATTENTION_TARGET_PERCENT: u8 = 40;
 
-/// Sampling/compaction window for the session that is running.
+/// 40% of `sampling_window`. One place for that percent.
+pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
+    sampling_window.saturating_mul(u64::from(SESSION_ATTENTION_TARGET_PERCENT)) / 100
+}
+
+/// Nested L2/L3 catalog window. May stay [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn nested_catalog_window(catalog: u64) -> u64 {
+    catalog.min(NESTED_SESSION_CONTEXT_CAP)
+}
+
+/// Nested L2/L3 live sampling window: 40% of that session's catalog.
 ///
-/// L1 (parent TUI) uses the catalog window. Nested L2/L3 never exceed
-/// [`NESTED_SESSION_CONTEXT_CAP`].
-pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
+/// 1M catalog → 400k live. 200k catalog → 80k live. L1 does not use this.
+pub fn nested_live_sampling_window(nested_catalog: u64) -> u64 {
+    session_attention_target_tokens(nested_catalog)
+}
+
+/// Stored catalog window for the session that is running.
+///
+/// L1 uses the model catalog. Nested L2/L3 never store above
+/// [`NESTED_SESSION_CONTEXT_CAP`]. Live sampling is
+/// [`session_sampling_window`], 40% of this nested catalog.
+pub fn session_catalog_window(catalog: u64, is_nested: bool) -> u64 {
     if is_nested {
-        catalog.min(NESTED_SESSION_CONTEXT_CAP)
+        nested_catalog_window(catalog)
     } else {
         catalog
     }
 }
 
-/// 40% of `sampling_window` (attention target for the running session).
-pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
-    sampling_window.saturating_mul(u64::from(SESSION_ATTENTION_TARGET_PERCENT)) / 100
+/// Live sampling/compaction window for the session that is running.
+///
+/// L1 uses the catalog window. Nested L2/L3 live sampling is 40% of the
+/// nested catalog ([`nested_live_sampling_window`]). Ordinary L2 still AUTO
+/// compact at 95% of that live window. L3 never compact-and-continue.
+pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
+    if is_nested {
+        nested_live_sampling_window(catalog)
+    } else {
+        catalog
+    }
 }
 
 /// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`], the token equivalent of the
@@ -164,20 +192,73 @@ mod auto_compact_threshold_tests {
         assert_eq!(t.as_percent_of(500_000), 90);
     }
 
-    /// L1 uses the catalog window. Nested L2/L3 never exceed 200k even when
-    /// the catalog is 500k.
+    /// Nested stored catalog still caps at 200k. That cap is not the live
+    /// sampling window (live is 40% of catalog).
     #[test]
-    fn session_sampling_window_is_catalog_on_l1_and_200k_when_nested() {
+    fn session_catalog_window_is_catalog_on_l1_and_200k_when_nested() {
+        assert_eq!(session_catalog_window(500_000, false), 500_000);
+        assert_eq!(session_catalog_window(500_000, true), 200_000);
+        assert_eq!(session_catalog_window(128_000, true), 128_000);
+        assert_eq!(nested_catalog_window(1_000_000), NESTED_SESSION_CONTEXT_CAP);
+        assert_eq!(
+            session_catalog_window(GROK_45_CONTEXT_WINDOW_TOKENS, false),
+            GROK_45_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            session_catalog_window(GROK_45_CONTEXT_WINDOW_TOKENS, true),
+            NESTED_SESSION_CONTEXT_CAP
+        );
+    }
+
+    /// L1 live sampling is the catalog window. Nested 500k catalog is 40%
+    /// live (200k), which matches the old nested cap by coincidence.
+    #[test]
+    fn session_sampling_window_is_catalog_on_l1_and_forty_percent_when_nested() {
         assert_eq!(session_sampling_window(500_000, false), 500_000);
         assert_eq!(session_sampling_window(500_000, true), 200_000);
-        assert_eq!(session_sampling_window(128_000, true), 128_000);
+        assert_eq!(session_sampling_window(128_000, true), 51_200);
         assert_eq!(
             session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, false),
             GROK_45_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(
             session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, true),
-            NESTED_SESSION_CONTEXT_CAP
+            200_000
+        );
+    }
+
+    /// Nested L2 and L3 live sampling is 40% of the nested catalog window.
+    /// L1 stays on the catalog window. GitHub issue 221.
+    #[test]
+    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+        // Nested catalog 1M → 400k live. Nested catalog 200k → 80k live.
+        // is_nested=true is both L2 and L3 (same helper; L3 still must not
+        // compact-and-continue).
+        let nested_cases = [(1_000_000_u64, 400_000_u64), (200_000, 80_000)];
+        for (catalog, live) in nested_cases {
+            assert_eq!(
+                session_sampling_window(catalog, true),
+                live,
+                "nested L2/L3 live sampling must be 40% of catalog {catalog}"
+            );
+            assert_eq!(nested_live_sampling_window(catalog), live);
+        }
+        assert_eq!(
+            session_sampling_window(500_000, false),
+            500_000,
+            "L1 live sampling stays the 500k catalog window"
+        );
+        assert_eq!(
+            session_sampling_window(1_000_000, false),
+            1_000_000,
+            "L1 must not take the 40% nested live path"
+        );
+        let nested_live = session_sampling_window(200_000, true);
+        assert_eq!(nested_live, 80_000);
+        assert_eq!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(nested_live),
+            76_000,
+            "ordinary L2 must still AUTO compact at 95% of nested live sampling"
         );
     }
 

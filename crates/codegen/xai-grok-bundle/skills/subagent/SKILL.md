@@ -42,8 +42,11 @@ the user asked for a project override.
    this machine. Call it a report, not a join. Chat is not enough.
 4. **Spawn one L2.** The product tool is `spawn_subagent`. The prompt
    is **self-contained**: the full job text, this tree, product CLI
-   `grok-oss`, agent depth, report path, never `git add` / `git
-   commit`. Do not tell L2 to "see the conversation above."
+   `grok-oss`, agent depth (L1 spawns L2, L2 always spawns L3 for
+   implement, diagnosis, edit, or review, `MAX_SUBAGENT_DEPTH` stays 2,
+   all tokens in an L3 contribute to the token costs of the L2), report
+   path, never `git add` / `git commit`. Do not tell L2 to "see the
+   conversation above."
 5. **Wait or other tracks.** Wait on that L2, or keep other
    healthy tracks running. Additive **also** / **btw** spawns
    another L2 (or queues same-file). Do not kill a healthy
@@ -65,18 +68,31 @@ the user asked for a project override.
 
 ## Agent depth (not session-board L0-L2)
 
+**L0** is the dashboard, one level above L1. It is the `grok-oss gui` window. It is not session-board residual and not document D0.
+**L1** is the context where the agent talks to the Operator.
+**L2** is a coordinator. The Operator can still prompt an L2 they are watching.
+**L3** implements and reviews. An L3 does not spawn. There is no L4.
+
+Speaker labels stay Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2. Do not analogize nested agents to OS process trees. Do not call an L3 a coordinator.
+
+Default: L1 spawns a coordinator L2 to accomplish the task. Do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. All layers can talk to the layers above and below. Discarded L2 and L3 contexts report up to L1. They do not compact into L1. All tokens in an L3 contribute to the token costs of the L2. `MAX_SUBAGENT_DEPTH` stays 2 (L3 cannot spawn; there is no L4).
+
+L2 always spawns an L3 for implement, diagnosis, edit, or review. L2 does not do that work itself.
+
 | Depth | Does | Does not |
 |-------|------|----------|
+| **L0 dashboard** | `grok-oss gui` window, one level above L1 | Session-board residual. Document D0. |
 | **L1 main** | Status. Board upsert. Spawn one L2. Wait or other tracks. Read the short report. Hierarchical fast path only for named one-liners that are not this job. | Do this job. Diagnose. Implement. Multi-file reads. CI logs |
-| **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. L2s are not to do any kind of work by themselves. Throw context away after. | Grep, diagnose, edit, implement, or review. Spawn L4. Show raw edits as if L1 |
-| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate. Spawn L4 |
+| **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. Can restart and compact L3s that are doing well. L2s are not to do any kind of work by themselves. Throw context away after. | Grep, diagnose, edit, implement, or review. Call an L3 a coordinator. Spawn L4. Show raw edits as if L1 |
+| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate, or be called a coordinator. Spawn L4 |
 
 **Hierarchical fast path** (L1 only): one-command host question; a
 single known-path read already named; read and quote the asked-for
-report; a single already-named one-line file edit. `/subagent`
-means the job is **not** that path. Spawn L2.
+report; a single already-named one-line file edit. "Just a quick look"
+is not that path. `/subagent` means the job is **not** that path.
+Spawn L2.
 
-No L4.
+No L4. All tokens in an L3 contribute to the token costs of the L2.
 
 ## Honesty
 
@@ -98,6 +114,7 @@ No L4.
   Do not use Python. Do not use bash. Do not use a `sqlite3` one-liner.
   The cost cell is `model_call_cost_for_sessions` (input + output), not `total_tokens`,
   and not the standing estimate.
+  All tokens in an L3 contribute to the token costs of the L2.
   The live status cell is the host context figure with +, labeled context, not the small output integer.
   Chain of thought is `reasoning_tokens` and is not added again.
   A completion-notice `output_tokens` integer is the generated side only.

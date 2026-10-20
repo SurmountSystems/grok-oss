@@ -1585,7 +1585,7 @@ impl SessionActor {
                         self.compaction.model_context_window.get().max(new_cw.get()),
                         self.compaction.economic_mode.get(),
                     );
-                    let effective = crate::util::config::session_sampling_window(
+                    let effective = crate::util::config::session_catalog_window(
                         economic,
                         self.startup_hints.is_subagent,
                     );

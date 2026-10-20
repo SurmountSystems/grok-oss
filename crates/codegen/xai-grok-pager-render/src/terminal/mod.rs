@@ -261,7 +261,7 @@ pub struct TerminalContext {
     pub embedded_editor: Option<EmbeddedEditor>,
     /// tmux client metadata (populated only when `multiplexer == Tmux`).
     pub tmux_meta: TmuxClientMeta,
-    /// Whether the session is inside a remote SSH connection.
+    /// Whether the session is inside a remote SSH or Eternal Terminal connection.
     pub is_ssh: bool,
     /// Positive evidence that SSH is hosted by the official VS Code remote server.
     pub is_official_vscode_remote: bool,
@@ -872,9 +872,8 @@ pub fn build_terminal_context_from_env(env: &HashMap<String, String>) -> Termina
     } else {
         TmuxClientMeta::default()
     };
-    let is_ssh = env_get(env, "SSH_CONNECTION").is_some()
-        || env_get(env, "SSH_TTY").is_some()
-        || env_get(env, "SSH_CLIENT").is_some();
+    let is_ssh =
+        xai_grok_shared::clipboard::is_remote_session_from_env(|key| env_get(env, key).is_some());
     let is_official_vscode_remote = is_ssh
         && env_get(env, "VSCODE_GIT_ASKPASS_MAIN").is_some_and(is_official_vscode_remote_askpass);
     let term_var = env_get(env, "TERM").map(|s| s.to_owned());

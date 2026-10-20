@@ -210,6 +210,10 @@ impl AgentView {
                     }
                 }
                 TaskEntryId::Agent(sid) => {
+                    if self.subagent_views.contains_key(&sid) {
+                        self.open_subagent_fullscreen(sid);
+                        return Some(InputOutcome::Changed);
+                    }
                     if let Some(child_sid) = self.resolve_listed_agent_child_sid(&sid) {
                         self.open_subagent_fullscreen(child_sid);
                         return Some(InputOutcome::Changed);
@@ -322,6 +326,10 @@ impl AgentView {
     fn open_session_board_row(&mut self, todo_id: u64) -> Option<InputOutcome> {
         let item = self.todo.item_for_stable_id(todo_id)?.clone();
         if let Some(task_id) = TodoPane::bound_task_id(&item) {
+            if self.subagent_views.contains_key(task_id) {
+                self.open_subagent_fullscreen(task_id.to_string());
+                return Some(InputOutcome::Changed);
+            }
             if let Some(child_sid) = self.resolve_listed_agent_child_sid(task_id) {
                 self.open_subagent_fullscreen(child_sid);
                 return Some(InputOutcome::Changed);
@@ -341,11 +349,15 @@ impl AgentView {
             TodoStatus::Cancelled => "cancelled",
         };
         let body = format!("{}\n\nStatus: {status}", item.content);
-        let viewer = LineViewerState::open_markdown_content(
+        let mut viewer = LineViewerState::open_markdown_content(
             std::path::PathBuf::from("session-board.md"),
             body,
             None,
         )?;
+        // Big tasks view: the 75% popup returns without paint when height
+        // is under 5. Fullscreen fills the overlay so L1 review cannot
+        // silently no-op.
+        viewer.fullscreen = true;
         self.line_viewer = Some(viewer);
         Some(InputOutcome::Changed)
     }
@@ -358,6 +370,12 @@ impl AgentView {
                 .show_bg_task_viewer(&tid)
                 .then_some(InputOutcome::Changed),
             TaskEntryId::Agent(sid) => {
+                // Keyboard Enter opens via child_session_id when that key
+                // is already the view map key. Mouse must do the same.
+                if self.subagent_views.contains_key(&sid) {
+                    self.open_subagent_fullscreen(sid);
+                    return Some(InputOutcome::Changed);
+                }
                 let child_sid = self.resolve_listed_agent_child_sid(&sid)?;
                 self.open_subagent_fullscreen(child_sid);
                 Some(InputOutcome::Changed)
@@ -393,6 +411,13 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                // Session board (Ctrl+T todo list) before leftover Tasks
+                // chrome: hidden overlay kill/view rects must not steal a
+                // painted board row. Completed rows stay clickable on
+                // prompt-focused L1.
+                if let Some(out) = self.try_session_board_row_click(mouse.column, mouse.row) {
+                    return out;
+                }
                 // Tasks kill / open chrome first (before Clear finished) so a
                 // mis-placed Clear hit can never steal subagent open/close.
                 if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
@@ -413,13 +438,6 @@ impl AgentView {
                         self.set_active_pane(AgentPane::Scrollback, false);
                     }
                     return InputOutcome::Changed;
-                }
-                // Session board (Ctrl+T todo list): a left click on a painted
-                // row opens that task, including completed rows, so the
-                // Operator can review the board. Distinct from the Tasks
-                // overlay chrome above.
-                if let Some(out) = self.try_session_board_row_click(mouse.column, mouse.row) {
-                    return out;
                 }
                 if self.hit_queue_close.contains(mouse.column, mouse.row) {
                     self.queue.overlay.escape();

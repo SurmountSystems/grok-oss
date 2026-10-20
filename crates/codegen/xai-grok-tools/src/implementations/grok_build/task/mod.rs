@@ -45,6 +45,8 @@ pub const TASK_TOOL_NAME: &str = "task";
 /// L1 spawns an L2, an L2 spawns an L3, and an L3 does not spawn an L4.
 /// This is not a floor. An explicit operator `max_depth = 1` is injected as
 /// [`MaxSubagentDepth`] and must stay 1.
+/// GitHub #224 / FORK.md agent-depth: default accomplishment is L1 spawn of
+/// L2. Hierarchical fast path on L1 is not this ceiling.
 pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
@@ -373,9 +375,9 @@ fn map_follow_up_outcome(
     match outcome {
         SubagentFollowUpOutcome::Queued { child_session_id } => Ok(ToolOutput::Text(
             format!(
-                "Follow-up queued onto still-running nested L2 '{id}' \
+                "Follow-up queued onto still-running nested session '{id}' \
                  (child session {child_session_id}). status: queued. \
-                 The nested L2 is still running. Do not kill or respawn."
+                 The nested session is still running. Do not kill or respawn."
             )
             .into(),
         )),
@@ -586,9 +588,12 @@ impl xai_tool_runtime::Tool for TaskTool {
     async fn run(
         &self,
         ctx: xai_tool_runtime::ToolCallContext,
-        input: TaskToolInput,
+        mut input: TaskToolInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
+        // GitHub #220: fill description from prompt before spawn so an L2 that
+        // omitted it still starts an L3. Depth is not raised.
+        input.fill_description_from_prompt();
         let resources = shared_resources(&ctx)?;
         let tool_cancellation = ctx
             .get::<xai_tool_runtime::Cancellation>()
@@ -896,7 +901,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             prompt: crate::reminders::with_process_rule_spawn_reminder(&input.prompt),
             description: input.description.clone(),
             subagent_type: subagent_type.clone(),
-            parent_session_id,
+            parent_session_id: parent_session_id.clone(),
             parent_prompt_id,
             resume_from,
             cwd,
@@ -917,7 +922,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 harness_agent_type: None,
                 completion_output_cap: None,
                 spawn_depth: (depth > 0).then_some(max_depth),
-                immediate_parent_session_id: None,
+                immediate_parent_session_id: (depth > 0).then(|| parent_session_id.clone()),
                 output_token_budget: None,
                 output_schema: None,
                 loop_task_id: None,
@@ -1529,6 +1534,56 @@ mod tests {
         );
     }
 
+    /// GitHub #222 / #224: L3 still cannot spawn. There is no L4.
+    /// `MAX_SUBAGENT_DEPTH` stays 2. See FORK.md agent-depth.
+    #[tokio::test]
+    async fn l3_still_cannot_spawn_there_is_no_l4() {
+        assert_eq!(
+            MAX_SUBAGENT_DEPTH, 2,
+            "unset ceiling stays L1 then L2 then L3; do not raise it so L3 can spawn L4"
+        );
+        let (backend, rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(MAX_SUBAGENT_DEPTH));
+        resources.insert(SessionIdResource("l3-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-l3".to_string()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "l4 spawn".into(),
+                prompt: "L3 still cannot spawn. There is no L4.".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: false,
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                follow_up: None,
+                cwd: None,
+                model: None,
+                workspace: None,
+                task_id: None,
+                write_paths: Vec::new(),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("depth limit exceeded"),
+            "L3 at max depth 2 must not spawn L4: {err}"
+        );
+        assert!(
+            err.contains("Cannot spawn further nested subagents"),
+            "L3 spawn reject must name nested spawn: {err}"
+        );
+        drop(rx);
+    }
+
     #[tokio::test]
     async fn depth_limit_exceeded() {
         let (backend, _rx) = make_backend();
@@ -1671,6 +1726,142 @@ mod tests {
         assert!(
             err.contains("depth limit exceeded"),
             "explicit max 1 must still reject L2 spawn: {err}"
+        );
+    }
+
+    /// GitHub #220: a nested L2 spawn_subagent with a prompt and no description
+    /// still starts an L3. Dispatch is the JSON path the model actually hits.
+    #[tokio::test]
+    async fn l2_spawn_subagent_with_prompt_and_omitted_description_starts_l3() {
+        use futures::StreamExt;
+        use xai_tool_runtime::{ToolDyn, ToolStreamItem};
+
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(SessionIdResource("l2-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-l2".to_string()));
+        resources.insert(TaskModelValidator::new(|_| None));
+
+        let drain = tokio::spawn(async move {
+            let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await else {
+                panic!("L2 spawn_subagent with a prompt and no description must start an L3");
+            };
+            let filled = req.description.clone();
+            req.notify_registered();
+            filled
+        });
+
+        let args = serde_json::json!({
+            "prompt": "implement the L3 reader"
+        });
+        let mut stream = TaskTool
+            .execute(test_ctx(resources.into_shared()), args)
+            .await;
+        let terminal = loop {
+            match stream.next().await {
+                Some(ToolStreamItem::Terminal(result)) => break result,
+                Some(_) => continue,
+                None => panic!("spawn_subagent stream ended without a terminal item"),
+            }
+        };
+        let filled = tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+            .await
+            .expect("L2 spawn_subagent with a prompt must deliver an L3 spawn to the coordinator")
+            .expect("L3 spawn task must not panic");
+        assert!(
+            terminal.is_ok(),
+            "L2 spawn_subagent with a prompt and no description must start an L3, got: {terminal:?}"
+        );
+        let msg = match &terminal {
+            Ok(out) => format!("{out:?}"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            !msg.contains("Missing required parameter: 'description'"),
+            "Operator must not see missing description on a spawn that has a prompt: {msg}"
+        );
+        assert_eq!(
+            filled, "implement the L3 reader",
+            "dispatch must fill description from prompt before spawn"
+        );
+    }
+
+    /// GitHub #220: filling description must not raise MAX_DEPTH so an L3 can spawn L4.
+    #[tokio::test]
+    async fn l3_spawn_subagent_with_prompt_and_omitted_description_still_cannot_spawn() {
+        use futures::StreamExt;
+        use xai_tool_runtime::{ToolDyn, ToolStreamItem};
+
+        assert_eq!(
+            MAX_SUBAGENT_DEPTH, 2,
+            "unset ceiling stays L1 then L2 then L3; do not raise it so L3 can spawn L4"
+        );
+
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(MAX_SUBAGENT_DEPTH));
+        resources.insert(SessionIdResource("l3-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-l3".to_string()));
+        resources.insert(TaskModelValidator::new(|_| None));
+
+        let args = serde_json::json!({
+            "prompt": "implement the L3 reader"
+        });
+        let mut stream = TaskTool
+            .execute(test_ctx(resources.into_shared()), args)
+            .await;
+        let terminal = loop {
+            match stream.next().await {
+                Some(ToolStreamItem::Terminal(result)) => break result,
+                Some(_) => continue,
+                None => panic!("spawn_subagent stream ended without a terminal item"),
+            }
+        };
+        let err = terminal.expect_err("L3 must not spawn an L4");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("depth limit exceeded"),
+            "L3 spawn must fail on depth, not description: {msg}"
+        );
+        assert!(
+            !msg.contains("Missing required parameter: 'description'"),
+            "{msg}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "coordinator must not receive an L4 spawn"
+        );
+    }
+
+    /// GitHub #220: the registry advertised schema is generate_schema, not a
+    /// hand-built required list.
+    #[test]
+    fn advertised_generate_schema_does_not_require_description() {
+        let schema = crate::registry::types::generate_schema::<TaskToolInput>();
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            required.iter().any(|name| name.as_str() == Some("prompt")),
+            "prompt stays required: {required:?}"
+        );
+        assert!(
+            !required
+                .iter()
+                .any(|name| name.as_str() == Some("description")),
+            "generate_schema must not require description when prompt is present: {required:?}"
+        );
+        assert!(
+            schema
+                .get("properties")
+                .and_then(|p| p.get("description"))
+                .is_some(),
+            "description stays advertised so an L2 can still send it"
         );
     }
 

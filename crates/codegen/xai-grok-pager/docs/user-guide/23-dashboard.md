@@ -1,16 +1,16 @@
 # Agent Dashboard
 
-The Agent Dashboard lists every top-level session in this pager process —
-local sessions and forks — grouped by state. From one screen you can peek,
-reply, attach, pin, rename, stop, or dispatch a new agent. Subagents are not
-listed; they run under their parent, which already shows when work is in
+The Agent Dashboard lists every top-level session in this pager process,
+local sessions and forks, grouped by state. From one screen you can peek,
+reply, attach, pin, rename, stop, or dispatch a new agent. Nested L2 and L3
+sessions are not listed; they run under their L1 session, which already shows when work is in
 flight.
 
 Not the agents modal (`/config-agents` / `/agents` — definitions and
 personas), the session picker (`/resume` / `Ctrl+R`, past conversations on
 disk), or the workflows run UI (`/workflow runs`).
 
-**L0** is a Surmount GPUI window, not this pager. Call it **`grok-oss gui`**.
+**L0** is the dashboard, one level above L1. It is a Surmount GPUI window, not this pager. Call it **`grok-oss gui`**.
 It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop
 coordinator. It is not a website on the mail host :443. Do not add an L0
 dashboard inside grok-oss. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db`

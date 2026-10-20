@@ -2895,7 +2895,8 @@ the SpaceXAI thinking-resample option.
 | path::test | Contract |
 |------------|----------|
 | `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::dest_encoder_skip_loop_is_repetitive` | Three copies of `DEST_ENCODER_SKIP_LOOP` count as a loop |
-| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::dest_encoder_skip_single_sentence_four_times_is_repetitive` | Four copies of the first dest-encoder-skip sentence count as a loop |
+| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::dest_encoder_skip_single_sentence_five_times_is_repetitive` | Five copies of the first dest-encoder-skip sentence count as a loop |
+| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does` | Four copies of a short phrase do not stop; five copies and the dest-encoder-skip pair three times still do (GitHub #223) |
 | `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::thought_line_loop_is_repetitive` | Thought-line copies of `DEST_ENCODER_SKIP_LOOP` count as a loop |
 | `xai-grok-sampler` `stream::chat_completions::tests::chat_completions_stops_dest_encoder_skip_loop` | Chat Completions stops the dest-encoder-skip wall (Fatal) |
 | `xai-grok-sampler` `stream::messages_tests::messages_stops_dest_encoder_skip_loop` | Messages stream uses the same Fatal breaker |
@@ -2906,7 +2907,8 @@ the SpaceXAI thinking-resample option.
 
 ```bash
 cargo test -p xai-grok-sampler --lib -- dest_encoder_skip_loop_is_repetitive \
-  dest_encoder_skip_single_sentence_four_times_is_repetitive \
+  dest_encoder_skip_single_sentence_five_times_is_repetitive \
+  short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does \
   thought_line_loop_is_repetitive \
   chat_completions_stops_dest_encoder_skip_loop \
   chat_completions_stops_dest_encoder_skip_loop_in_thought \

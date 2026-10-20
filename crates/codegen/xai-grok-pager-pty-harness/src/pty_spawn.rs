@@ -146,7 +146,13 @@ pub(crate) fn apply_child_env<S: EnvSink>(cmd: &mut S, env: &[EnvOp<'_>]) {
         cmd.remove_var(OsStr::new(color_var));
     }
     // Leaked SSH vars make the detector report SSH and disable the drag-drop image classifier.
-    for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+    for ssh_var in [
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+        "SSH_AUTH_SOCK",
+        "ET_VERSION",
+    ] {
         cmd.remove_var(OsStr::new(ssh_var));
     }
     // A harness launched under `grok wrap` must not silently confirm clipboard
@@ -273,7 +279,13 @@ mod tests {
         for var in HOST_TERMINAL_ENV_VARS {
             cmd.env(var, "polluted");
         }
-        for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+        for ssh_var in [
+            "SSH_CONNECTION",
+            "SSH_CLIENT",
+            "SSH_TTY",
+            "SSH_AUTH_SOCK",
+            "ET_VERSION",
+        ] {
             cmd.env(ssh_var, "polluted");
         }
         for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
@@ -300,7 +312,13 @@ mod tests {
                 "host terminal marker {var} leaked into the child env"
             );
         }
-        for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+        for ssh_var in [
+            "SSH_CONNECTION",
+            "SSH_CLIENT",
+            "SSH_TTY",
+            "SSH_AUTH_SOCK",
+            "ET_VERSION",
+        ] {
             assert!(
                 cmd.get_env(ssh_var).is_none(),
                 "SSH marker {ssh_var} leaked into the child env"

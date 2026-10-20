@@ -647,6 +647,9 @@ pub struct CompactionStateContext {
     pub running_tasks: Vec<BackgroundTaskSummary>,
     /// Subagents that are still running at compaction time.
     pub running_subagents: Vec<RunningSubagentSummary>,
+    /// Completed descendants reachable from this session at compaction time.
+    /// Compact of an L2 keeps these ids so `resume_from` still works.
+    pub completed_subagents: Vec<RunningSubagentSummary>,
     /// Connected MCP servers, for post-compaction system-reminder injection.
     pub connected_mcp_servers: Vec<CompactionServerSummary>,
     /// Todo list captured at compaction time, for post-compaction
@@ -667,6 +670,7 @@ pub struct CompactionInputs {
     pub destination_project_instructions: Option<String>,
     pub running_tasks: Vec<BackgroundTaskSummary>,
     pub running_subagents: Vec<RunningSubagentSummary>,
+    pub completed_subagents: Vec<RunningSubagentSummary>,
     pub agent_edited_paths: BTreeSet<String>,
     pub connected_mcp_servers: Vec<CompactionServerSummary>,
     pub todos: Vec<TodoSummary>,
@@ -706,6 +710,7 @@ impl CompactionStateContext {
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
             running_tasks: inputs.running_tasks,
             running_subagents: inputs.running_subagents,
+            completed_subagents: inputs.completed_subagents,
             connected_mcp_servers: inputs.connected_mcp_servers,
             todos: inputs.todos,
             scheduled_loops: inputs.scheduled_loops,
@@ -744,6 +749,7 @@ impl CompactionStateContext {
             agent_edited_paths: self.agent_edited_paths.clone(),
             running_tasks: self.running_tasks.clone(),
             running_subagents: self.running_subagents.clone(),
+            completed_subagents: self.completed_subagents.clone(),
             connected_mcp_servers: self.connected_mcp_servers.clone(),
             todos: self.todos.clone(),
             scheduled_loops: self.scheduled_loops.clone(),

@@ -1107,6 +1107,14 @@ fn official_vscode_server_marker_without_ssh_is_not_remote() {
     assert!(!ctx.is_official_vscode_remote);
 }
 
+#[test]
+fn eternal_terminal_version_marks_the_session_remote() {
+    let env = env_from(&[("ET_VERSION", "6.2.9")]);
+    let ctx = build_terminal_context_from_env(&env);
+    assert!(ctx.is_ssh);
+    assert!(!ctx.is_official_vscode_remote);
+}
+
 // -- Zellij detection from ZELLIJ_VERSION (no ZELLIJ or SESSION_NAME) -----
 
 #[test]

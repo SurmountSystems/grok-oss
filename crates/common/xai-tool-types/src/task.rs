@@ -19,8 +19,13 @@ pub struct TaskToolInput {
     #[schemars(description = "The full task prompt for the subagent to execute.")]
     pub prompt: String,
 
-    /// Short description of the task (3-5 words).
-    #[schemars(description = "Short description of the task (3-5 words).")]
+    /// Short description of the task (3-5 words). Omitted, empty, or sentinel
+    /// JSON is filled from `prompt` so a nested L2 spawn still starts an L3.
+    #[schemars(
+        default,
+        description = "Short description of the task (3-5 words). Omit when prompt is present; the product fills it from prompt."
+    )]
+    #[serde(default)]
     pub description: String,
 
     /// Not on the model-facing schema. Omitted JSON defaults to general-purpose
@@ -169,7 +174,8 @@ pub fn default_subagent_type() -> String {
 #[derive(Deserialize)]
 struct TaskToolInputDe {
     prompt: String,
-    description: String,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(default)]
     subagent_type: Option<String>,
     #[serde(
@@ -262,9 +268,10 @@ impl<'de> Deserialize<'de> for TaskToolInput {
 impl From<TaskToolInputDe> for TaskToolInput {
     fn from(raw: TaskToolInputDe) -> Self {
         let specified = raw.subagent_type.as_deref().is_some_and(is_not_sentinel);
+        let description = filled_description(raw.description, &raw.prompt);
         Self {
             prompt: raw.prompt,
-            description: raw.description,
+            description,
             subagent_type: raw
                 .subagent_type
                 .filter(|value| is_not_sentinel(value))
@@ -280,6 +287,53 @@ impl From<TaskToolInputDe> for TaskToolInput {
             workspace: raw.workspace,
             task_id: raw.task_id,
             write_paths: raw.write_paths,
+        }
+    }
+}
+
+/// Fill spawn `description` from `prompt` when the model omitted it.
+fn description_from_prompt(prompt: &str) -> String {
+    let line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let mut out = String::new();
+    for (i, word) in line.split_whitespace().take(5).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        "subagent".to_string()
+    } else {
+        out
+    }
+}
+
+/// Keep an explicit description; otherwise take the first words of `prompt`.
+fn filled_description(description: Option<String>, prompt: &str) -> String {
+    match description {
+        Some(d) if is_not_sentinel(&d) => {
+            let trimmed = d.trim();
+            if trimmed.len() == d.len() {
+                d
+            } else {
+                trimmed.to_string()
+            }
+        }
+        _ => description_from_prompt(prompt),
+    }
+}
+
+impl TaskToolInput {
+    /// Fill `description` from `prompt` when omitted, empty, or a sentinel.
+    /// Dispatch calls this before spawn so an L2 that sent only `prompt` still
+    /// starts an L3.
+    pub fn fill_description_from_prompt(&mut self) {
+        if !is_not_sentinel(&self.description) {
+            self.description = description_from_prompt(&self.prompt);
         }
     }
 }
@@ -1773,6 +1827,74 @@ mod tests {
         assert!(!foreground.run_in_background);
     }
 
+    /// GitHub #220: Goal L2s omit description. A spawn with a prompt must still
+    /// deserialize so dispatch can start an L3.
+    #[test]
+    fn task_tool_input_fills_description_from_prompt_when_omitted() {
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"prompt":"implement the L3 reader"}"#).unwrap();
+        assert_eq!(input.prompt, "implement the L3 reader");
+        assert_eq!(input.description, "implement the L3 reader");
+
+        let empty: TaskToolInput =
+            serde_json::from_str(r#"{"prompt":"implement the L3 reader","description":""}"#)
+                .unwrap();
+        assert_eq!(empty.description, "implement the L3 reader");
+
+        let null: TaskToolInput =
+            serde_json::from_str(r#"{"prompt":"implement the L3 reader","description":null}"#)
+                .unwrap();
+        assert_eq!(null.description, "implement the L3 reader");
+
+        let kept: TaskToolInput = serde_json::from_str(
+            r#"{"prompt":"implement the L3 reader","description":"Walker reader"}"#,
+        )
+        .unwrap();
+        assert_eq!(kept.description, "Walker reader");
+
+        let mut in_process = TaskToolInput {
+            prompt: "implement the L3 reader".into(),
+            description: String::new(),
+            subagent_type: default_subagent_type(),
+            subagent_type_specified: false,
+            run_in_background: true,
+            capability_mode: None,
+            isolation: None,
+            resume_from: None,
+            follow_up: None,
+            cwd: None,
+            model: None,
+            workspace: None,
+            task_id: None,
+            write_paths: Vec::new(),
+        };
+        in_process.fill_description_from_prompt();
+        assert_eq!(in_process.description, "implement the L3 reader");
+    }
+
+    /// GitHub #220: the Operator must not see this string on a spawn that has a prompt.
+    #[test]
+    fn task_tool_input_omitted_description_does_not_surface_missing_required_parameter() {
+        let result =
+            serde_json::from_str::<TaskToolInput>(r#"{"prompt":"implement the L3 reader"}"#);
+        assert!(
+            result.is_ok(),
+            "omitted description with prompt present must parse, got: {result:?}"
+        );
+        let err = match result {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            !err.contains("Missing required parameter: 'description'"),
+            "Operator must not see missing description on a spawn that has a prompt: {err}"
+        );
+        assert!(
+            !err.contains("missing field `description`"),
+            "dispatch must not fail on omitted description when prompt is present: {err}"
+        );
+    }
+
     #[test]
     fn task_tool_input_model_parses_explicit() {
         let input: TaskToolInput =
@@ -1917,6 +2039,32 @@ mod tests {
     fn task_tool_input_schema_omits_subagent_type() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         assert!(schema["properties"].get("subagent_type").is_none());
+    }
+
+    /// GitHub #220: advertised spawn_subagent schema must not require description,
+    /// or the API rejects an L2 spawn that has a prompt.
+    #[test]
+    fn task_tool_input_schema_does_not_require_description() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        let required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            required.iter().any(|name| name.as_str() == Some("prompt")),
+            "prompt stays required: {required:?}"
+        );
+        assert!(
+            !required
+                .iter()
+                .any(|name| name.as_str() == Some("description")),
+            "description must not be required when prompt is present: {required:?}"
+        );
+        assert!(
+            schema["properties"].get("description").is_some(),
+            "description stays advertised so an L2 can still send it"
+        );
     }
 
     #[test]

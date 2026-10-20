@@ -150,17 +150,19 @@ pub(super) fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
     let mut total: u64 = 0;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).context("read zip entry")?;
+        // zip 9 `name()` is Result (UTF-8). Own the string before `by_ref()`.
+        let name = entry.name().context("archive entry name")?.into_owned();
         let Some(relative) = entry.enclosed_name() else {
-            anyhow::bail!("archive entry escapes the destination: {}", entry.name());
+            anyhow::bail!("archive entry escapes the destination: {name}");
         };
         if relative
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
         {
-            anyhow::bail!("archive entry escapes the destination: {}", entry.name());
+            anyhow::bail!("archive entry escapes the destination: {name}");
         }
         if entry.is_symlink() {
-            anyhow::bail!("archive entry is a symlink: {}", entry.name());
+            anyhow::bail!("archive entry is a symlink: {name}");
         }
         let out = dest.join(relative);
         if entry.is_dir() {
@@ -174,7 +176,7 @@ pub(super) fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
             std::fs::File::create(&out).with_context(|| format!("create {}", out.display()))?;
         let budget = MAX_MINGIT_EXTRACTED_BYTES - total + 1;
         let written = std::io::copy(&mut entry.by_ref().take(budget), &mut out_file)
-            .with_context(|| format!("extract {}", entry.name()))?;
+            .with_context(|| format!("extract {name}"))?;
         total += written;
         if total > MAX_MINGIT_EXTRACTED_BYTES {
             anyhow::bail!("archive expands past the {MAX_MINGIT_EXTRACTED_BYTES}-byte cap");

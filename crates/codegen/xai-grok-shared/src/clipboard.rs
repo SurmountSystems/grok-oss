@@ -24,8 +24,8 @@
 //! The user never sees that clipboard.
 //! OSC 52 is an escape sequence that tells the user's *local* terminal emulator to set its clipboard, tunnelling through SSH and multiplexers.
 //!
-//! [`set_text_osc52`] writes an OSC 52 sequence to stderr (the TUI output stream).
-//! [`is_remote_session`] detects SSH/tmux/screen environments where OSC 52 should be preferred.
+//! [`set_text_osc52`] writes an OSC 52 sequence to the controlling TTY (falling back to the TUI stderr fd).
+//! [`is_remote_session`] detects SSH or Eternal Terminal sessions where native clipboard is the remote host.
 
 /// Encoded image data read from the system clipboard.
 ///
@@ -337,10 +337,10 @@ pub fn spool_for_stdin(data: &[u8]) -> anyhow::Result<std::fs::File> {
     tmp.reopen().context("spool clipboard payload to temp file")
 }
 
-/// Build the OSC 52 clipboard-set byte sequence.
+/// Build the OSC 52 clipboard-set byte sequence written to the TTY.
 /// When `tmux_passthrough` is true, wrap it in the tmux DCS passthrough envelope; that is only correct when tmux is the IMMEDIATE terminal.
 /// Otherwise emit a plain OSC 52.
-fn osc52_sequence(text: &str, tmux_passthrough: bool) -> Vec<u8> {
+pub fn osc52_clipboard_sequence(text: &str, tmux_passthrough: bool) -> Vec<u8> {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     if tmux_passthrough {
@@ -350,27 +350,41 @@ fn osc52_sequence(text: &str, tmux_passthrough: bool) -> Vec<u8> {
     }
 }
 
-/// Writes `\x1b]52;c;<base64>\x07` to stderr (the pager's terminal output stream). The caller decides `tmux_passthrough`:
-/// the tmux DCS passthrough envelope is only correct when tmux is the IMMEDIATE terminal. Inside an editor `:terminal`
-/// (Neovim/Vim/Emacs) the immediate emulator is the editor's libvterm, not tmux.
+/// Writes OSC 52 to the controlling TTY so it tunnels et/tmux/ssh to the outer terminal.
+/// The caller decides `tmux_passthrough`: the tmux DCS envelope is only correct when tmux is the IMMEDIATE terminal.
+/// Inside an editor `:terminal` (Neovim/Vim/Emacs) the immediate emulator is the editor's libvterm, not tmux.
+/// Falls back to the TUI stderr fd when `/dev/tty` cannot be opened (no controlling terminal).
 pub fn set_text_osc52(text: &str, tmux_passthrough: bool) -> anyhow::Result<()> {
     use std::io::Write;
 
-    let seq = osc52_sequence(text, tmux_passthrough);
+    let seq = osc52_clipboard_sequence(text, tmux_passthrough);
     crate::stderr::with_locked_stderr(|stderr| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                tty.write_all(&seq)?;
+                return tty.flush();
+            }
+        }
         stderr.write_all(&seq)?;
         stderr.flush()
     })?;
     Ok(())
 }
 
-/// Returns `true` when the process appears to be running inside a remote SSH session (with or without a multiplexer like tmux/screen).
+/// True when `has_var` reports a remote-session marker: OpenSSH `SSH_CONNECTION` / `SSH_TTY` / `SSH_CLIENT`, or Eternal Terminal `ET_VERSION`.
+pub fn is_remote_session_from_env(has_var: impl Fn(&str) -> bool) -> bool {
+    has_var("SSH_CONNECTION")
+        || has_var("SSH_TTY")
+        || has_var("SSH_CLIENT")
+        || has_var("ET_VERSION")
+}
+
+/// Returns `true` when the process appears to be running inside a remote SSH or Eternal Terminal session (with or without a multiplexer like tmux/screen).
 ///
-/// Checks for `SSH_CONNECTION`, `SSH_TTY`, or `SSH_CLIENT` environment variables set by the OpenSSH server on the remote side.
+/// OpenSSH sets `SSH_CONNECTION`, `SSH_TTY`, or `SSH_CLIENT` on the remote side. Eternal Terminal sets `ET_VERSION` and does not set those SSH variables.
 pub fn is_remote_session() -> bool {
-    std::env::var_os("SSH_CONNECTION").is_some()
-        || std::env::var_os("SSH_TTY").is_some()
-        || std::env::var_os("SSH_CLIENT").is_some()
+    is_remote_session_from_env(|key| std::env::var_os(key).is_some())
 }
 
 /// Returns `true` when the process appears to be running inside a container (Docker, Podman, Kubernetes, etc.) without a
@@ -2679,15 +2693,28 @@ mod tests {
 
     #[test]
     fn osc52_sequence_plain() {
-        assert_eq!(osc52_sequence("hi", false), b"\x1b]52;c;aGk=\x07".to_vec());
+        assert_eq!(
+            osc52_clipboard_sequence("hi", false),
+            b"\x1b]52;c;aGk=\x07".to_vec()
+        );
     }
 
     #[test]
     fn osc52_sequence_tmux_passthrough() {
         assert_eq!(
-            osc52_sequence("hi", true),
+            osc52_clipboard_sequence("hi", true),
             b"\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\".to_vec()
         );
+    }
+
+    #[test]
+    fn is_remote_session_from_env_treats_eternal_terminal_as_remote() {
+        assert!(is_remote_session_from_env(|key| key == "ET_VERSION"));
+        assert!(is_remote_session_from_env(|key| key == "SSH_CONNECTION"));
+        assert!(is_remote_session_from_env(|key| key == "SSH_TTY"));
+        assert!(is_remote_session_from_env(|key| key == "SSH_CLIENT"));
+        assert!(!is_remote_session_from_env(|_| false));
+        assert!(!is_remote_session_from_env(|key| key == "TERM_PROGRAM"));
     }
 
     // -----------------------------------------------------------------------

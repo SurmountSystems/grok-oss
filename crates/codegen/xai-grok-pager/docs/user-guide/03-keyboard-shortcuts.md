@@ -345,7 +345,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+.` (alt: `Ctrl+X`) | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** While a **subagent fullscreen view** is open, the L2 floor prompt sends to that L2. The L3 view has no prompt. `q` or `Esc` from the L3 returns to the L2. `q` or `Esc` from the L2 returns to L1. Root-only chords (`Ctrl+P`, `Ctrl+M`, `Ctrl+R`, `Ctrl+O`, `Ctrl+B`, settings, extensions, Shift+Tab) do nothing. `Ctrl+C` cancels the **child's** turn. `Ctrl+Q` still quits (`Ctrl+D` on VS Code family). See [Viewing Subagents in the TUI](16-subagents.md#fullscreen-framed-view-the-child-transcript).
+**Note:** While a **nested fullscreen view** is open, the L2 floor prompt sends to that L2. The L3 view has no prompt. `q` or `Esc` from the L3 returns to the L2. `q` or `Esc` from the L2 returns to L1. Root-only chords (`Ctrl+P`, `Ctrl+M`, `Ctrl+R`, `Ctrl+O`, `Ctrl+B`, settings, extensions, Shift+Tab) do nothing. `Ctrl+C` cancels the **nested session's** turn. `Ctrl+Q` still quits (`Ctrl+D` on VS Code family). See [Viewing Subagents in the TUI](16-subagents.md#fullscreen-framed-view-the-nested-transcript).
 
 **Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker.
 
@@ -412,10 +412,10 @@ A collapsed paste chip paints `[Pasted: N lines]`. Enter sends or interjects tha
 - The **send now** chord is **cancel-and-send**: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
   - **Non-empty composer** → cancel and send that text now.
   - **Empty composer** + a queued follow-up → send the **top** queued follow-up now (no need to focus the queue pane). On the queue pane, the same chord (or the **[Send now]** button) sends the **selected** row.
-  - **Idle with live background subagents** + held queue (or typed text) → force-start the next turn without waiting for children.
+  - **Idle with live background nested sessions** + held queue (or typed text) → force-start the next turn without waiting for those nested sessions.
   - **Idle** with nothing held / nothing to force → toast (never a silent no-op).
 - While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately when nothing else is already queued — the shell cancels the blocked turn and runs your message next.
-- While the parent is **idle with live background subagents**, plain `Enter` with text **queues and holds** (does not start a conflicting main turn). Use **send now** to force, or wait for children to finish.
+- While L1 is **idle with live background nested sessions**, plain `Enter` with text **queues and holds** (does not start a conflicting L1 turn). Use **send now** to force, or wait for those nested sessions to finish.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|

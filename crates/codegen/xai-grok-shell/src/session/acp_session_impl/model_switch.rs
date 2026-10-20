@@ -85,7 +85,7 @@ impl SessionActor {
             sampling_config.context_window = window.get();
         }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
-            let capped = crate::util::config::session_sampling_window(
+            let capped = crate::util::config::session_catalog_window(
                 sampling_config.context_window,
                 self.startup_hints.is_subagent,
             );
