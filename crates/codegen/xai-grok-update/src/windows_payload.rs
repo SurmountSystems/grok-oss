@@ -155,7 +155,9 @@ pub(super) fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
         let Some(relative) = entry.enclosed_name() else {
             anyhow::bail!("archive entry escapes the destination: {name}");
         };
-        if relative
+        // zip 9 `enclosed_name` drops CurDir ("./cmd/git.exe" -> "cmd/git.exe").
+        // Refuse the raw name, not the sanitized path.
+        if Path::new(&name)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
         {

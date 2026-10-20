@@ -1976,6 +1976,71 @@ fn kitty_skip_vte_takes_precedence_over_tmux_extended_keys_off() {
     assert_eq!(ctx.kitty_skip_reason(), Some("vte"));
 }
 
+/// Operator stack: grok-oss on surmount-1 inside Eternal Terminal and tmux,
+/// tunneled to alacritty on horizon. The live `supports_keyboard_enhancement`
+/// probe often fails through that path, and global `extended-keys` may be off.
+/// Product still requests kitty flags so Shift+Enter is CSI 13;2u, not bare CR.
+#[test]
+fn remote_tmux_alacritty_et_still_requests_keyboard_enhancement() {
+    let env = env_from(&[
+        ("TERM_PROGRAM", "alacritty"),
+        ("TERM", "alacritty"),
+        ("TMUX", "/tmp/tmux-1000/default,1,0"),
+        ("TMUX_PANE", "%0"),
+        ("ET_VERSION", "6.2.9"),
+    ]);
+    let mut ctx = build_terminal_context_from_env(&env);
+    ctx.tmux_version = Some("tmux 3.4".to_owned());
+    ctx.tmux_extended_keys = Some("off".to_owned());
+    assert_eq!(ctx.brand, TerminalName::Alacritty);
+    assert_eq!(ctx.multiplexer, MultiplexerKind::Tmux);
+    assert!(
+        ctx.is_ssh,
+        "Eternal Terminal is a remote session even when SSH_* is unset"
+    );
+    assert_eq!(ctx.kitty_skip_reason(), Some("tmux_extended_keys_off"));
+    assert_eq!(ctx.keyboard_enhancement_skip_reason(None), None);
+    assert_eq!(ctx.keyboard_enhancement_skip_reason(Some(false)), None);
+    assert_eq!(
+        negotiated_kitty_flags(
+            None,
+            Some(kitty_keyboard::ALACRITTY_BROKEN_EVENT_TYPES_MAX_PACKED)
+        ),
+        crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+    );
+}
+
+#[test]
+fn local_probe_failure_still_skips_keyboard_enhancement() {
+    let ctx = TerminalContext {
+        brand: TerminalName::Alacritty,
+        env_brand: TerminalName::Alacritty,
+        ..Default::default()
+    };
+    assert_eq!(ctx.kitty_skip_reason(), None);
+    assert_eq!(
+        ctx.keyboard_enhancement_skip_reason(None),
+        Some("unsupported")
+    );
+    assert_eq!(
+        ctx.keyboard_enhancement_skip_reason(Some(false)),
+        Some("unsupported")
+    );
+    assert_eq!(ctx.keyboard_enhancement_skip_reason(Some(true)), None);
+}
+
+#[test]
+fn vscode_over_et_still_skips_keyboard_enhancement() {
+    let ctx = TerminalContext {
+        brand: TerminalName::VsCode,
+        env_brand: TerminalName::VsCode,
+        is_ssh: true,
+        ..Default::default()
+    };
+    assert_eq!(ctx.kitty_skip_reason(), Some("vscode"));
+    assert_eq!(ctx.keyboard_enhancement_skip_reason(None), Some("vscode"));
+}
+
 #[test]
 fn kitty_skip_vte_takes_precedence_over_screen() {
     let ctx = TerminalContext {

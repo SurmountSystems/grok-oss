@@ -755,10 +755,14 @@ impl SessionActor {
         // Nested turns keep the JWT the live sampler is already talking with.
         // AuthManager recovery can mint a different token that cli-chat-proxy still rejects.
         let nested_live = if self.startup_hints.is_subagent {
-            self.sampler_handle
-                .current_api_key()
-                .await
-                .filter(|key| !key.trim().is_empty())
+            match self.sampler_handle.live_api_key() {
+                Some(key) => Some(key),
+                None => self
+                    .sampler_handle
+                    .current_api_key()
+                    .await
+                    .filter(|key| !key.trim().is_empty()),
+            }
         } else {
             None
         };
@@ -1376,7 +1380,10 @@ impl SessionActor {
     }
 
     /// Nested 401 after recovery: resume with the JWT the live sampler is talking with.
+    /// Called from `handle_sampling_failure` before compact / EndChildWithoutCompact.
     /// Nested skips AuthManager `try_recover_unauthorized` (Unlock/Prompt) and auth_transient.
+    /// `current_api_key()` mailbox can be empty on current_thread before the actor
+    /// runs; stamp the spawn / last-restamp JWT in that case.
     async fn try_resume_nested_401_with_live_sampler_jwt(
         &self,
         credential: xai_grok_sampling_types::SentCredential,
@@ -1384,11 +1391,14 @@ impl SessionActor {
         if !self.startup_hints.is_subagent {
             return None;
         }
-        let key = self
-            .sampler_handle
-            .current_api_key()
-            .await
-            .filter(|key| !key.trim().is_empty())?;
+        let key = if let Some(key) = self.sampler_handle.live_api_key() {
+            key
+        } else {
+            self.sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty())?
+        };
         tracing::info!(
             session_id = %self.session_info.id.0,
             "auth recovery: nested 401, stamping live sampler JWT, retrying"
@@ -1516,6 +1526,20 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
+        // Nested 401 after recovery (plain Unauthorized): resume with the live
+        // sampler JWT BEFORE compact / EndChildWithoutCompact. Nested sampling
+        // is 40% of catalog, so a 401 on a full nested window used to compact
+        // (or end the child) and never reach this arm. Nested skips Unlock.
+        // Missing-auth-context is not this arm (pager recoveredBearer).
+        if self.startup_hints.is_subagent
+            && !crate::extensions::notification::is_nested_missing_auth_context(&error.message)
+            && (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && let Some(recovery) = self
+                .try_resume_nested_401_with_live_sampler_jwt(error.credential)
+                .await
+        {
+            return Ok(recovery);
+        }
         // An L3 specialist, and a once-run nested role, does not auto-compact.
         // `never_auto_compact` is that gate (not `is_l3_session` alone).
         // Full is the session sampling window at or over (`>=`). A catalog
@@ -1622,6 +1646,8 @@ impl SessionActor {
 
         // Nested missing-auth, or parent empty-Bearer missing-auth. Stamp the live sampler JWT.
         // Do not park 50 uncharged resubmits. Do not stamp a parent `auth_kind=bearer` 401.
+        // Nested missing-auth that does not stamp still uses recoveredBearer (pager), not this arm.
+        // Plain nested 401 already resumed with the live sampler JWT before compact.
         if crate::extensions::notification::should_stamp_parent_bearer_on_missing_auth(
             &detailed_message,
             self.startup_hints.is_subagent,
@@ -1741,18 +1767,7 @@ impl SessionActor {
             );
         }
 
-        // Nested 401 while the parent sampler still talks: resume with that JWT.
-        // Nested skips AuthManager try_recover_unauthorized (Unlock/Prompt).
-        if self.startup_hints.is_subagent
-            && !crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
-            && auth_recovery_eligible
-            && let Some(recovery) = self
-                .try_resume_nested_401_with_live_sampler_jwt(error.credential)
-                .await
-        {
-            return Ok(recovery);
-        }
-
+        // Nested 401 already resumed with the live sampler JWT above (no Unlock).
         // Last-resort recovery used to short-circuit on whatever is in memory, so it reported success with the bearer the server had just rejected.
         // That bearer was resubmitted until the turn's retry budget ran out. Recovery already walks disk adoption and the authority first.
         // Missing-auth-context already tried a one-shot stamp above. Do not park it.
@@ -2415,14 +2430,18 @@ impl SessionActor {
     /// Session-token path is best-effort: on success, update credentials and return.
     /// On failure, do not fall through to the JWT/config.toml branch when the session gate was active; that path is for BYOK JWTs only.
     pub(crate) async fn refresh_token_if_expired(&self) {
-        if self.startup_hints.is_subagent
-            && let Some(live) = self.sampler_handle.current_api_key().await
-        {
-            let creds = self.chat_state_handle.get_credentials().await;
-            if creds.api_key.as_deref() != Some(live.as_str()) {
-                self.set_chat_api_key(live).await;
+        if self.startup_hints.is_subagent {
+            let live = match self.sampler_handle.live_api_key() {
+                Some(key) => Some(key),
+                None => self.sampler_handle.current_api_key().await,
+            };
+            if let Some(live) = live {
+                let creds = self.chat_state_handle.get_credentials().await;
+                if creds.api_key.as_deref() != Some(live.as_str()) {
+                    self.set_chat_api_key(live).await;
+                }
+                return;
             }
-            return;
         }
         // Client-wide `[inference]` / GROK_API_* already chose a custom host and
         // Bearer key. Do not write a SuperGrok JWT into chat-state, and do not

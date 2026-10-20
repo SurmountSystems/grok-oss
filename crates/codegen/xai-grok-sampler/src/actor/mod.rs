@@ -36,6 +36,7 @@ impl SamplerActor {
         event_tx: mpsc::UnboundedSender<SamplingEvent>,
     ) -> SamplerHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let live_api_key = config.api_key.clone();
         let actor = Self {
             cmd_rx,
             event_tx,
@@ -43,7 +44,7 @@ impl SamplerActor {
             tasks: JoinSet::new(),
         };
         tokio::spawn(actor.run());
-        SamplerHandle::new(cmd_tx)
+        SamplerHandle::new(cmd_tx, live_api_key)
     }
 
     async fn run(mut self) {

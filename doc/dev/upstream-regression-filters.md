@@ -1200,6 +1200,15 @@ A 75% centered overlay is a failed land for default soft park.
 | `composer_multiline_off_shift_enter_sends_not_newline` | Main Human box Shift+Enter sends when `[ui] composer_multiline` is false |
 | `composer_multiline_on_shift_enter_inserts_newline` | Main Human box Shift+Enter inserts a newline when the persist flag is on |
 | `composer_shift_enter_inserts_newline_and_does_not_submit` | Composer Shift+Enter inserts a newline and does not submit, including at the end of the last line and when session Multiline is on. Bare Enter at the end of the last line still submits (idle send / mid-turn interject). Do not steal #85. After Shift+Enter the composer still has the text plus newline |
+| `kitty_csi_u_shift_enter_inserts_newline_and_does_not_submit` | Kitty CSI-u Shift+Enter (`CSI 13;2u` / crossterm Enter+SHIFT) inserts a newline and does not submit. Bare Enter at the end of the last line still submits. Do not steal #85 |
+| `remote_tmux_alacritty_et_still_requests_keyboard_enhancement` | Remote ET_VERSION + tmux + alacritty still requests kitty keyboard flags so SHIFT survives et+tmux, even when the live probe fails and global `extended-keys` is off |
+| `local_probe_failure_still_skips_keyboard_enhancement` | Local (non-SSH) probe miss still skips pushing kitty flags |
+| `vscode_over_et_still_skips_keyboard_enhancement` | VS Code integrated terminal still skips kitty flags even over Eternal Terminal |
+| `enable_extended_keys_uses_session_set_option` | Session-level `tmux set-option extended-keys on` (no `-g`); doctor still offers the global tmux.conf fix |
+| `shift_enter_csi_u_is_kitty_encoding` | Product constant for Shift+Enter CSI-u is `CSI 13;2u` |
+| `kitty_disambiguate_event_types_push_is_tracked` | wrap tracks child CSI > 3u PushKeyboardEnhancementFlags and restores CSI < u |
+| `kitty_csi_u_shift_enter_key_report_is_not_a_push` | wrap treats CSI 13;2u as a key report, not a kitty stack push |
+| `csi_kitty_disambiguate_push_and_shift_enter_report_pass_through` | wrap forwards CSI > 3u and CSI 13;2u; only the push is restored |
 | `plan_prompt_ctrl_z_restores_wiped_human_box` | Prompt-focused Ctrl+Z restores a wiped Human box |
 | `preview_typed_comment_rides_along_on_approve` | Preview type-after-park notes ride along with Approve |
 | `prompt_tab_typed_comment_rides_along_on_approve` | Tab to Prompt then Approve still sends typed notes |
@@ -1231,6 +1240,7 @@ cargo test -p xai-grok-pager --lib -- \
   composer_multiline_off_shift_enter_sends_not_newline \
   composer_multiline_on_shift_enter_inserts_newline \
   composer_shift_enter_inserts_newline_and_does_not_submit \
+  kitty_csi_u_shift_enter_inserts_newline_and_does_not_submit \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -1248,7 +1258,12 @@ cargo test -p xai-grok-pager --lib -- \
   plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown
 cargo test -p xai-grok-shell --lib -- keystroke_burst_does_not_flush_unsent_draft_every_char
 cargo test -p xai-grok-shared --lib -- composer_multiline_defaults_on
-cargo test -p xai-grok-pager-render --lib -- prime_applies_composer_multiline_from_ui
+cargo test -p xai-grok-pager-render --lib -- prime_applies_composer_multiline_from_ui \
+  remote_tmux_alacritty_et_still_requests_keyboard_enhancement \
+  local_probe_failure_still_skips_keyboard_enhancement \
+  vscode_over_et_still_skips_keyboard_enhancement \
+  enable_extended_keys_uses_session_set_option \
+  shift_enter_csi_u_is_kitty_encoding
 cargo test -p xai-grok-pager --test settings_e2e -- composer_multiline
 ```
 
@@ -2620,6 +2635,7 @@ cargo test -p xai-grok-pager --lib -- \
   composer_multiline_off_shift_enter_sends_not_newline \
   composer_multiline_on_shift_enter_inserts_newline \
   composer_shift_enter_inserts_newline_and_does_not_submit \
+  kitty_csi_u_shift_enter_inserts_newline_and_does_not_submit \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -2629,6 +2645,9 @@ cargo test -p xai-grok-pager --lib -- \
   approve_with_composer_comments_sends_one_human_line \
   empty_approve_does_not_send_composer_as_second_prompt \
   resume_restore_keeps_revise_box_draft \
+  kitty_disambiguate_event_types_push_is_tracked \
+  kitty_csi_u_shift_enter_key_report_is_not_a_push \
+  csi_kitty_disambiguate_push_and_shift_enter_report_pass_through \
   isolated_present_preview_click_approve_does_not_drop_human_box_prompt \
   isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \

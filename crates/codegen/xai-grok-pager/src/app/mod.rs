@@ -1658,12 +1658,15 @@ fn init_terminal(
         startup_typeahead.extend(event_loop::capture_startup_typeahead(drain_timeout));
         crate::theme::apply_cursor_color();
         let ctx = crate::terminal::terminal_context();
-        let skip_reason: Option<&str> =
-            ctx.kitty_skip_reason()
-                .or_else(|| match terminal::supports_keyboard_enhancement() {
-                    Ok(true) => None,
-                    _ => Some("unsupported"),
-                });
+        if ctx.is_tmux_backed() {
+            let enabled = crate::terminal::enable_tmux_extended_keys();
+            tracing::info!(
+                tmux.extended_keys_enabled = enabled,
+                "tmux extended-keys for Shift+Enter CSI-u"
+            );
+        }
+        let probe_supported = terminal::supports_keyboard_enhancement().ok();
+        let skip_reason: Option<&str> = ctx.keyboard_enhancement_skip_reason(probe_supported);
         let alacritty_conservative_version = (ctx.brand
             == crate::terminal::TerminalName::Alacritty)
             .then_some(crate::terminal::kitty_keyboard::ALACRITTY_BROKEN_EVENT_TYPES_MAX_PACKED);

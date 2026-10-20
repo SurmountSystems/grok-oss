@@ -356,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn kitty_disambiguate_event_types_push_is_tracked() {
+        // grok-oss PushKeyboardEnhancementFlags(DISAMBIGUATE|EVENT_TYPES) is CSI > 3u
+        let out = restore_for(&[b"\x1b[>3u"]);
+        assert_eq!(out, b"\x1b[<u");
+    }
+
+    #[test]
+    fn kitty_csi_u_shift_enter_key_report_is_not_a_push() {
+        // CSI 13;2u is Shift+Enter, not a keyboard-stack push. wrap must not pop
+        // an enclosing kitty stack because a key report flowed through.
+        assert!(restore_for(&[b"\x1b[13;2u"]).is_empty());
+    }
+
+    #[test]
     fn restore_ends_synchronized_update_first() {
         let out = restore_for(&[b"\x1b[?1049h", b"\x1b[?1003h", b"\x1b[?2026h"]);
         assert!(

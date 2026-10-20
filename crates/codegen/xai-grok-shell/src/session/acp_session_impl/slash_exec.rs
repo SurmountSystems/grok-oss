@@ -918,6 +918,8 @@ impl SessionActor {
                 self.goal_tracker.lock().clear();
                 self.goal_continuation_streak
                     .store(0, std::sync::atomic::Ordering::Relaxed);
+                self.goal_repeat_stop_retries
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 self.goal_blocked_streak
                     .store(0, std::sync::atomic::Ordering::Relaxed);
                 self.goal_turn_task_ids.lock().clear();

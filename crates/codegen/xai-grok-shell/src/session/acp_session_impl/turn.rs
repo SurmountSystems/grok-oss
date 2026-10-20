@@ -2105,6 +2105,8 @@ impl SessionActor {
         if turn_succeeded && goal_active_now {
             self.goal_continuation_streak
                 .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.goal_repeat_stop_retries
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             if !suppress_goal_continuation {
                 self.maybe_queue_goal_continuation().await;
             }

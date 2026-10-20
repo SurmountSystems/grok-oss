@@ -807,6 +807,8 @@ impl SessionActor {
         self.clear_pending_classifier_completions();
         self.goal_continuation_streak
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.goal_repeat_stop_retries
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.goal_blocked_streak
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -936,6 +938,8 @@ impl SessionActor {
         };
 
         self.goal_continuation_streak
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.goal_repeat_stop_retries
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.goal_blocked_streak
             .store(0, std::sync::atomic::Ordering::Relaxed);

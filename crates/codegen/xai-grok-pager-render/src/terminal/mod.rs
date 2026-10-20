@@ -37,7 +37,7 @@ pub use keyboard::{
     keyboard_capabilities_for_host,
 };
 pub use kitty_keyboard::{
-    kitty_event_types_withheld, kitty_flags_pushed, kitty_releases_reported,
+    SHIFT_ENTER_CSI_U, kitty_event_types_withheld, kitty_flags_pushed, kitty_releases_reported,
     negotiated_kitty_flags, pushed_kitty_flags, set_pushed_kitty_flags, take_kitty_flags_pushed,
 };
 pub use pop_fence::{PopFence, PopFenceOutcome};
@@ -385,6 +385,29 @@ impl TerminalContext {
             return Some("unknown_no_multiplexer");
         }
         None
+    }
+
+    /// Skip reason for *pushing* kitty keyboard flags at TUI startup.
+    ///
+    /// [`Self::kitty_skip_reason`] still drives doctor / Ctrl+. advertising.
+    /// This path still requests flags on remote Eternal Terminal / SSH (like OSC 52
+    /// on `ET_VERSION`): the live `supports_keyboard_enhancement` probe often fails
+    /// through et+tmux, and `extended-keys off` is enabled for this tmux session at
+    /// startup so Shift+Enter CSI-u (`CSI 13;2u`) survives.
+    pub fn keyboard_enhancement_skip_reason(
+        &self,
+        probe_supported: Option<bool>,
+    ) -> Option<&'static str> {
+        match self.kitty_skip_reason() {
+            Some("tmux_extended_keys_off") => {}
+            Some(reason) => return Some(reason),
+            None => {}
+        }
+        match probe_supported {
+            Some(true) => None,
+            _ if self.is_ssh => None,
+            Some(false) | None => Some("unsupported"),
+        }
     }
 
     /// Multiplexer layers that drop Kitty keyboard / extended Enter, independent of brand.
@@ -964,6 +987,12 @@ pub fn detect_tmux_version() -> Option<String> {
 /// Trimmed value of tmux's global `extended-keys` option.
 pub fn detect_tmux_extended_keys() -> Option<String> {
     tmux_probe::query_option("extended-keys").into_option()
+}
+
+/// Enable tmux `extended-keys` for this session so Shift+Enter CSI-u survives.
+/// Session-level (not `-g`): doctor still offers the tmux.conf fix for the global option.
+pub fn enable_tmux_extended_keys() -> bool {
+    tmux_probe::enable_extended_keys()
 }
 
 /// Parse major.minor from a plain semver-ish string like `"3.6.0"` or `"1.2"`.

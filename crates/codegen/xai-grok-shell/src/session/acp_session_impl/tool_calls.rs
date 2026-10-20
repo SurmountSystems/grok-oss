@@ -262,7 +262,7 @@ fn task_starts_nested_explore_or_implement(task: &xai_tool_types::TaskToolInput)
 }
 /// Model-facing refuse when nested explore or implement spawn is blocked.
 pub(super) fn plan_mode_explore_implement_spawn_rejected_message() -> String {
-    "Rejected: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.".to_string()
+    "Rejected: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. Hierarchical fast path: one already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.".to_string()
 }
 /// Typed view of an `exit_plan_mode` approval decision.
 /// The wire type (`ExitPlanModeExtResponse`) carries `outcome` as a string.

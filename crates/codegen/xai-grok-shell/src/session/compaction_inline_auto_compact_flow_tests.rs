@@ -210,6 +210,7 @@ async fn create_test_actor(
         )),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
+        goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),
         goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
         goal_update_rx: std::cell::RefCell::new(None),
         goal_update_tx: tokio::sync::mpsc::unbounded_channel().0,
@@ -2325,7 +2326,9 @@ async fn goal_plan_writer_forked_parent_full_window_at_spawn_must_not_immediatel
         .await;
 }
 
-/// L2 nested sessions still AUTO compact at 95% of the 200k window.
+/// L2 nested sessions still AUTO compact at 95% of the live window.
+/// Nested catalog stays 200k. Live is 40% of that catalog (80k). Compact
+/// fires at 95% of live (76k). GitHub issue 221.
 #[tokio::test(flavor = "current_thread")]
 async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
     let local = tokio::task::LocalSet::new();
@@ -2333,18 +2336,43 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
         .run_until(async {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut under = create_test_actor(
+                75_999,
+                200_000,
+                95,
+                gateway_tx.clone(),
+                persistence_tx.clone(),
+            )
+            .await;
+            under.startup_hints.is_subagent = true;
+            under.tool_context.subagent_depth = 1;
+            assert!(
+                under.check_auto_compact_needed().await.is_none(),
+                "L2 under 95% of the nested 80k live window must not AUTO compact"
+            );
             let mut actor =
-                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+                create_test_actor(76_000, 200_000, 95, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.tool_context.subagent_depth = 1;
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("L2 stored catalog")
+                    .context_window
+                    .get(),
+                200_000,
+                "nested catalog stays 200k"
+            );
             let trigger = actor.check_auto_compact_needed().await;
             assert!(
                 trigger.is_some(),
-                "L2 at 95% of the nested 200k window must still AUTO compact"
+                "L2 at 95% of the nested 80k live window must still AUTO compact"
             );
             let info = trigger.expect("L2 AUTO trigger");
-            assert_eq!(info.context_window, 200_000);
-            assert_eq!(info.tokens_used, 190_000);
+            assert_eq!(info.context_window, 80_000);
+            assert_eq!(info.tokens_used, 76_000);
         })
         .await;
 }
@@ -2498,7 +2526,7 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let mut actor =
-                create_test_actor(146_000, 200_000, 95, gateway_tx, persistence_tx).await;
+                create_test_actor(70_000, 200_000, 95, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.tool_context.subagent_depth = 2;
             actor.chat_state_handle.push_assistant_response(
@@ -2512,12 +2540,23 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
             let painted = actor.chat_state_handle.get_total_tokens().await;
             let estimate = actor.chat_state_handle.get_estimated_total_tokens().await;
             assert_eq!(
-                painted, 146_000,
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("L3 stored catalog")
+                    .context_window
+                    .get(),
+                200_000,
+                "nested catalog stays 200k"
+            );
+            assert_eq!(
+                painted, 70_000,
                 "painted total changed (painted {painted}, estimate {estimate})"
             );
             assert!(
-                estimate >= 200_000,
-                "estimate stayed under the window (painted {painted}, estimate {estimate})"
+                estimate >= 80_000,
+                "estimate stayed under the nested 80k live window (painted {painted}, estimate {estimate})"
             );
             assert!(
                 !actor.l3_nested_window_is_full().await,
@@ -2527,6 +2566,9 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
         .await;
 }
 
+/// Nested catalog stays 200k. Live is 80k. The coordinator may compact a
+/// specialist at 95% of that live window (76k). The specialist still must
+/// not compact-and-continue. GitHub issue 221.
 #[tokio::test(flavor = "current_thread")]
 async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_cannot_compact_itself() {
     let local = tokio::task::LocalSet::new();
@@ -2535,9 +2577,20 @@ async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_canno
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let mut actor =
-                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+                create_test_actor(76_000, 200_000, 95, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.tool_context.subagent_depth = 2;
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("specialist stored catalog")
+                    .context_window
+                    .get(),
+                200_000,
+                "nested catalog stays 200k"
+            );
             assert!(
                 actor.check_auto_compact_needed().await.is_none(),
                 "the specialist must not compact itself"
@@ -2547,10 +2600,11 @@ async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_canno
                 "the specialist must not start two-pass prefire compact"
             );
             let trigger = actor.compact_specialist_initiated_by_coordinator().await;
-            let info =
-                trigger.expect("the coordinator must be able to compact this specialist near 200k");
-            assert_eq!(info.tokens_used, 190_000);
-            assert_eq!(info.context_window, 200_000);
+            let info = trigger.expect(
+                "the coordinator must be able to compact this specialist at 95% of 80k live",
+            );
+            assert_eq!(info.tokens_used, 76_000);
+            assert_eq!(info.context_window, 80_000);
         })
         .await;
 }

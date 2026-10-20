@@ -2062,6 +2062,53 @@ mod queue_edit_routing_tests {
         crate::appearance::cache::set_composer_multiline(true);
     }
 
+    /// Kitty CSI-u Shift+Enter (`CSI 13;2u`) decodes as Enter+SHIFT and inserts
+    /// a newline without submitting. Same contract as
+    /// [`composer_shift_enter_inserts_newline_and_does_not_submit`]. Bare Enter
+    /// at the end of the last line still submits. Do not steal #85.
+    #[test]
+    fn kitty_csi_u_shift_enter_inserts_newline_and_does_not_submit() {
+        crate::appearance::cache::set_composer_multiline(true);
+        assert_eq!(
+            crate::terminal::SHIFT_ENTER_CSI_U,
+            b"\x1b[13;2u",
+            "kitty CSI-u Shift+Enter is CSI 13;2u"
+        );
+        let body = "write a multiline prompt";
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let mut agent = make_agent();
+        agent.multiline_mode = false;
+        agent.active_pane = AgentPane::Prompt;
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        let outcome = agent.handle_prompt_key_for_test(&shift_enter);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "CSI-u Shift+Enter must insert a newline and not submit, got {outcome:?}"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{body}\n"),
+            "after CSI-u Shift+Enter the composer still has the text plus newline"
+        );
+
+        let mut agent = make_agent();
+        agent.multiline_mode = false;
+        agent.active_pane = AgentPane::Prompt;
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        match agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(
+                    text, body,
+                    "bare Enter at the end of the last line still submits"
+                );
+            }
+            other => panic!("bare Enter at the end of the last line still submits, got {other:?}"),
+        }
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
     /// When the composer has text, that wins over a queued follow-up.
     #[test]
     fn interject_key_composer_text_wins_over_queued_follow_up() {
