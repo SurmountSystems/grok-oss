@@ -101,6 +101,13 @@ fn exported_input_schema(
         }
     }
 
+    // GitHub #220: nested L2 spawn with a prompt and no description still starts
+    // an L3. Drop description from required before the model-facing schema is
+    // advertised, so the API does not reject the call.
+    if let Some(required) = obj.get_mut("required").and_then(|r| r.as_array_mut()) {
+        required.retain(|name| name.as_str() != Some("description"));
+    }
+
     let listed = listed_subagent_types(&params.selectable_subagent_types);
     if !listed.is_empty()
         && let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut())

@@ -35,6 +35,7 @@ pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, Strin
     let mut slide_numbers: Vec<u32> = archive
         .file_names()
         .filter_map(|name| {
+            let name = name.ok()?;
             name.strip_prefix("ppt/slides/slide")?
                 .strip_suffix(".xml")?
                 .parse()

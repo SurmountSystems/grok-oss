@@ -31,6 +31,10 @@ use crossterm::event::KeyboardEnhancementFlags;
 /// Git builds strip `-dev` before packing, so a pre-fix `0.24.2-dev` reports `2402` and escapes this gate.
 pub const ALACRITTY_BROKEN_EVENT_TYPES_MAX_PACKED: u32 = 2401;
 
+/// Kitty CSI-u encoding of Shift+Enter. Crossterm decodes this as
+/// `KeyEvent { code: Enter, modifiers: SHIFT }` when keyboard enhancement is live.
+pub const SHIFT_ENTER_CSI_U: &[u8] = b"\x1b[13;2u";
+
 /// Empty means push nothing. Unknown version never downgrades — DA2 is often skipped, and only a positively identified broken version pays the cost.
 /// No brand check: [`super::da2`]'s gate admits Alacritty alone, so widening that gate widens this one.
 pub fn negotiated_kitty_flags(
@@ -125,5 +129,10 @@ mod tests {
                 "da2_packed={packed:?}"
             );
         }
+    }
+
+    #[test]
+    fn shift_enter_csi_u_is_kitty_encoding() {
+        assert_eq!(SHIFT_ENTER_CSI_U, b"\x1b[13;2u");
     }
 }

@@ -120,6 +120,7 @@ pub struct ActiveAgentReminderState<'a> {
     pub running_commands: &'a [BackgroundTask<'a>],
     pub todos: &'a [TodoItem<'a>],
     pub running_subagents: &'a [RunningSubagent<'a>],
+    pub completed_subagents: &'a [RunningSubagent<'a>],
     pub scheduled_loops: &'a [ScheduledLoop<'a>],
     pub workflows: &'a [WorkflowRun<'a>],
     pub workflow_tool: Option<&'a str>,
@@ -129,6 +130,7 @@ impl ActiveAgentReminderState<'_> {
     pub fn is_empty(&self) -> bool {
         self.running_commands.is_empty()
             && self.running_subagents.is_empty()
+            && self.completed_subagents.is_empty()
             && self.scheduled_loops.is_empty()
             && self.workflows.is_empty()
             && !self.has_actionable_todos()
@@ -240,10 +242,31 @@ pub fn section_running_subagents(
         "## Running Subagents\n\
          These subagents were launched before this compaction and are still running. \
          Keep working; completion is a notification. \
+         Use follow_up with the subagent_id to continue a still-running nested specialist. \
+         A completed id uses resume_from. Do not kill or respawn. \
          Use `{}` with the subagent_id for an optional snapshot (omit timeout or pass 0). \
          Do not start a blocking wait on a long-running builder. \
          Use `{}` with the subagent_id to cancel a subagent.\n{lines}",
         tools.poll, tools.cancel
+    ))
+}
+
+/// `## Completed Subagents`, or `None` when empty. Compact of an L2 keeps
+/// these ids so `resume_from` still works after history is replaced.
+pub fn section_completed_subagents(subagents: &[RunningSubagent<'_>]) -> Option<String> {
+    if subagents.is_empty() {
+        return None;
+    }
+    let lines = subagents
+        .iter()
+        .map(format_subagent_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "## Completed Subagents\n\
+         These nested specialists finished before this compaction. Their ids are still valid. \
+         Use resume_from with the subagent_id to continue a completed specialist. \
+         A running id uses follow_up. Do not kill or respawn.\n{lines}"
     ))
 }
 
@@ -383,6 +406,9 @@ pub fn format_active_agent_sections(
     if let Some(tools) = subagent_tools
         && let Some(s) = section_running_subagents(state.running_subagents, tools)
     {
+        sections.push(s);
+    }
+    if let Some(s) = section_completed_subagents(state.completed_subagents) {
         sections.push(s);
     }
     sections
@@ -574,6 +600,11 @@ mod tests {
                 && out.contains("Do not start a blocking wait"),
             "compact reminder must be fire-and-return, not a blocking wait: {out}"
         );
+        assert!(
+            out.contains("Use follow_up with the subagent_id")
+                && out.contains("A completed id uses resume_from"),
+            "after compact, a running nested specialist is follow_up, not kill: {out}"
+        );
     }
 
     #[test]
@@ -688,6 +719,7 @@ mod tests {
             running_commands: &cmds,
             todos: &todos,
             running_subagents: &agents,
+            completed_subagents: &[],
             scheduled_loops: &loops,
             workflows: &workflows,
             workflow_tool: Some("workflow"),
@@ -746,6 +778,31 @@ mod tests {
         assert!(out.contains("## Running Workflows"));
         assert!(out.contains("These workflows are currently running:"));
         assert!(out.contains("Use `workflow` to inspect or resume a paused run"));
+    }
+
+    #[test]
+    fn compact_reminder_keeps_completed_subagent_id_for_resume_from() {
+        let agents = [RunningSubagent {
+            subagent_id: "l3",
+            subagent_type: Some("explore"),
+            description: Some("implement the reader"),
+            elapsed_secs: 12,
+        }];
+        let state = ActiveAgentReminderState {
+            completed_subagents: &agents,
+            ..Default::default()
+        };
+        let out = format_active_agent_reminder(&state, None).expect("reminder");
+        assert!(out.contains("## Completed Subagents"), "{out}");
+        assert!(
+            out.contains("- \"l3\": `implement the reader` (running for 12s, explore)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Use resume_from with the subagent_id")
+                && out.contains("A running id uses follow_up"),
+            "after compact, a completed nested specialist is resume_from: {out}"
+        );
     }
 
     #[test]

@@ -211,7 +211,7 @@ pub fn context_chip_token_text(
 /// Sampling window the footer chip should paint.
 ///
 /// Live session sampling wins. When that field is empty, L1 falls back to the
-/// catalog window and nested L2/L3 fall back to the 200k nested budget.
+/// catalog window and nested L2/L3 fall back to 40% of nested catalog.
 pub fn footer_sampling_window(
     session_sampling_window: Option<u64>,
     catalog_window: Option<u64>,
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(
             footer_sampling_window(None, Some(500_000), true),
             Some(200_000),
-            "nested empty session sampling falls back to 200k, not catalog 500k"
+            "nested empty session sampling falls back to 40% of 500k catalog, not 500k"
         );
         let sampling = footer_sampling_window(Some(200_000), Some(500_000), true);
         assert_eq!(
@@ -770,6 +770,26 @@ mod tests {
         assert!(
             !text.starts_with("160K / 500K"),
             "nested chrome must not paint unlabeled catalog 500K: {text}"
+        );
+    }
+
+    /// Nested L2/L3 empty-session fallback is 40% of nested catalog.
+    #[test]
+    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+        assert_eq!(
+            footer_sampling_window(None, Some(1_000_000), true),
+            Some(400_000),
+            "1M nested catalog → 400k live"
+        );
+        assert_eq!(
+            footer_sampling_window(None, Some(200_000), true),
+            Some(80_000),
+            "200k nested catalog → 80k live"
+        );
+        assert_eq!(
+            footer_sampling_window(None, Some(500_000), false),
+            Some(500_000),
+            "L1 empty session sampling stays catalog 500k"
         );
     }
 }

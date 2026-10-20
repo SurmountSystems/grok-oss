@@ -1483,6 +1483,7 @@ impl TasksPane {
             .focused(focused)
             .style(self.list_style)
             .render(lp_area, buf, &mut self.list_state);
+        self.record_row_hit_rects(area, list_area);
         if chip_reserve > 0 && list_area.width > 0 {
             let clear_w = chip_reserve.min(list_area.width);
             let clear_x = list_area.x + list_area.width - clear_w;
@@ -1550,12 +1551,43 @@ impl TasksPane {
             thumb_style,
         );
     }
-    fn push_row_hit(&mut self, id: TaskEntryId, area: Rect, y: u16) {
-        if area.width == 0 {
+    /// Store one hit rect per visible painted row from ListPane layout.
+    /// Width is the full pane so the accent column still opens the task.
+    /// Agent rows use `child_session_id`, the same key Enter uses.
+    fn record_row_hit_rects(&mut self, pane: Rect, inner: Rect) {
+        self.row_hit_rects.clear();
+        if pane.width == 0 || inner.height == 0 {
             return;
         }
-        self.row_hit_rects
-            .push((id, Rect::new(area.x, y, area.width, 1)));
+        let scroll = self.list_state.scroll_offset();
+        let layout = self.list_state.layout();
+        let view_h = inner.height as usize;
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let id = match entry {
+                TaskEntry::BgTask { task_id, .. } => TaskEntryId::BgTask(task_id.clone()),
+                TaskEntry::Agent {
+                    child_session_id, ..
+                } => TaskEntryId::Agent(child_session_id.clone()),
+                TaskEntry::Scheduled { task_id, .. } => TaskEntryId::Scheduled(task_id.clone()),
+                TaskEntry::Workflow { name, .. } => TaskEntryId::Workflow(name.clone()),
+                TaskEntry::Header { .. } => continue,
+            };
+            let item_y = layout.virtual_y(idx);
+            let item_h = layout.item_height(idx) as usize;
+            let item_bottom = item_y.saturating_add(item_h);
+            if item_bottom <= scroll {
+                continue;
+            }
+            if item_y >= scroll.saturating_add(view_h) {
+                continue;
+            }
+            let vis_start = item_y.saturating_sub(scroll);
+            let vis_end = item_bottom.saturating_sub(scroll).min(view_h);
+            let height = (vis_end.saturating_sub(vis_start) as u16).max(1);
+            let y = inner.y.saturating_add(vis_start as u16);
+            self.row_hit_rects
+                .push((id, Rect::new(pane.x, y, pane.width, height)));
+        }
     }
     fn render_overlay(
         &mut self,
@@ -1569,7 +1601,6 @@ impl TasksPane {
         let scroll_offset = self.list_state.scroll_offset();
         self.kill_button_rects.clear();
         self.view_button_rects.clear();
-        self.row_hit_rects.clear();
         let visible: Vec<(u16, OverlayEntryData)> = self
             .entries
             .iter()
@@ -1602,18 +1633,24 @@ impl TasksPane {
                     let Some(task) = bg_tasks.get(task_id) else {
                         continue;
                     };
-                    self.push_row_hit(TaskEntryId::BgTask(task_id.clone()), area, y);
                     self.render_bg_task_overlay(area, buf, y, task_id, task, &theme);
                 }
                 OverlayEntryData::Agent(ref subagent_id, ref child_session_id) => {
-                    let Some(info) = subagents.get(child_session_id) else {
-                        continue;
-                    };
-                    self.push_row_hit(TaskEntryId::Agent(subagent_id.clone()), area, y);
-                    self.render_agent_overlay(area, buf, y, subagent_id, info, &theme);
+                    // Row hits were recorded from ListPane layout. Chip
+                    // paint still looks up the registry by either id.
+                    let info = subagents.get(child_session_id).or_else(|| {
+                        subagents.get(subagent_id).or_else(|| {
+                            subagents.values().find(|info| {
+                                info.child_session_id.as_ref() == child_session_id.as_str()
+                                    || info.subagent_id.as_ref() == subagent_id.as_str()
+                            })
+                        })
+                    });
+                    if let Some(info) = info {
+                        self.render_agent_overlay(area, buf, y, subagent_id, info, &theme);
+                    }
                 }
                 OverlayEntryData::Scheduled(ref task_id, ref linked_subagent) => {
-                    self.push_row_hit(TaskEntryId::Scheduled(task_id.clone()), area, y);
                     self.render_scheduled_overlay(
                         area,
                         buf,
@@ -1628,7 +1665,6 @@ impl TasksPane {
                     else {
                         continue;
                     };
-                    self.push_row_hit(TaskEntryId::Workflow(name.clone()), area, y);
                     self.render_workflow_overlay(area, buf, y, &run, &theme);
                 }
             }

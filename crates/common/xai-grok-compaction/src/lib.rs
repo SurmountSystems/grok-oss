@@ -68,7 +68,8 @@ pub use code_compaction::{
     SESSION_ATTENTION_TARGET_PERCENT, SummaryPromptKind, apply_full_replace_compaction,
     assemble_compacted_history, build_summary_prompt, build_summary_prompt_kind,
     format_compact_summary, format_compact_summary_content, is_context_length_error,
-    is_degenerate_summary, sample_full_replace_summary, session_attention_target_tokens,
+    is_degenerate_summary, nested_catalog_window, nested_live_sampling_window,
+    sample_full_replace_summary, session_attention_target_tokens, session_catalog_window,
     session_sampling_window, wrap_user_query,
 };
 pub use item::{

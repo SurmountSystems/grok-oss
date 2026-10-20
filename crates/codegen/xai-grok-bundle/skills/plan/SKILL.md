@@ -69,4 +69,17 @@ Present is not Approve. Empty Enter does not approve. The idle choices stay Appr
 
 ## Nested explore and implement start after Approve
 
-While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write `plan.md` from Operator evidence, present, wait for Approve, then spawn. Do not spawn explore or implement jobs during `/plan`. The Hierarchical fast path stays: one already-named command, one already-named file read, the asked-for report, one already-named one-line edit.
+While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write `plan.md` from Operator evidence, present, wait for Approve, then spawn. Do not spawn explore or implement jobs during `/plan`. The Hierarchical fast path stays: one already-named command, one already-named file read, the asked-for report, one already-named one-line edit. "Just a quick look" is not that path.
+
+## Who spawns whom
+
+**L0** is the dashboard, one level above L1. It is the `grok-oss gui` window. It is not session-board residual and not document D0.
+**L1** is the context where the agent talks to the Operator.
+**L2** is a coordinator. The Operator can still prompt an L2 they are watching.
+**L3** implements and reviews. An L3 does not spawn. There is no L4.
+
+Speaker labels stay Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2. Do not analogize nested agents to OS process trees. Do not call an L3 a coordinator.
+
+Default: L1 spawns a coordinator L2 to accomplish the task. Do not keep implement work on L1. After Approve, L1 spawns L2 coordinators. Each L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. All layers can talk to the layers above and below. Discarded L2 and L3 contexts report up to L1. They do not compact into L1. All tokens in an L3 contribute to the token costs of the L2. `MAX_SUBAGENT_DEPTH` stays 2 (L3 cannot spawn; there is no L4).
+
+L2 always spawns an L3 for implement, diagnosis, edit, or review. L2 does not do that work itself.

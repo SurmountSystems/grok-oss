@@ -6,6 +6,10 @@ use super::*;
 /// Compile-time constant for v1; remote tunability is a deferred follow-up.
 pub(super) const GOAL_CONTINUATION_BACKOFF_THRESHOLD: u32 = 3;
 
+/// Cap on automatic retries of a goal turn stopped because the reply was repeating the same sentence.
+/// After this many auto-retries, the goal pauses and advertises `/goal resume` as today.
+pub(super) const GOAL_REPEAT_STOP_AUTO_RETRY_CAP: u32 = 2;
+
 /// Upper bound on planner attempts per `maybe_run_goal_planner` call, so repeated steering / interruptions cannot spin the retry loop forever.
 pub(super) const GOAL_PLANNER_MAX_ATTEMPTS: u32 = 5;
 

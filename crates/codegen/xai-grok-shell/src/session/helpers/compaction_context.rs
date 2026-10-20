@@ -203,6 +203,16 @@ fn to_system_reminder_inner(
             elapsed_secs: s.elapsed_ms / 1000,
         })
         .collect();
+    let completed_subagents: Vec<_> = ctx
+        .completed_subagents
+        .iter()
+        .map(|s| RunningSubagent {
+            subagent_id: &s.subagent_id,
+            subagent_type: Some(&s.subagent_type),
+            description: Some(&s.description),
+            elapsed_secs: s.elapsed_ms / 1000,
+        })
+        .collect();
     let scheduled_loops: Vec<_> = ctx
         .scheduled_loops
         .iter()
@@ -234,6 +244,7 @@ fn to_system_reminder_inner(
             running_commands: &commands,
             todos: &todos,
             running_subagents: &subagents,
+            completed_subagents: &completed_subagents,
             scheduled_loops: &scheduled_loops,
             workflows: &workflows,
             workflow_tool: ctx.workflow_tool_name.as_deref(),
@@ -303,6 +314,8 @@ fn rewrite_running_subagent_intro(sections: &mut [String], names: Option<&Subage
         "## Running Subagents\n\
          These subagents were launched before this compaction and are still running. \
          Keep working; completion is a notification. \
+         Use follow_up with the subagent_id to continue a still-running nested specialist. \
+         A completed id uses resume_from. Do not kill or respawn. \
          Use `{}` with the subagent_id for an optional snapshot (omit timeout or pass 0). \
          Do not start a blocking wait on a long-running builder. \
          Use `{}` with the subagent_id to cancel a subagent.\n",
@@ -311,6 +324,8 @@ fn rewrite_running_subagent_intro(sections: &mut [String], names: Option<&Subage
     let new_prefix = format!(
         "## Running Subagents\n\
          These subagents were launched before this compaction and are still running. \
+         Use follow_up with the subagent_id to continue a still-running nested specialist. \
+         A completed id uses resume_from. Do not kill or respawn. \
          Use `{}` with the subagent_id to check their status or retrieve results. \
          Use `{}` with the subagent_id to cancel a subagent.\n",
         names.poll, names.cancel
@@ -337,6 +352,7 @@ mod tests {
                 description: "find files".into(),
                 elapsed_ms: 5000,
             }],
+            completed_subagents: vec![],
             recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
@@ -392,6 +408,7 @@ mod tests {
             agent_edited_paths: vec![],
             running_tasks: vec![],
             running_subagents: vec![],
+            completed_subagents: vec![],
             todos: vec![],
             scheduled_loops: vec![],
             workflows: vec![],
@@ -433,6 +450,7 @@ mod tests {
             last_user_query: None,
             agent_edited_paths: vec![],
             running_subagents: vec![],
+            completed_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
             scheduled_loops: vec![],
@@ -475,6 +493,7 @@ mod tests {
             agent_edited_paths: vec![],
             running_tasks: vec![],
             running_subagents: vec![],
+            completed_subagents: vec![],
             connected_mcp_servers: vec![],
             scheduled_loops: vec![],
             workflows: vec![],
@@ -559,6 +578,7 @@ mod tests {
             agent_edited_paths: vec![],
             running_tasks: vec![],
             running_subagents: vec![],
+            completed_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
             scheduled_loops: vec![],
@@ -598,6 +618,7 @@ mod tests {
             agent_edited_paths: vec![],
             running_tasks: vec![],
             running_subagents: vec![],
+            completed_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
             scheduled_loops: vec![ScheduledLoopSummary {
@@ -685,7 +706,37 @@ mod tests {
             to_system_reminder_sync(&ctx, &[], &[], Some(&names), None, None).expect("reminder");
         assert_eq!(
             text,
-            "<system-reminder>\n## Running Background Tasks\nThese tasks are still running:\n- \"task-1\": `cargo test` (running, run_terminal_command)\n\n## Running Subagents\nThese subagents were launched before this compaction and are still running. Use `get_task_output` with the subagent_id to check their status or retrieve results. Use `kill_task` with the subagent_id to cancel a subagent.\n- \"child-1\": `find files` (running for 5s, explore)\n</system-reminder>"
+            "<system-reminder>\n## Running Background Tasks\nThese tasks are still running:\n- \"task-1\": `cargo test` (running, run_terminal_command)\n\n## Running Subagents\nThese subagents were launched before this compaction and are still running. Use follow_up with the subagent_id to continue a still-running nested specialist. A completed id uses resume_from. Do not kill or respawn. Use `get_task_output` with the subagent_id to check their status or retrieve results. Use `kill_task` with the subagent_id to cancel a subagent.\n- \"child-1\": `find files` (running for 5s, explore)\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn system_reminder_keeps_completed_l3_id_for_resume_from_after_compact() {
+        let ctx = CompactionStateContext {
+            completed_subagents: vec![RunningSubagentSummary {
+                subagent_id: "l3".into(),
+                subagent_type: "explore".into(),
+                description: "implement the reader".into(),
+                elapsed_ms: 12_000,
+            }],
+            ..empty_compaction_ctx()
+        };
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None).expect("reminder");
+        assert!(
+            text.contains("## Completed Subagents"),
+            "compact of an L2 must keep completed L3 ids: {text}"
+        );
+        assert!(
+            text.contains("- \"l3\":"),
+            "missing completed L3 id: {text}"
+        );
+        assert!(
+            text.contains("Use resume_from with the subagent_id"),
+            "completed L3 id must remain usable with resume_from: {text}"
+        );
+        assert!(
+            text.contains("A running id uses follow_up"),
+            "compact reminder must not teach kill or respawn: {text}"
         );
     }
 
@@ -709,6 +760,7 @@ mod tests {
             cwd_generation: 0,
             destination_project_instructions: None,
             running_subagents: vec![],
+            completed_subagents: vec![],
             recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],

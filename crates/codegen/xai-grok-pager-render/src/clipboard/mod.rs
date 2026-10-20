@@ -108,6 +108,15 @@ impl std::fmt::Display for ClipboardRoute {
     }
 }
 
+impl ClipboardRoute {
+    /// OSC 52 bytes written to the TTY for this route, including the tmux DCS wrap when required.
+    pub fn osc52_tty_sequence(&self, text: &str) -> Option<Vec<u8>> {
+        self.osc52.then(|| {
+            xai_grok_shared::clipboard::osc52_clipboard_sequence(text, self.osc52_tmux_passthrough)
+        })
+    }
+}
+
 /// `osc52` reads cached ambient markers. Tmux is normally true regardless of SSH; `GROK_CLIPBOARD_NO_OSC52` forces it off everywhere.
 pub fn resolve_clipboard_route(ctx: &TerminalContext) -> ClipboardRoute {
     resolve_clipboard_route_with(
@@ -129,11 +138,19 @@ struct ClipboardRouteOpts {
 /// Pure clipboard-route resolution (kill-switch / wrap-sink injected for tests).
 fn resolve_clipboard_route_with(ctx: &TerminalContext, opts: ClipboardRouteOpts) -> ClipboardRoute {
     let is_tmux = ctx.multiplexer == MultiplexerKind::Tmux;
-    // Linux always emits OSC 52. macOS/Windows only in tmux/SSH/container or when a wrap sink captures it.
+    // TMUX is the wrap signal: DCS passthrough is only correct when tmux is the immediate terminal.
+    let tmux_set = is_tmux
+        || ctx
+            .tmux_meta
+            .tmux_env
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+    // Linux always emits OSC 52. macOS/Windows only in tmux/SSH/ET/container or when a wrap sink captures it.
     // `GROK_CLIPBOARD_NO_OSC52` wins over every automatic path.
     let osc52 = !opts.no_osc52
         && (cfg!(target_os = "linux")
             || is_tmux
+            || ctx.is_ssh
             || is_remote()
             || is_container_no_display()
             || opts.wrap_sink);
@@ -143,7 +160,7 @@ fn resolve_clipboard_route_with(ctx: &TerminalContext, opts: ClipboardRouteOpts)
         osc52,
         // Editor :terminal's immediate emulator is libvterm, not tmux, so don't wrap there
         // No point in tmux passthrough when OSC 52 itself is disabled.
-        osc52_tmux_passthrough: osc52 && is_tmux && ctx.embedded_editor.is_none(),
+        osc52_tmux_passthrough: osc52 && tmux_set && ctx.embedded_editor.is_none(),
     }
 }
 
@@ -392,7 +409,7 @@ fn clipboard_environment(legs: &ClipboardWriteLegs) -> ClipboardEnvironment {
         brand: crate::terminal::terminal_context().brand,
         host_os: crate::host::HostOs::current(),
         display_server: crate::host::DisplayServer::current(),
-        remote: is_remote(),
+        remote: is_remote() || crate::terminal::terminal_context().is_ssh,
         container: is_container_no_display(),
         osc52_sink: osc52_sink_active(),
         wayland_data_control: legs.data_control,
@@ -2111,6 +2128,85 @@ mod tests {
         );
         assert!(tmux.tmux_buffer);
         assert!(!tmux.osc52);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn remote_tmux_alacritty_still_routes_osc52_and_tmux_wrap() {
+        // Operator stack: grok-oss on surmount-1 inside Eternal Terminal and tmux,
+        // tunneled to alacritty on horizon. arboard/wl-copy on the VPS is the wrong paste buffer.
+        let env = crate::terminal::env_from(&[
+            ("TERM_PROGRAM", "alacritty"),
+            ("TERM", "alacritty"),
+            ("TMUX", "/tmp/tmux-1000/default,1,0"),
+            ("TMUX_PANE", "%0"),
+            ("ET_VERSION", "6.2.9"),
+        ]);
+        let ctx = crate::terminal::build_terminal_context_from_env(&env);
+        assert_eq!(ctx.brand, TerminalName::Alacritty);
+        assert_eq!(ctx.multiplexer, MultiplexerKind::Tmux);
+        assert!(
+            ctx.is_ssh,
+            "Eternal Terminal is a remote session even when SSH_* is unset"
+        );
+
+        let route = resolve_clipboard_route_with(
+            &ctx,
+            ClipboardRouteOpts {
+                no_osc52: false,
+                wrap_sink: false,
+            },
+        );
+        assert!(route.native, "keep the native VPS leg");
+        assert!(route.tmux_buffer, "keep the tmux paste-buffer leg");
+        assert!(
+            route.osc52,
+            "OSC 52 must still be routed so copy tunnels et -> tmux -> ssh -> alacritty"
+        );
+        assert!(
+            route.osc52_tmux_passthrough,
+            "TMUX is set; wrap OSC 52 in the tmux DCS form"
+        );
+
+        let seq = route
+            .osc52_tty_sequence("hello")
+            .expect("OSC 52 must emit to the TTY");
+        assert_eq!(
+            seq,
+            xai_grok_shared::clipboard::osc52_clipboard_sequence("hello", true)
+        );
+        assert_eq!(seq, b"\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\");
+
+        let environment = ClipboardEnvironment {
+            brand: ctx.brand,
+            host_os: crate::host::HostOs::Linux,
+            display_server: crate::host::DisplayServer::Wayland,
+            remote: ctx.is_ssh,
+            container: false,
+            osc52_sink: false,
+            wayland_data_control: true,
+            wl_copy_available: true,
+        };
+        let vps_native = ClipboardWriteLegs {
+            route_native: true,
+            route_label: "native+tmux+osc52".into(),
+            cli_tools_tried: "wl-copy".into(),
+            cli_ok_tools: "wl-copy".into(),
+            wl_copy_ok: true,
+            cli_ok: true,
+            arboard_ok: true,
+            data_control: true,
+            tmux_ok: true,
+            osc52_ok: true,
+        };
+        assert!(
+            !super::trust::trusted_native(&vps_native, environment),
+            "VPS wl-copy/arboard is not the Operator paste buffer"
+        );
+        assert_eq!(
+            super::trust::resolve_copy_decision(&vps_native, "hello", environment),
+            ClipboardFeedback::CopiedOscRemote
+        );
     }
 
     #[test]

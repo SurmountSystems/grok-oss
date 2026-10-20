@@ -176,8 +176,10 @@ pub(crate) struct CompactionConfig {
     pub context_window_selection: std::sync::atomic::AtomicU64,
 
     /// Economic-mode Cell (implement-effort / Token Economy). Nested L2/L3
-    /// sampling is capped at 200k via [`crate::util::config::session_sampling_window`];
-    /// L1 uses the catalog window. Soft-cap effective context at 200K for pricing (see
+    /// catalog is capped at 200k via [`crate::util::config::session_catalog_window`];
+    /// nested live sampling is 40% of that catalog via
+    /// [`crate::util::config::session_sampling_window`]. L1 uses the catalog
+    /// window. Soft-cap effective context at 200K for pricing (see
     /// [`crate::util::config::ECONOMIC_CONTEXT_CAP`]). Seeded from
     /// `[ui].economic_mode` at session spawn; toggled per conversation with
     /// `/economic-mode`. `Cell` so slash handlers can flip without `&mut self`.

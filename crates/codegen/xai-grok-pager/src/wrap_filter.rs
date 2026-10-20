@@ -746,6 +746,22 @@ mod tests {
     }
 
     #[test]
+    fn csi_kitty_disambiguate_push_and_shift_enter_report_pass_through() {
+        // Child grok-oss PushKeyboardEnhancementFlags is CSI > 3u; wrap must
+        // forward it so the outer terminal encodes Shift+Enter as CSI 13;2u.
+        let input = b"\x1b[>3u";
+        let (output, restore) = filter_output_tracked(input, 1);
+        assert_eq!(output, input);
+        assert_eq!(restore, b"\x1b[<u");
+        let (output, restore) = filter_output_tracked(b"\x1b[13;2u", 1);
+        assert_eq!(output, b"\x1b[13;2u");
+        assert!(
+            restore.is_empty(),
+            "Shift+Enter CSI-u is a key report, not a stack push"
+        );
+    }
+
+    #[test]
     fn csi_multi_param_set_latches_both_modes() {
         let (output, restore) = filter_output_tracked(b"\x1b[?1002;1006h", 1);
         assert_eq!(output, b"\x1b[?1002;1006h");

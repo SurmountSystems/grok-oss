@@ -954,6 +954,10 @@ pub(crate) struct SessionActor {
     /// Auto-pauses the goal with `GoalPauseReason::BackOff` once the counter reaches [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`].
     /// In-memory only; session restart is itself a reset.
     pub(crate) goal_continuation_streak: std::sync::atomic::AtomicU32,
+    /// Consecutive repeating-sentence stops auto-retried on the active goal turn.
+    /// Caps at [`GOAL_REPEAT_STOP_AUTO_RETRY_CAP`]; then the goal pauses as an infra error.
+    /// In-memory only; session restart is itself a reset.
+    pub(crate) goal_repeat_stop_retries: std::sync::atomic::AtomicU32,
     pub(crate) goal_blocked_streak: std::sync::atomic::AtomicU32,
     pub(crate) goal_update_rx: std::cell::RefCell<
         Option<
@@ -2304,6 +2308,9 @@ mod goal_compaction_reseed_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/goal/goal_repeat_auto_retry_tests.rs"]
+mod goal_repeat_auto_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;

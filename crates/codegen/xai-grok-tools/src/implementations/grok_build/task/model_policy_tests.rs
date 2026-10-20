@@ -57,6 +57,56 @@ fn exported_schema_offers_selectable_types_as_an_optional_enum() {
     assert!(!required.iter().any(|name| name == SUBAGENT_TYPE_PARAM));
 }
 
+/// GitHub #220: the advertised spawn_subagent schema must not require description.
+#[test]
+fn exported_schema_does_not_require_description() {
+    let exported = exported_input_schema(&task_input_schema(), &TaskParams::default());
+    let required = exported
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("required list");
+    assert!(
+        required.iter().any(|name| name == "prompt"),
+        "prompt stays required: {required:?}"
+    );
+    assert!(
+        !required.iter().any(|name| name == "description"),
+        "description must not be required when prompt is present: {required:?}"
+    );
+}
+
+/// GitHub #220: even a derived schema that still lists description as required
+/// must drop it before advertise/dispatch, or the API rejects an L2 spawn that
+/// has a prompt.
+#[test]
+fn exported_schema_strips_description_from_required_when_input_schema_lists_it() {
+    let listed = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "prompt": { "type": "string" },
+            "description": { "type": "string" }
+        },
+        "required": ["prompt", "description"]
+    });
+    let exported = exported_input_schema(&listed, &TaskParams::default());
+    let required = exported
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("required list");
+    assert!(
+        required.iter().any(|name| name == "prompt"),
+        "prompt stays required: {required:?}"
+    );
+    assert!(
+        !required.iter().any(|name| name == "description"),
+        "advertised schema must not require description when prompt is present: {required:?}"
+    );
+    assert!(
+        property(&exported, "description").is_some(),
+        "description stays advertised so an L2 can still send it"
+    );
+}
+
 #[test]
 fn exported_schema_caps_listed_types_and_descriptions() {
     let long = "x".repeat(MAX_SUBAGENT_TYPE_DESCRIPTION_BYTES * 2);

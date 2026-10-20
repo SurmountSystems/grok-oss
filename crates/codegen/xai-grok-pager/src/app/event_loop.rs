@@ -460,6 +460,8 @@ fn suspend_for_child(
     }
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         if kitty_pushed {
+            // Re-push the same flags init_terminal chose, including remote ET_VERSION
+            // sessions that still request DISAMBIGUATE so Shift+Enter is CSI 13;2u.
             let _ = crossterm::execute!(
                 stderr,
                 crossterm::event::PushKeyboardEnhancementFlags(

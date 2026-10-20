@@ -482,7 +482,7 @@ impl SessionActor {
             && !self.is_context_window_fixed(current_config.context_window)
         {
             let effective_cw = if self.startup_hints.is_subagent {
-                std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+                std::num::NonZeroU64::new(crate::util::config::session_catalog_window(
                     new_context_window.get(),
                     true,
                 ))
@@ -539,7 +539,7 @@ impl SessionActor {
             && current_config.context_window != new_cw
             && !self.is_context_window_fixed(current_config.context_window)
         {
-            let effective = crate::util::config::session_sampling_window(
+            let effective = crate::util::config::session_catalog_window(
                 new_cw.get(),
                 self.startup_hints.is_subagent,
             );
@@ -584,7 +584,8 @@ impl SessionActor {
             .update_sampling_config(updated_config);
     }
     /// Uses a kept selection once the catalog lists it, as after a resume without a catalog.
-    /// Nested L2/L3 selections cannot raise the stored window above 200k.
+    /// Nested L2/L3 selections cannot raise the stored catalog above 200k.
+    /// Live sampling is 40% of that catalog.
     pub(super) async fn apply_supported_context_window_selection(&self) {
         self.clamp_stored_sampling_window_for_nested().await;
         let Some(loaded) = crate::session::handle::load_context_window_selection(
@@ -593,7 +594,7 @@ impl SessionActor {
             return;
         };
         let selection = if self.startup_hints.is_subagent {
-            std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+            std::num::NonZeroU64::new(crate::util::config::session_catalog_window(
                 loaded.get(),
                 true,
             ))

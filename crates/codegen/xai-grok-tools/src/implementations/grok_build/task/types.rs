@@ -913,9 +913,9 @@ pub enum SubagentResumeLookup {
 
 /// Outcome of a parent-tool follow-up onto a nested session.
 ///
-/// GitHub #143: L1 follow-up to a running L2. Off (`[subagents]
-/// parent_follow_up = false`) is SpaceXAI spawn/wait/`resume_from`
-/// completed-only.
+/// GitHub #143: L1 follow-up to a running L2. GitHub #222: L2 follow-up
+/// to a running L3 after compact. Off (`[subagents] parent_follow_up =
+/// false`) is SpaceXAI spawn/wait/`resume_from` completed-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubagentFollowUpOutcome {
     /// Enqueued `SessionCommand::Interject` on the child session.
@@ -1040,6 +1040,9 @@ pub enum SubagentEvent {
     Query(SubagentQueryRequest),
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
+    /// Completed descendants reachable from `parent_session_id`. Compact of an
+    /// L2 uses this so `resume_from` still has the L3 id after history is replaced.
+    ListCompleted(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
     Completions(SubagentCompletionsRequest),
     /// `Completions` without draining; the requester's ledger discards the copies at a later drain. `suppress_ids` is ignored.
@@ -1068,7 +1071,8 @@ pub enum SubagentEvent {
     ValidateType(SubagentValidateTypeRequest),
     DescribeType(SubagentDescribeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
-    /// L1 follow-up onto a still-running L2. Not `resume_from`.
+    /// L1 follow-up onto a still-running L2, or L2 follow-up onto its running L3.
+    /// Not `resume_from`.
     FollowUp(SubagentFollowUpRequest),
 }
 

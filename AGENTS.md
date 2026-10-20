@@ -12,13 +12,9 @@ Named tests are contracts. Do not fit tests to code. Observe red, then change th
 
 ## Agent depth
 
-The main session is L1. L1 spawns L2 for implement, diagnosis, and multi-file work. L1 does not do that work.
+L0 is the dashboard, one level above L1. L1 is where the agent talks to the Operator. L2 is a coordinator (the Operator can prompt an L2 they are watching). L3 implements and reviews. An L3 does not spawn. There is no L4. Default: L1 spawns an L2; that L2 spawns and manages L3s. Do not keep implement work on L1. Deep home: [`FORK.md`](FORK.md) § *Hierarchical subagents*.
 
-An L2 coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. An L2 does not grep, diagnose, edit, implement, or review itself.
-
-An L3 implements, researches, or reviews. An L3 does not spawn. There is no L4.
-
-The Hierarchical fast path on L1 is one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit.
+The Hierarchical fast path on L1 is one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path.
 
 Speaker labels are Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2.
 

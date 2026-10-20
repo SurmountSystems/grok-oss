@@ -572,10 +572,11 @@ impl AgentView {
     /// A left click opens that L3 session view.
     /// `Waiting on 1 task...` wins when that row is painted, including when a
     /// description phrase is also on screen. The hit is the lowest row of
-    /// that phrase. An unlabeled `Waiting on task output…` title and a bottom
-    /// `1 subagent still running` cue for this one-task wait are rewritten to
-    /// the same phrase so the lower row is the control. A description phrase
-    /// stays the target when the waiting row is not painted.
+    /// that phrase, plus the open-arrow control painted on that row. An
+    /// unlabeled `Waiting on task output…` title and a bottom `1 subagent
+    /// still running` cue for this one-task wait are rewritten to the same
+    /// phrase so the lower row is the control. A description phrase stays
+    /// the target when the waiting row is not painted.
     fn record_overlay_specialist_status_hit(
         &mut self,
         buf: &mut Buffer,
@@ -604,7 +605,8 @@ impl AgentView {
                 if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
                     && let Some((id, _, _)) = specialists.first()
                 {
-                    self.hit_overlay_nested_status.set(Some(rect));
+                    let hit = paint_waiting_row_open_arrow(buf, area, rect);
+                    self.hit_overlay_nested_status.set(Some(hit));
                     self.overlay_nested_status_child_sid = Some(id.clone());
                     return;
                 }
@@ -849,6 +851,35 @@ fn overlay_nested_specialist_count(view: &AgentView, child_sid: &str) -> usize {
 /// already paints the waiting phrase.
 fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
     paint_one_task_wait_over_phrase(buf, area, ONE_SUBAGENT_STILL_RUNNING);
+}
+
+/// Paint `[↗]` on the one-task wait row so the waited L3 is an open control.
+/// The hit covers the waiting phrase and that arrow. Do not overwrite the
+/// waiting phrase when the row is too short for the arrow.
+fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> Rect {
+    let arrow = crate::glyphs::enlarge_button();
+    let arrow_w: u16 = 3;
+    let right = area.x.saturating_add(area.width);
+    if phrase.height == 0 || area.width < arrow_w {
+        return phrase;
+    }
+    let after_phrase = phrase.x.saturating_add(phrase.width);
+    let arrow_x = if after_phrase.saturating_add(1).saturating_add(arrow_w) <= right {
+        after_phrase.saturating_add(1)
+    } else if after_phrase.saturating_add(arrow_w) <= right {
+        after_phrase
+    } else {
+        return phrase;
+    };
+    let theme = Theme::current();
+    buf.set_span_safe(
+        arrow_x,
+        phrase.y,
+        &Span::styled(arrow, Style::default().fg(theme.gray)),
+        arrow_w,
+    );
+    let hit_end = arrow_x.saturating_add(arrow_w);
+    Rect::new(phrase.x, phrase.y, hit_end.saturating_sub(phrase.x), 1)
 }
 
 /// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the

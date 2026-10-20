@@ -4,6 +4,15 @@ use super::turn_end_hooks::{cancel_details, cancel_reason_for_completion};
 use super::*;
 use prod_mc_cli_chat_proxy_types::feedback_types;
 
+/// What [`SessionActor::apply_infra_pause_after_turn_err`] does with a goal-turn infra error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GoalInfraTurnErrAction {
+    /// Queue the same goal turn. Do not pause. Do not advertise `/goal resume`.
+    AutoRetry,
+    /// Pause as today and print `slash_output` (includes `/goal resume`).
+    Pause { slash_output: String },
+}
+
 impl SessionActor {
     /// On session resume: ensure Resources has the durable todo board and repaint
     /// the client via ACP `Plan`.
@@ -671,24 +680,59 @@ impl SessionActor {
         )
     }
 
+    /// Whether `slash_detail` is the repeating-sentence stream stop.
+    pub(super) fn is_repeating_sentence_turn_stop(slash_detail: &str) -> bool {
+        slash_detail.contains(
+            xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE.trim_end_matches('.'),
+        )
+    }
+
+    /// Decide auto-retry vs pause for a goal infra turn error.
+    pub(super) fn goal_infra_turn_err_action(
+        slash_detail: &str,
+        retries_used: u32,
+    ) -> GoalInfraTurnErrAction {
+        if Self::is_repeating_sentence_turn_stop(slash_detail)
+            && retries_used < GOAL_REPEAT_STOP_AUTO_RETRY_CAP
+        {
+            GoalInfraTurnErrAction::AutoRetry
+        } else {
+            GoalInfraTurnErrAction::Pause {
+                slash_output: format!(
+                    "Goal paused due to turn error: {slash_detail}. Use /goal resume to retry."
+                ),
+            }
+        }
+    }
+
     pub(super) async fn apply_infra_pause_after_turn_err(&self, message: String) -> bool {
         let slash_detail = match message.strip_prefix("Turn failed: ") {
             Some(rest) => rest.to_owned(),
             None => message.clone(),
         };
-        let paused = self
-            .auto_pause_goal_if_active_with_message(
-                crate::session::goal_tracker::GoalPauseReason::Infra,
-                message,
-            )
-            .await;
-        if paused {
-            self.send_slash_command_output(&format!(
-                "Goal paused due to turn error: {slash_detail}. Use /goal resume to retry."
-            ))
-            .await;
+        let retries_used = self
+            .goal_repeat_stop_retries
+            .load(std::sync::atomic::Ordering::Relaxed);
+        match Self::goal_infra_turn_err_action(&slash_detail, retries_used) {
+            GoalInfraTurnErrAction::AutoRetry => {
+                self.goal_repeat_stop_retries
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.maybe_queue_goal_continuation().await;
+                false
+            }
+            GoalInfraTurnErrAction::Pause { slash_output } => {
+                let paused = self
+                    .auto_pause_goal_if_active_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Infra,
+                        message,
+                    )
+                    .await;
+                if paused {
+                    self.send_slash_command_output(&slash_output).await;
+                }
+                paused
+            }
         }
-        paused
     }
 
     /// Extract the best human-readable detail from an infra turn error.
@@ -760,6 +804,71 @@ mod turn_error_fields_tests {
             let err = err_with_status("secret path /Users/someone/keys", status);
             let (_c, _code, detail) = SessionActor::turn_error_fields(&err);
             assert!(detail.is_none(), "status {status} must not ship a detail");
+        }
+    }
+}
+
+#[cfg(test)]
+mod goal_repeat_stop_action_tests {
+    use super::*;
+
+    #[test]
+    fn goal_turn_repeating_sentence_stop_auto_retries_without_resume_hint() {
+        let slash_detail = "Stopped: the reply was repeating the same sentence";
+        match SessionActor::goal_infra_turn_err_action(slash_detail, 0) {
+            GoalInfraTurnErrAction::AutoRetry => {}
+            GoalInfraTurnErrAction::Pause { slash_output } => {
+                panic!(
+                    "a repeating-sentence stop must auto-retry, not emit the pause line: {slash_output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_turn_errors_still_pause_and_advertise_goal_resume() {
+        match SessionActor::goal_infra_turn_err_action("rate limited", 0) {
+            GoalInfraTurnErrAction::Pause { slash_output } => {
+                assert!(
+                    slash_output.contains("Use /goal resume to retry"),
+                    "other turn errors must still advertise /goal resume, got {slash_output}"
+                );
+                assert!(
+                    slash_output.contains("rate limited"),
+                    "pause line must keep the turn-error detail, got {slash_output}"
+                );
+            }
+            GoalInfraTurnErrAction::AutoRetry => {
+                panic!("other turn errors must still pause")
+            }
+        }
+    }
+
+    #[test]
+    fn repeating_sentence_stop_pauses_after_auto_retry_cap() {
+        let slash_detail = xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
+        for used in 0..GOAL_REPEAT_STOP_AUTO_RETRY_CAP {
+            assert!(
+                matches!(
+                    SessionActor::goal_infra_turn_err_action(slash_detail, used),
+                    GoalInfraTurnErrAction::AutoRetry
+                ),
+                "retries_used={used} must auto-retry under cap {GOAL_REPEAT_STOP_AUTO_RETRY_CAP}"
+            );
+        }
+        match SessionActor::goal_infra_turn_err_action(
+            slash_detail,
+            GOAL_REPEAT_STOP_AUTO_RETRY_CAP,
+        ) {
+            GoalInfraTurnErrAction::Pause { slash_output } => {
+                assert!(
+                    slash_output.contains("Use /goal resume to retry"),
+                    "after the cap the pause line must still advertise /goal resume, got {slash_output}"
+                );
+            }
+            GoalInfraTurnErrAction::AutoRetry => {
+                panic!("after the cap the goal must pause as today")
+            }
         }
     }
 }

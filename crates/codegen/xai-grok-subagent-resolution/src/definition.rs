@@ -548,7 +548,60 @@ mod tests {
         );
     }
 
+    /// GitHub #224 / FORK.md agent-depth: default accomplishment is L1 spawning
+    /// an L2 coordinator. L1 does not do the multi-file implement job.
+    /// Hierarchical fast path on L1 is not spawn. Those exceptions are one
+    /// already-named command, one already-named file read, the asked-for short
+    /// report, or one already-named one-line edit. There is no runtime gate
+    /// that forbids L1 tools on that fast path. This test locks the spawn default.
+    #[test]
+    fn default_accomplishment_is_l1_spawn_of_l2_not_l1_doing_the_multi_file_job() {
+        let max_depth = xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+        assert_eq!(
+            max_depth, 2,
+            "unset ceiling is L1 then L2 then L3. Default work is L1 spawn of L2."
+        );
+        assert!(
+            matches!(
+                admit_spawn(0, max_depth),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L2Coordinator,
+                    may_spawn: true,
+                }
+            ),
+            "Default: L1 spawns an L2 coordinator. L1 does not do the multi-file job."
+        );
+        assert!(
+            nested_spawn_allowed(0, max_depth),
+            "L1 may spawn. That is the default accomplishment path, not Hierarchical fast path."
+        );
+        assert!(
+            spawned_agent_may_spawn(0, 1, max_depth),
+            "The L2 that L1 spawned may itself spawn L3s."
+        );
+        let mut l2 = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut l2, None, spawned_agent_may_spawn(0, 1, max_depth));
+        assert!(
+            l2.tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "Default L2 coordinator keeps spawn_subagent so it can spawn L3s."
+        );
+        assert!(
+            !matches!(
+                admit_spawn(0, max_depth),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L3Specialist,
+                    ..
+                }
+            ),
+            "L1 spawn is an L2 coordinator, not an L3 specialist."
+        );
+    }
+
     /// Operator: "L3s cannot spawn L4s or other L3s."
+    /// GitHub #224: L3 still cannot spawn. There is no L4. MAX_SUBAGENT_DEPTH stays 2.
     #[test]
     fn l3_cannot_spawn_l4_or_another_l3() {
         assert!(

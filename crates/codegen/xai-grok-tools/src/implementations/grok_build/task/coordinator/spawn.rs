@@ -7,7 +7,9 @@ use super::super::admission::{
     admit_implement_loop_review_description, is_implement_loop_review_description,
 };
 use super::super::coordinator_state::PendingChild;
-use super::super::types::{SubagentOwner, SubagentRequest, SubagentResult, SubagentSpawnRequest};
+use super::super::types::{
+    SubagentOwner, SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSpawnRequest,
+};
 use super::graph::NestedSpawner;
 use super::queue::{QueuedCaller, QueuedSpawn, StartOrigin};
 use super::{
@@ -98,12 +100,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         // `spawn()` waits on the child result. Reject a live source here so
         // that wait is not the source's exit (or the shared finish signal).
+        // Active is in-memory. Do not start the child (no nested HTTP).
         if let Some(resume_id) = request
             .resume_from
             .as_deref()
             .filter(|id| xai_tool_types::is_not_sentinel(id))
             && self.resume_target_is_still_running(resume_id, &request.parent_session_id)
         {
+            self.runner.on_resume_lookup(SubagentResumeLookup::Active);
             self.reject_queries_waiting_for_spawn(&id);
             reply_rejected(
                 admitted_tx,
@@ -419,7 +423,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         };
         if let Some(source) = self.completed.get(resume_id) {
-            if source.request.parent_session_id == request.parent_session_id {
+            if source.request.parent_session_id == request.parent_session_id
+                || self
+                    .graph
+                    .is_reachable_from(resume_id, &request.parent_session_id)
+            {
                 request.subagent_type = source.request.subagent_type.clone();
             }
             return;

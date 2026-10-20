@@ -192,6 +192,10 @@ pub trait ChildRunner: 'static {
         None
     }
 
+    /// Spawn refused `resume_from` of a still-running source without starting
+    /// the child. Default is a no-op.
+    fn on_resume_lookup(&self, _lookup: SubagentResumeLookup) {}
+
     fn resolve_root(
         &self,
         _agent_id: &xai_message_delivery_core::AgentId,
@@ -882,6 +886,15 @@ fn instant_to_epoch_ms(instant: std::time::Instant) -> u64 {
 }
 
 pub(super) fn active_summary<C>(child: &ActiveChild<C>) -> ActiveSubagentSummary {
+    ActiveSubagentSummary {
+        subagent_id: child.request.id.clone(),
+        subagent_type: child.request.subagent_type.clone(),
+        description: child.request.description.clone(),
+        elapsed_ms: child.started_at.elapsed().as_millis() as u64,
+    }
+}
+
+pub(super) fn completed_summary(child: &CompletedChild) -> ActiveSubagentSummary {
     ActiveSubagentSummary {
         subagent_id: child.request.id.clone(),
         subagent_type: child.request.subagent_type.clone(),

@@ -35,8 +35,8 @@ use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild,
     DisplacedCompletedChild, ForegroundChild, InternalEvent, ListRequest, PendingChild,
     ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
-    background_at_deadline, background_if_caller_gone, completed_snapshot, hand_off_to_background,
-    sleep_until, workflow_outstanding,
+    background_at_deadline, background_if_caller_gone, completed_snapshot, completed_summary,
+    hand_off_to_background, sleep_until, workflow_outstanding,
 };
 use super::types::{
     ActiveAgentMessageOutcome, AgentAddress, HandedOffForegroundSubagent, SpawnedSubagentRef,
@@ -462,6 +462,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .collect();
                 let _ = request.respond_to.send(summaries);
             }
+            SubagentEvent::ListCompleted(request) => {
+                let summaries = self
+                    .completed
+                    .values()
+                    .filter(|child| {
+                        self.graph
+                            .is_reachable_from(&child.request.id, &request.parent_session_id)
+                            && !child.request.owner.is_workflow()
+                    })
+                    .map(completed_summary)
+                    .collect();
+                let _ = request.respond_to.send(summaries);
+            }
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
             }
@@ -859,7 +872,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 {
                     SubagentResumeLookup::Active
                 } else if let Some(child) = self.completed.get(&source_id).filter(|child| {
-                    belongs_to_session(&child.request, Some(parent_session_id.as_str()))
+                    self.resume_source_visible(
+                        &source_id,
+                        &child.request,
+                        parent_session_id.as_str(),
+                    )
                 }) {
                     SubagentResumeLookup::Completed(Box::new(SubagentResumeSource {
                         subagent_id: child.request.id.clone(),
@@ -1751,8 +1768,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
-    /// L1 follow-up onto a running L2. A live L3 is refused before the parent
-    /// check so a reparented specialist still returns [`SubagentFollowUpOutcome::LiveL3Unbothered`].
+    /// L1 follow-up onto a running L2, or L2 follow-up onto its running L3.
+    /// L1 follow-up of a live L3 stays [`SubagentFollowUpOutcome::LiveL3Unbothered`].
     fn handle_follow_up(&mut self, request: SubagentFollowUpRequest) {
         let SubagentFollowUpRequest {
             subagent_id,
@@ -1775,16 +1792,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             });
             return;
         };
-        if child
+        let caller = parent_session_id.as_deref();
+        let is_l3 = child
             .request
             .runtime_overrides
             .spawn_depth
             .is_some_and(|depth| depth >= 2)
-        {
-            let _ = respond_to.send(SubagentFollowUpOutcome::LiveL3Unbothered);
-            return;
-        }
-        if !belongs_to_session(&child.request, parent_session_id.as_deref()) {
+            || self.graph.direct_spawner(&subagent_id).is_some()
+            || child
+                .request
+                .runtime_overrides
+                .immediate_parent_session_id
+                .is_some();
+        if is_l3 {
+            let l2_parent = self.graph.direct_spawner(&subagent_id).or(child
+                .request
+                .runtime_overrides
+                .immediate_parent_session_id
+                .as_deref());
+            if caller.is_none() || caller != l2_parent {
+                let _ = respond_to.send(SubagentFollowUpOutcome::LiveL3Unbothered);
+                return;
+            }
+        } else if !belongs_to_session(&child.request, caller) {
             let _ = respond_to.send(SubagentFollowUpOutcome::NotThisParentsL2);
             return;
         }
@@ -1799,11 +1829,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     /// Pending, active, and queued sources are still running. Queued matches
-    /// the query path's Initializing, not a missing id. A different parent
-    /// session does not count: that id is not this caller's live child.
+    /// the query path's Initializing, not a missing id. GitHub #222: an L2
+    /// may `resume_from` a completed L3 after compact, so reachability from
+    /// the nested spawner counts the same as the reparented root session.
+    fn resume_source_visible(
+        &self,
+        child_id: &str,
+        request: &SubagentRequest,
+        parent_session_id: &str,
+    ) -> bool {
+        belongs_to_session(request, Some(parent_session_id))
+            || self.graph.is_reachable_from(child_id, parent_session_id)
+    }
+
     fn resume_target_is_still_running(&self, source_id: &str, parent_session_id: &str) -> bool {
-        let visible =
-            |request: &SubagentRequest| belongs_to_session(request, Some(parent_session_id));
+        let visible = |request: &SubagentRequest| {
+            self.resume_source_visible(source_id, request, parent_session_id)
+        };
         self.pending
             .get(source_id)
             .is_some_and(|child| visible(&child.request))

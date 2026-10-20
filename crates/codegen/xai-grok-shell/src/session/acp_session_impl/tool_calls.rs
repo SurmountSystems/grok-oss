@@ -262,7 +262,7 @@ fn task_starts_nested_explore_or_implement(task: &xai_tool_types::TaskToolInput)
 }
 /// Model-facing refuse when nested explore or implement spawn is blocked.
 pub(super) fn plan_mode_explore_implement_spawn_rejected_message() -> String {
-    "Rejected: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. One already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.".to_string()
+    "Rejected: while plan_mode_active is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. Write plan.md from Operator evidence, present, and wait for Approve. Hierarchical fast path: one already-named command, one already-named file read, the asked-for report, and one already-named one-line edit stay allowed.".to_string()
 }
 /// Typed view of an `exit_plan_mode` approval decision.
 /// The wire type (`ExitPlanModeExtResponse`) carries `outcome` as a string.
@@ -4242,6 +4242,30 @@ mod plan_mode_edit_gate_tests {
             "refuse text must say nested research and implement start after Approve. Got: {refused}"
         );
     }
+
+    /// GitHub #224 / FORK.md agent-depth: Hierarchical fast path on L1 is not
+    /// spawn. Default accomplishment is still L1 spawn of an L2 coordinator.
+    /// The exceptions stay listed in the refuse text.
+    #[test]
+    fn hierarchical_fast_path_exceptions_are_named_command_read_report_or_one_line_edit() {
+        let refused = super::plan_mode_explore_implement_spawn_rejected_message();
+        for exception in [
+            "one already-named command",
+            "one already-named file read",
+            "the asked-for report",
+            "one already-named one-line edit",
+        ] {
+            assert!(
+                refused.contains(exception),
+                "Hierarchical fast path must list {exception}. Got: {refused}"
+            );
+        }
+        assert!(
+            refused.contains("nested explore and implement jobs are not started"),
+            "default implement/multi-file work is L1 spawn of L2, not L1 doing the job. Got: {refused}"
+        );
+    }
+
     /// Non-edit tools are never gated; they flow to the normal permission path (where yolo may auto-approve them).
     /// Plan mode blocks edits, not bash/reads.
     #[test]

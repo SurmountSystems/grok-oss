@@ -15,6 +15,7 @@ enum TmuxCommand<'a> {
     OptionSupport(&'a str),
     ControlMode,
     ClientFeatures,
+    SetOption { option: &'a str, value: &'a str },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,6 +210,25 @@ pub fn query_control_mode() -> TmuxQueryResult<bool> {
     query_control_mode_with(&LiveTmuxCommandRunner)
 }
 
+/// Session-level `extended-keys on` so Shift+Enter CSI-u survives this tmux session.
+pub fn enable_extended_keys() -> bool {
+    matches!(
+        enable_extended_keys_with(&LiveTmuxCommandRunner),
+        TmuxQueryResult::Available(())
+    )
+}
+
+fn enable_extended_keys_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<()> {
+    match runner.run(TmuxCommand::SetOption {
+        option: "extended-keys",
+        value: "on",
+    }) {
+        Ok(output) if output.status_success => TmuxQueryResult::Available(()),
+        Ok(_) => TmuxQueryResult::Unavailable,
+        Err(error) => TmuxQueryResult::Error(error),
+    }
+}
+
 fn query_control_mode_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<bool> {
     match runner.run(TmuxCommand::ControlMode) {
         Ok(output) if output.status_success => TmuxQueryResult::Available(
@@ -242,6 +262,11 @@ fn build_tmux_command(command: TmuxCommand<'_>) -> Command {
         }
         TmuxCommand::ClientFeatures => {
             cmd.args(["display-message", "-p", "#{client_termfeatures}"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        }
+        TmuxCommand::SetOption { option, value } => {
+            cmd.args(["set-option", option, value])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         }
@@ -308,6 +333,9 @@ mod tests {
                 TmuxCommand::OptionSupport(option) => format!("support:{option}"),
                 TmuxCommand::ControlMode => "control-mode".to_owned(),
                 TmuxCommand::ClientFeatures => "client-features".to_owned(),
+                TmuxCommand::SetOption { option, value } => {
+                    format!("set:{option}={value}")
+                }
             });
             self.output.clone()
         }
@@ -332,6 +360,13 @@ mod tests {
             (
                 TmuxCommand::ClientFeatures,
                 vec!["display-message", "-p", "#{client_termfeatures}"],
+            ),
+            (
+                TmuxCommand::SetOption {
+                    option: "extended-keys",
+                    value: "on",
+                },
+                vec!["set-option", "extended-keys", "on"],
             ),
         ];
         for (request, args) in cases {
@@ -399,6 +434,22 @@ mod tests {
         let runner = FakeRunner::output(false, b"", b"no server running\n");
         assert_eq!(
             query_option_support_with(&runner, "allow-passthrough"),
+            TmuxQueryResult::Unavailable
+        );
+    }
+
+    #[test]
+    fn enable_extended_keys_uses_session_set_option() {
+        let runner = FakeRunner::output(true, b"", b"");
+        assert_eq!(
+            enable_extended_keys_with(&runner),
+            TmuxQueryResult::Available(())
+        );
+        assert_eq!(runner.calls.into_inner(), ["set:extended-keys=on"]);
+
+        let runner = FakeRunner::output(false, b"", b"no server running\n");
+        assert_eq!(
+            enable_extended_keys_with(&runner),
             TmuxQueryResult::Unavailable
         );
     }

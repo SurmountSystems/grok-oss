@@ -476,7 +476,8 @@ identifier that has no matching `fn`.
   turns off server thinking resample. Client sentence-loop Fatal stays
   on (that is the Isolated Preview miss). Named tests:
   `dest_encoder_skip_loop_is_repetitive`,
-  `dest_encoder_skip_single_sentence_four_times_is_repetitive`,
+  `dest_encoder_skip_single_sentence_five_times_is_repetitive`,
+  `short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does`,
   `thought_line_loop_is_repetitive`,
   `chat_completions_stops_dest_encoder_skip_loop`,
   `chat_completions_stops_dest_encoder_skip_loop_in_thought`,
@@ -918,6 +919,21 @@ identifier that has no matching `fn`.
   `CHILD_TASK_DESCRIPTION`. Product cargo is the seam.
 
 Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cannot bypass L1. Only L1 spawns L2s. An L2 spawn is an L3. An L3 cannot spawn.
+
+- [x] **Hierarchical subagents L0 L1 L2 L3 (GitHub #224)**: L0 is the
+  dashboard, one level above L1. L1 is the Operator context. L2 is a
+  coordinator (the Operator can prompt an L2 they are watching). L3
+  implements and reviews. An L3 does not spawn. There is no L4. Default:
+  L1 spawns an L2; that L2 spawns and manages L3s. Do not keep implement
+  work on L1. All tokens in an L3 contribute to the token costs of the
+  L2. Deep home: § *Hierarchical subagents (GitHub #224)*. KEEP GitHub #222
+  tests `l2_after_compact_still_resumes_its_l3s`,
+  `l2_resume_from_of_running_l3_still_fails_active`,
+  `l2_follow_up_of_l3_does_not_spawn_l4`. `MAX_SUBAGENT_DEPTH` stays 2
+  (`default_max_allows_l2_to_spawn_l3`,
+  `l3_spawn_subagent_with_prompt_and_omitted_description_still_cannot_spawn`,
+  `l3_cannot_spawn_l4_or_another_l3`). L3 cost rolls into the L2 row:
+  `subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists`.
 
 - [x] **`/goal` parent coordinates; L2 MUST spawn L3 (Surmount / grok-oss
   fork of the injected prompt):** Upstream `goal_instruction` tells the
@@ -1979,6 +1995,60 @@ This is what speaker-label sentences mean. Dual-pin:
 / Operator / Next. It supersedes the 2026-09-01 line that left the
 composer named Human box.
 
+### Hierarchical subagents (GitHub #224)
+
+This heading is the deep home. [`AGENTS.md`](AGENTS.md) § *Agent depth*
+is the short pointer. Hierarchical subagents are the default way
+grok-oss does work.
+
+**Layers.** L0 is the dashboard, one level above L1. In this product
+that dashboard is `grok-oss gui` (crate `surmount-coordinator-gui`). It
+is not pager `/dashboard`. Those products must not merge. L1 is the
+context where the agent talks to the Operator. L2 is a coordinator. The
+Operator can still prompt an L2 they are watching. L3 implements and
+reviews. An L3 does not spawn. There is no L4. Nested agents are L1,
+L2, and L3. L0 is the dashboard, not a nested spawn layer.
+`MAX_SUBAGENT_DEPTH` stays 2 (L1 spawns L2, L2 spawns L3). Named tests:
+`default_max_allows_l2_to_spawn_l3`,
+`l3_cannot_spawn_l4_or_another_l3`,
+`l3_spawn_subagent_with_prompt_and_omitted_description_still_cannot_spawn`,
+`l2_follow_up_of_l3_does_not_spawn_l4`. KEEP those. Do not weaken them.
+
+Speaker labels stay Operator and Agent. Do not call L1 a parent of L2.
+Do not analogize nested agents to OS process trees.
+
+**Default flow.** It is hard to estimate complexity early. Do not keep
+implement work on L1. Almost always, L1 spawns a coordinator L2 to
+accomplish the task. That L2 spawns and manages L3s. The L2 can restart
+and compact its L3s when those L3s are doing well. After compact, that
+L2 still talks to its L3s: `follow_up` a running L3, `resume_from` a
+completed L3. KEEP GitHub #222 named tests:
+`l2_after_compact_still_resumes_its_l3s`,
+`l2_resume_from_of_running_l3_still_fails_active`,
+`l2_follow_up_of_l3_does_not_spawn_l4`. Do not weaken them.
+
+**Hierarchical fast path on L1.** One already-named command, one
+already-named file read, the asked-for short report, or one
+already-named one-line edit. "Just a quick look" is not that path.
+
+**Token efficiency.** Discarded L2 and L3 contexts do not have to be
+compacted into L1. They report up to L1. That is why hierarchical
+subagents are maximally token efficient.
+
+**Talk.** All layers can talk to the layers above and below.
+
+**Cost.** All tokens in an L3 contribute to the token costs of the L2.
+That is cost, not the L1 context chip. Nested L2 and L3 windows stay
+out of the L1 context chip. Each L2 Subagents-list row is a live atomic
+total of that L2's present plus past usage, including every specialist
+it spawned, with each unit counted once. Named tests:
+`subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists`,
+`nested_specialist_windows_are_not_double_counted_in_the_total`,
+`parent_context_chip_is_l1_window_and_does_not_add_nested_windows`.
+KEEP those. Do not weaken them.
+
+Dual-pin: this heading; [`AGENTS.md`](AGENTS.md) § *Agent depth*.
+
 ### Process
 
 - [x] **Process docs hierarchy**: D0 residual open-only; D1 AGENTS; D2 logs
@@ -1996,14 +2066,17 @@ composer named Human box.
   `main` with `merge -s ours` so the tip is PR-able
   (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted**: CONTRIBUTING / this fork
-- [x] **Parent = HITL only; always three layers (2026-08-15) plus
-  Hierarchical fast path (2026-08-16)**: process pin in [`AGENTS.md`](AGENTS.md)
-  and host `~/.grok/AGENTS.md`. Whenever implement work, multi-file diagnosis,
-  CI, or a regression needs tools, agents are three layers deep. Including
-  implement loops. **Hierarchical fast path** (named): the main thread may do
-  a one-command host question, a single known-path read already named, or
-  read and quote the short on-disk report this thread asked for. That is not
-  a license to diagnose or implement in the main thread. **Mention is in
+- [x] **Parent = HITL only; always three nested layers (2026-08-15) plus
+  Hierarchical fast path (2026-08-16)**: deep home is § *Hierarchical
+  subagents (GitHub #224)*. Nested agents are L1, L2, and L3. L0 is the
+  dashboard above L1, not a nested spawn layer. Process pin in
+  [`AGENTS.md`](AGENTS.md) and host `~/.grok/AGENTS.md`. Whenever implement
+  work, multi-file diagnosis, CI, or a regression needs tools, L1 spawns
+  an L2 and that L2 spawns L3s. Including implement loops. **Hierarchical
+  fast path** (named): one already-named command, one already-named file
+  read, the asked-for short report, or one already-named one-line edit.
+  "Just a quick look" is not that path. That is not a license to diagnose
+  or implement in the main thread. **Mention is in
   scope:** if the operator mentions work, that mention is in scope. **L1
   main:** status, spawn L2, wait, read short reports, board upsert,
   Hierarchical fast path. **L2:** parallelize, spawn L3s, throw context away
@@ -2407,7 +2480,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. `[ui] composer_multiline` defaults on; false makes the Operator box single-line. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Operator green / agent magenta roles. | Class 4 theme + rail `fn`s. `user_guide_operator_agent_speaker_labels_not_human_user_grok`. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill`; `what_instruction_prefers_operator_and_agent_speaker_labels`; `what_skill_does_not_mix_grok_build_version_with_grok_oss`; `user_guide_what_does_not_mix_grok_build_version_with_grok_oss`; `user_guide_operator_agent_speaker_labels_not_human_user_grok` |
-| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. Live list is still-running only. already_exited still dismisses the paused Implementer overlay. Compacting `[↗]` still opens. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. An L2 implement coordinator must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. `capability_mode` All is the full-tool escape. Ordinary L2 still AUTO compact at 95% of nested 200k. A specialist must not compact itself and continue. Parent follow-up onto a running nested L2 is additive (not kill, not respawn). `resume_from` remains completed-continue. L3 overlays stay unbothered. Off is the SpaceXAI option (spawn, wait, resume after exit). | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `l2_implement_coordinator_capability_none_strips_search_replace`, `l2_implement_coordinator_capability_none_strips_grep_and_read_file`, `l2_implement_coordinator_still_keeps_spawn_subagent`, `l3_at_max_depth_keeps_search_replace_and_grep_without_task`, `l2_capability_mode_all_keeps_edit_grep_read`, `l2_auto_compact_still_fires_at_95_percent_of_200k`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `kill_already_exited_dismisses_paused_implementer_overlay`, `restore_nested_occupancy_does_not_unfinish_or_revive_dead_host`, `running_count_matches_listed_live_l2_not_l3`, `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`, `parent_cannot_talk_to_own_l2s_follow_up_enqueues_interject_on_running_l2_without_kill_or_respawn`, `parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_that_specialist`, `resume_from_of_running_l2_still_fails_active`, `parent_follow_up_off_is_upstream_spawn_wait_resume_from_completed_only`, `parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3`, `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_returns_queued_and_does_not_spawn`, `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_and_resume_from_are_mutually_exclusive`, `parent_cannot_talk_to_own_l2s_follow_up_field_is_optional_and_distinct_from_resume_from`, `shell_child_follow_up_sends_session_command_interject_on_child_session`, `subagents_config_parent_follow_up_false_parses_and_omitted_defaults_true`, `resolve_subagents_copies_parent_follow_up`, `nested_spawner_can_resume_from_completed_reparented_child`, `l3_overlay_send_prompt_does_not_reach_l3_or_l1`, `l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn`, `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count`, `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan`. |
+| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | GitHub #224 deep home: § *Hierarchical subagents*. L0 dashboard, L1 Operator context, L2 coordinator, L3 implement/review, no L4. L3 tokens roll into L2 cost. Worktree isolation off by default. Soft interject never cancels. Three nested layers (L1 L2 L3). Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. Live list is still-running only. already_exited still dismisses the paused Implementer overlay. Compacting `[↗]` still opens. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. An L2 implement coordinator must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. `capability_mode` All is the full-tool escape. Ordinary L2 still AUTO compact at 95% of nested 200k. A specialist must not compact itself and continue. Parent follow-up onto a running nested L2 is additive (not kill, not respawn). `resume_from` remains completed-continue. L3 overlays stay unbothered. Off is the SpaceXAI option (spawn, wait, resume after exit). | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `l2_implement_coordinator_capability_none_strips_search_replace`, `l2_implement_coordinator_capability_none_strips_grep_and_read_file`, `l2_implement_coordinator_still_keeps_spawn_subagent`, `l3_at_max_depth_keeps_search_replace_and_grep_without_task`, `l2_capability_mode_all_keeps_edit_grep_read`, `l2_auto_compact_still_fires_at_95_percent_of_200k`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `kill_already_exited_dismisses_paused_implementer_overlay`, `restore_nested_occupancy_does_not_unfinish_or_revive_dead_host`, `running_count_matches_listed_live_l2_not_l3`, `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`, `parent_cannot_talk_to_own_l2s_follow_up_enqueues_interject_on_running_l2_without_kill_or_respawn`, `parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_that_specialist`, `resume_from_of_running_l2_still_fails_active`, `parent_follow_up_off_is_upstream_spawn_wait_resume_from_completed_only`, `parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3`, `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_returns_queued_and_does_not_spawn`, `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_and_resume_from_are_mutually_exclusive`, `parent_cannot_talk_to_own_l2s_follow_up_field_is_optional_and_distinct_from_resume_from`, `shell_child_follow_up_sends_session_command_interject_on_child_session`, `subagents_config_parent_follow_up_false_parses_and_omitted_defaults_true`, `resolve_subagents_copies_parent_follow_up`, `nested_spawner_can_resume_from_completed_reparented_child`, `l3_overlay_send_prompt_does_not_reach_l3_or_l1`, `l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn`, `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count`, `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` is not a fifth idle CTA (title bar + hint). Approve files a GitHub issue with the plan text (`docs/github-tracking.md`). Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. `/plan --soft` docks Isolated Preview and does not enter plan mode. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. `user_guide_plan_soft_docks_isolated_preview`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
@@ -3212,7 +3285,8 @@ that drops them while keeping the seven is still a seam loss):
   not invent internals. Surmount vs SpaceXAI as in Product inventory.
   Named `fn`s:
   `dest_encoder_skip_loop_is_repetitive`,
-  `dest_encoder_skip_single_sentence_four_times_is_repetitive`,
+  `dest_encoder_skip_single_sentence_five_times_is_repetitive`,
+  `short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does`,
   `thought_line_loop_is_repetitive`,
   `chat_completions_stops_dest_encoder_skip_loop`,
   `chat_completions_stops_dest_encoder_skip_loop_in_thought`,
@@ -3700,6 +3774,21 @@ cargo test -p xai-grok-shell --lib -- \
 cargo test -p xai-tool-types --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
 cargo test -p xai-grok-tools --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
 
+# Extra: L2 after compact still resumes its L3s (GitHub #222; KEEP for #224)
+# L3 cannot spawn. MAX_SUBAGENT_DEPTH stays 2. L3 tokens roll into L2 cost.
+cargo test -p xai-grok-tools --lib -- \
+  l2_after_compact_still_resumes_its_l3s \
+  l2_resume_from_of_running_l3_still_fails_active \
+  l2_follow_up_of_l3_does_not_spawn_l4 \
+  default_max_allows_l2_to_spawn_l3 \
+  l3_spawn_subagent_with_prompt_and_omitted_description_still_cannot_spawn
+cargo test -p xai-grok-subagent-resolution --lib -- \
+  l3_cannot_spawn_l4_or_another_l3
+cargo test -p xai-grok-pager --lib -- \
+  subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists \
+  nested_specialist_windows_are_not_double_counted_in_the_total \
+  parent_context_chip_is_l1_window_and_does_not_add_nested_windows
+
 # Extra: parent follow-up onto a running nested L2 (GitHub #143)
 # KEEP fire-and-return spawn, overlay interject, nested_spawner_can_resume_from_completed_reparented_child
 cargo test -p xai-tool-types --lib -- \
@@ -3724,7 +3813,8 @@ cargo test -p xai-grok-shell --lib -- post_compact_reminder_includes_surmount_st
 # Keywords: DEST_ENCODER_SKIP_LOOP, stream Fatal, compact 8192/32768.
 # Surmount vs SpaceXAI. Oh My Pi is not in this tree.
 cargo test -p xai-grok-sampler --lib -- dest_encoder_skip_loop_is_repetitive \
-  dest_encoder_skip_single_sentence_four_times_is_repetitive \
+  dest_encoder_skip_single_sentence_five_times_is_repetitive \
+  short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does \
   thought_line_loop_is_repetitive \
   chat_completions_stops_dest_encoder_skip_loop \
   chat_completions_stops_dest_encoder_skip_loop_in_thought \

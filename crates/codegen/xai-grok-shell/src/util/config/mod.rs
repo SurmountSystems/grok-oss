@@ -27,7 +27,8 @@ pub use consent::{ConsentAnswer, set_consent_answer};
 pub use economic_mode::{
     ECONOMIC_CONTEXT_CAP, ECONOMIC_MODE_DEFAULT, NESTED_SESSION_CONTEXT_CAP,
     SESSION_ATTENTION_TARGET_PERCENT, apply_economic_context_cap, economic_mode_from_disk,
-    economic_mode_from_toml, resolve_economic_mode, session_attention_target_tokens,
+    economic_mode_from_toml, nested_catalog_window, nested_live_sampling_window,
+    resolve_economic_mode, session_attention_target_tokens, session_catalog_window,
     session_sampling_window,
 };
 pub use hints::*;

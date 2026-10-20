@@ -661,6 +661,143 @@ fn waiting_task_row_opens_the_waited_task() {
     );
 }
 
+const OWED_WAITING_ARROW: &str = "The L2 overlay paints an open-arrow control on the waited L3 waiting row. Activating that control opens that L3.";
+
+/// The L2 overlay waiting row is an open control again: it paints `[↗]` for the
+/// waited L3, and a left click on that arrow opens that L3.
+#[test]
+fn l2_overlay_waiting_row_paints_open_arrow_that_opens_the_waited_l3() {
+    use agent_client_protocol as acp;
+    const L2: &str = "l2-coord";
+    const L3: &str = "l3-open";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let meta = crate::acp::meta::NotificationMeta::default();
+    l2.session.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from("wait-one")),
+                "get_command_or_subagent_output",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({
+                "task_ids": [L3],
+                "timeout_ms": 30_000,
+            })))
+            .locations(vec![]),
+        ),
+        &meta,
+        &mut l2.scrollback,
+    );
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let mut specialist = running_subagent_info(L3);
+    specialist.description = Arc::from("");
+    specialist.attempt.is_background = true;
+    specialist.attempt.depth = Some(2);
+    specialist.attempt.parent_session_id = Some(Arc::from(L2));
+    l1.subagent_sessions.insert(L3.to_owned(), specialist);
+    l1.insert_test_child(L3.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let open_arrow = crate::glyphs::enlarge_button();
+    assert!(
+        painted.contains(WAITING_ONE_TASK),
+        "{OWED_WAITING_ARROW} The nested view must paint `{WAITING_ONE_TASK}`:\n{painted}"
+    );
+    assert!(
+        painted.contains(open_arrow),
+        "{OWED_WAITING_ARROW} The nested view must paint the open-arrow control `{open_arrow}` for the waited L3:\n{painted}"
+    );
+    let phrase_rows = phrase_row_cells(&buf, area, WAITING_ONE_TASK);
+    let title = phrase_rows.first().copied().unwrap_or_else(|| {
+        panic!(
+            "{OWED_WAITING_ARROW} The takeover title must paint `{WAITING_ONE_TASK}`:\n{painted}"
+        )
+    });
+    let waiting = phrase_rows.last().copied().unwrap_or(title);
+    let lowest_y = phrase_rows
+        .iter()
+        .map(|cell| cell.1)
+        .max()
+        .unwrap_or(title.1);
+    assert_eq!(
+        waiting.1, lowest_y,
+        "{OWED_WAITING_ARROW} The open arrow belongs on the lowest `{WAITING_ONE_TASK}` row."
+    );
+    assert!(
+        waiting.1 > title.1,
+        "{OWED_WAITING_ARROW} The open arrow must sit on the waiting row below the takeover title. Title y is {}, waiting y is {}.\n{painted}",
+        title.1,
+        waiting.1
+    );
+    let waiting_row = Rect {
+        x: area.x,
+        y: waiting.1,
+        width: area.width,
+        height: 1,
+    };
+    let arrow = specialist_status_cell(&buf, waiting_row, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_WAITING_ARROW} `{open_arrow}` must paint on the `{WAITING_ONE_TASK}` row at y {}. hit_overlay_nested_status is {:?}.\n{painted}",
+            waiting.1,
+            l1.hit_overlay_nested_status.rect
+        )
+    });
+    assert_eq!(
+        arrow.1, waiting.1,
+        "{OWED_WAITING_ARROW} The open arrow is not on the waiting row."
+    );
+    assert!(
+        l1.hit_overlay_nested_status.contains(arrow.0, arrow.1),
+        "{OWED_WAITING_ARROW} `{open_arrow}` at ({}, {}) is not a hit target. hit_overlay_nested_status is {:?}.",
+        arrow.0,
+        arrow.1,
+        l1.hit_overlay_nested_status.rect
+    );
+    assert_eq!(
+        l1.overlay_nested_status_child_sid.as_deref(),
+        Some(L3),
+        "{OWED_WAITING_ARROW}"
+    );
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow.0,
+        row: arrow.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3),
+        "{OWED_WAITING_ARROW} Activating the open arrow did not open the waited L3."
+    );
+}
+
 #[test]
 fn l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn() {
     use agent_client_protocol as acp;

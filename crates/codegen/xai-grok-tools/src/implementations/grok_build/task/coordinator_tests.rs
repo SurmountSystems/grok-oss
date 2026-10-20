@@ -12,6 +12,8 @@ use crate::implementations::grok_build::task::types::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "l2_compact_resume_l3_tests.rs"]
+mod l2_compact_resume_l3_tests;
 #[path = "parent_follow_up_tests.rs"]
 mod parent_follow_up_tests;
 
@@ -361,6 +363,10 @@ impl ChildRunner for TestRunner {
 
     fn durable_resume_type(&self, _resume_id: &str, _parent_session_id: &str) -> Option<String> {
         self.behavior.durable_resume_type.map(str::to_owned)
+    }
+
+    fn on_resume_lookup(&self, lookup: SubagentResumeLookup) {
+        let _ = self.resume_sources.send(lookup);
     }
 
     fn supports_wake(&self) -> bool {
@@ -3095,7 +3101,10 @@ pub(in crate::implementations::grok_build::task::coordinator) fn buffering() -> 
     }
 }
 
-async fn buffered_completion_ids(harness: &Harness, session: Option<&str>) -> Vec<String> {
+pub(super) async fn buffered_completion_ids(
+    harness: &Harness,
+    session: Option<&str>,
+) -> Vec<String> {
     completion_ids_via(harness, session, SubagentEvent::Completions).await
 }
 
@@ -3153,6 +3162,8 @@ async fn running_nested_pair(
     (harness, grandchild)
 }
 
+/// GitHub #224 talk-up without compact. After L2 compact, see
+/// `l2_after_compact_still_receives_l3_completion_report`.
 #[tokio::test]
 async fn nested_grandchild_completion_buffers_for_spawner_not_root() {
     let (mut harness, grandchild) = running_nested_pair(request("grandchild", true)).await;

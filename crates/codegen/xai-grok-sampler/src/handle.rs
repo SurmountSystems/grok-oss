@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use indexmap::IndexMap;
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,17 +30,57 @@ pub struct CollectedSamplingResult {
 }
 
 /// Cheaply-cloneable handle to the sampler actor.
-/// Internally just an `mpsc::UnboundedSender<SamplerCommand>`.
+/// Commands go through an `mpsc::UnboundedSender<SamplerCommand>`.
+/// Spawn-time / last restamped JWT is also kept on the handle: `CurrentApiKey`
+/// mailbox replies can be empty on a current_thread runtime before the actor runs.
 /// All methods are non-blocking (fire-and-forget) except for the `*_async` queries which return a future awaiting an `oneshot::Receiver`.
 #[derive(Clone)]
 pub struct SamplerHandle {
     cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
+    /// Spawn-time or last restamped JWT. Shared across clones.
+    live_api_key: Arc<RwLock<Option<String>>>,
 }
 
 impl SamplerHandle {
     /// `pub(crate)` because only [`SamplerActor::spawn`](crate::actor::SamplerActor::spawn) produces one of these.
-    pub(crate) fn new(cmd_tx: mpsc::UnboundedSender<SamplerCommand>) -> Self {
-        Self { cmd_tx }
+    pub(crate) fn new(
+        cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
+        live_api_key: Option<String>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            live_api_key: Arc::new(RwLock::new(
+                live_api_key.filter(|key| !key.trim().is_empty()),
+            )),
+        }
+    }
+
+    fn cached_live_api_key(&self) -> Option<String> {
+        self.live_api_key
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .filter(|key| !key.trim().is_empty())
+    }
+
+    fn replace_live_api_key(&self, api_key: Option<String>) {
+        if let Ok(mut guard) = self.live_api_key.write() {
+            *guard = api_key.filter(|key| !key.trim().is_empty());
+        }
+    }
+
+    fn remember_live_api_key(&self, api_key: Option<String>) {
+        let Some(key) = api_key.filter(|key| !key.trim().is_empty()) else {
+            return;
+        };
+        if let Ok(mut guard) = self.live_api_key.write() {
+            *guard = Some(key);
+        }
+    }
+
+    /// Spawn-time or last restamped JWT. Does not wait on the actor mailbox.
+    pub fn live_api_key(&self) -> Option<String> {
+        self.cached_live_api_key()
     }
 
     /// Create a no-op handle that discards all commands.
@@ -47,7 +89,7 @@ impl SamplerHandle {
     pub fn noop() -> Self {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         // Receiver is dropped immediately; sends will fail but every send-site uses `let _ = ...` so that is fine
-        Self { cmd_tx }
+        Self::new(cmd_tx, None)
     }
 
     /// Test seam: `notify` fires when the first command is submitted.
@@ -60,7 +102,7 @@ impl SamplerHandle {
             }
             while cmd_rx.recv().await.is_some() {}
         });
-        Self { cmd_tx }
+        Self::new(cmd_tx, None)
     }
 
     /// Fire-and-forget: results arrive via the shared event channel.
@@ -96,6 +138,7 @@ impl SamplerHandle {
     /// Update the default sampling config (e.g., after model switch or auth refresh).
     /// The next request submitted without an override will use it.
     pub fn update_config(&self, config: SamplerConfig) {
+        self.remember_live_api_key(config.api_key.clone());
         let _ = self.cmd_tx.send(SamplerCommand::UpdateConfig {
             config: Box::new(config),
         });
@@ -104,6 +147,7 @@ impl SamplerHandle {
     /// Nested resume after login: restamp the inherit resolver fallback with the recovered parent sampler JWT.
     /// Writing `SamplerConfig.api_key` alone is not enough: nested POST Authorization comes from the resolver.
     pub fn set_api_key(&self, api_key: Option<String>) {
+        self.replace_live_api_key(api_key.clone());
         let _ = self.cmd_tx.send(SamplerCommand::SetApiKey { api_key });
     }
 
@@ -130,16 +174,27 @@ impl SamplerHandle {
 
     /// JWT the live sampler still sends. Compaction reconstructs a fresh client and
     /// must copy this when AuthManager and chat credentials are empty.
+    /// The actor mailbox can be empty (current_thread before the actor runs, or
+    /// a dropped actor). Fall back to the spawn / last-restamp JWT in that case.
     pub async fn current_api_key(&self) -> Option<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        let from_actor = if self
             .cmd_tx
-            .send(SamplerCommand::CurrentApiKey { reply: reply_tx });
-        reply_rx
-            .await
-            .ok()
-            .flatten()
-            .filter(|key| !key.trim().is_empty())
+            .send(SamplerCommand::CurrentApiKey { reply: reply_tx })
+            .is_ok()
+        {
+            reply_rx
+                .await
+                .ok()
+                .flatten()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+        if from_actor.is_some() {
+            return from_actor;
+        }
+        self.cached_live_api_key()
     }
 
     /// Extra headers the live sampler still sends (`X-XAI-Token-Auth` present or absent).
@@ -212,5 +267,27 @@ impl SamplerHandle {
                 doom_loop_signals: Vec::new(),
                 doom_loop_recovery_attempts: Vec::new(),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_api_key_returns_spawn_jwt_when_actor_mailbox_is_closed() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        drop(cmd_rx);
+        let handle = SamplerHandle::new(cmd_tx, Some("live-parent-jwt".into()));
+        assert_eq!(
+            handle.live_api_key().as_deref(),
+            Some("live-parent-jwt"),
+            "spawn JWT must be on the handle without waiting on the actor"
+        );
+        assert_eq!(
+            handle.current_api_key().await.as_deref(),
+            Some("live-parent-jwt"),
+            "closed actor mailbox must still return the spawn JWT"
+        );
     }
 }

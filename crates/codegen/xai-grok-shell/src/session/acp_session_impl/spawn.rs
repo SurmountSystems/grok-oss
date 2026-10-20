@@ -2045,6 +2045,7 @@ pub(crate) async fn spawn_session_actor(
         goal_tracker,
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
+        goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),
         goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
         goal_update_rx: std::cell::RefCell::new(Some(goal_update_rx)),
         goal_update_tx,
@@ -3034,7 +3035,7 @@ pub(super) fn seed_sampling_context_window(
     is_nested: bool,
 ) -> std::num::NonZeroU64 {
     let base = override_window.unwrap_or(catalog);
-    std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+    std::num::NonZeroU64::new(crate::util::config::session_catalog_window(
         base.get(),
         is_nested,
     ))
@@ -3151,7 +3152,9 @@ mod resumed_prefix_fallback_tests {
 #[cfg(test)]
 mod seed_sampling_window_tests {
     use super::seed_sampling_context_window;
-    use crate::util::config::ECONOMIC_CONTEXT_CAP;
+    use crate::util::config::{
+        ECONOMIC_CONTEXT_CAP, nested_live_sampling_window, session_sampling_window,
+    };
 
     #[test]
     fn spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on() {
@@ -3160,7 +3163,7 @@ mod seed_sampling_window_tests {
         assert_eq!(
             nested.get(),
             ECONOMIC_CONTEXT_CAP,
-            "nested spawn seeds the 200k nested budget, not catalog 500k"
+            "nested spawn seeds the 200k nested catalog, not catalog 500k"
         );
         assert_eq!(nested.get(), 200_000);
         let main = seed_sampling_context_window(catalog, None, false);
@@ -3168,8 +3171,8 @@ mod seed_sampling_window_tests {
     }
 
     /// L1 / parent TUI session uses the catalog window (500k on Grok 4.5).
-    /// Nested agents still cap at 200k; that nested budget must not be the L1
-    /// AUTO compact knee.
+    /// Nested agents still cap catalog at 200k; that nested budget must not be
+    /// the L1 AUTO compact knee.
     #[test]
     fn main_session_sampling_window_is_catalog_500k_even_when_economic_is_on() {
         let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
@@ -3184,6 +3187,11 @@ mod seed_sampling_window_tests {
             ECONOMIC_CONTEXT_CAP,
             "auto-compact must not fire at the old 200k L1 knee"
         );
+        assert_eq!(
+            session_sampling_window(seeded.get(), false),
+            500_000,
+            "L1 live sampling stays the 500k catalog window"
+        );
     }
 
     #[test]
@@ -3193,8 +3201,37 @@ mod seed_sampling_window_tests {
         assert_eq!(
             seeded.get(),
             200_000,
-            "nested L2/L3 sampling stays 200k even if catalog is 500k"
+            "nested L2/L3 catalog stays 200k even if model catalog is 500k"
         );
+        assert_eq!(
+            session_sampling_window(seeded.get(), true),
+            80_000,
+            "nested live sampling is 40% of the 200k nested catalog"
+        );
+    }
+
+    /// Nested L2/L3 live sampling is 40% of the nested catalog window.
+    /// GitHub issue 221.
+    #[test]
+    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+        let catalog_1m = std::num::NonZeroU64::new(1_000_000).expect("1M catalog");
+        assert_eq!(
+            session_sampling_window(catalog_1m.get(), true),
+            400_000,
+            "1M nested catalog → 400k live"
+        );
+        assert_eq!(nested_live_sampling_window(catalog_1m.get()), 400_000);
+        let catalog_200k = std::num::NonZeroU64::new(200_000).expect("200k catalog");
+        let seeded_200k = seed_sampling_context_window(catalog_200k, None, true);
+        assert_eq!(seeded_200k.get(), 200_000, "200k nested catalog stays 200k");
+        assert_eq!(
+            session_sampling_window(seeded_200k.get(), true),
+            80_000,
+            "200k nested catalog → 80k live"
+        );
+        let l1 = std::num::NonZeroU64::new(500_000).expect("L1 catalog");
+        assert_eq!(seed_sampling_context_window(l1, None, false).get(), 500_000);
+        assert_eq!(session_sampling_window(1_000_000, false), 1_000_000);
     }
 }
 #[cfg(test)]

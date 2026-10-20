@@ -1,7 +1,7 @@
 //! Detect high-repetition assistant / reasoning blocks for compact recovery.
 //!
 //! Same thresholds as the live-stream breaker in `xai-grok-sampler` (copied,
-//! not imported): a short sentence four times, a two-sentence cycle three
+//! not imported): a short sentence five times, a two-sentence cycle three
 //! times, or a 64-character block three times when a smear keeps that block.
 //! Compact must drop that wall so summarizer input and reseed are not
 //! `Context compacted: 75.2k → 75.2k tokens`. Not a second stream stop.
@@ -19,7 +19,7 @@ const WINDOW_CHARS: usize = 768;
 /// Shortest phrase that can count as a loop unit.
 const MIN_PHRASE_CHARS: usize = 24;
 /// Consecutive copies of a short sentence that mean a loop.
-const MIN_SHORT_REPEATS: usize = 4;
+const MIN_SHORT_REPEATS: usize = 5;
 /// Consecutive copies of a longer phrase (a two-sentence cycle).
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
@@ -441,10 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn dest_encoder_skip_single_sentence_four_times_is_repetitive() {
+    fn dest_encoder_skip_single_sentence_five_times_is_repetitive() {
         let sentence = "Spawn dests of dest encoder skip. ";
-        assert!(!is_repetitive_generation(&sentence.repeat(3)));
-        assert!(is_repetitive_generation(&sentence.repeat(4)));
+        assert!(!is_repetitive_generation(&sentence.repeat(4)));
+        assert!(is_repetitive_generation(&sentence.repeat(5)));
     }
 
     #[test]
@@ -481,7 +481,7 @@ mod tests {
     }
 
     /// Same screenshot table as the live-stream breaker. A repeated short
-    /// cell is not a loop. Four copies of one prose sentence still are.
+    /// cell is not a loop. Copies at the short-phrase threshold still are.
     #[test]
     fn status_table_repeating_no_sample_was_printed_is_not_a_repeating_sentence() {
         let cell = "no sample was printed";
@@ -507,5 +507,35 @@ mod tests {
         assert!(is_repetitive_generation(
             &sentence.repeat(MIN_SHORT_REPEATS)
         ));
+    }
+
+    /// GitHub #223. Same live-stream thresholds: four copies of a short
+    /// phrase must not strip. Five copies, and three dest-encoder-skip
+    /// pairs, still must.
+    #[test]
+    fn short_repeated_phrase_is_not_stripped_runaway_loop_still_is() {
+        let short = "Let me try that once more. ";
+        assert!(
+            short.len() >= MIN_PHRASE_CHARS && short.len() < LONG_PHRASE_CHARS,
+            "fixture must use the short-phrase threshold, got {}",
+            short.len()
+        );
+        assert!(
+            !is_repetitive_generation(&short.repeat(4)),
+            "four copies of a short phrase must not strip"
+        );
+        assert!(
+            is_repetitive_generation(&short.repeat(5)),
+            "five copies of a short phrase must still strip"
+        );
+        let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
+        assert!(
+            !is_repetitive_generation(&one.repeat(2)),
+            "two copies of the dest-encoder-skip pair must still not strip"
+        );
+        assert!(
+            is_repetitive_generation(&one.repeat(3)),
+            "three copies of `{DEST_ENCODER_SKIP_LOOP}` must still strip"
+        );
     }
 }

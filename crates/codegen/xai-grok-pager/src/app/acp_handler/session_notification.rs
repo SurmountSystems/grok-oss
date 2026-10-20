@@ -29,6 +29,75 @@ pub(super) fn failed_hook_line(
     })
 }
 
+/// Nested child RetryState that must recoveredBearer while the parent talks.
+/// Retrying `auth_transient` SelfHealing copy has no `reason=no auth context`
+/// yet; that is the live 8-minute orange banner.
+fn nested_child_inherit_miss_message(
+    retry: &xai_grok_shell::extensions::notification::RetryState,
+) -> Option<&str> {
+    use xai_grok_shell::extensions::notification::{RetryState, is_nested_missing_auth_context};
+    fn inherit_miss_text(text: &str) -> bool {
+        is_nested_missing_auth_context(text)
+            || text
+                .to_ascii_lowercase()
+                .contains("authentication is temporarily unavailable")
+    }
+    match retry {
+        RetryState::Failed {
+            message,
+            error_type,
+        } => {
+            if inherit_miss_text(message)
+                || matches!(
+                    error_type.as_str(),
+                    "auth_transient" | "auth" | "nested_auth"
+                )
+            {
+                Some(message.as_str())
+            } else {
+                None
+            }
+        }
+        RetryState::Exhausted { reason, .. } => {
+            inherit_miss_text(reason).then_some(reason.as_str())
+        }
+        RetryState::Retrying {
+            reason, error_type, ..
+        } => {
+            if inherit_miss_text(reason) || error_type.as_deref() == Some("auth_transient") {
+                Some(reason.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Strip AuthTransient from nested Retrying so the overlay title is not
+/// "Authentication temporarily unavailable". Tag Failed inherit miss
+/// `nested_auth` so apply_retry_state does not paint /login.
+fn rewrite_nested_child_retry_paint(
+    retry: &mut xai_grok_shell::extensions::notification::RetryState,
+) {
+    use xai_grok_shell::extensions::notification::RetryState;
+    match retry {
+        RetryState::Retrying { error_type, .. } => {
+            *error_type = None;
+        }
+        RetryState::Failed { error_type, .. }
+            if matches!(
+                error_type.as_str(),
+                "auth_transient" | "auth" | "nested_auth"
+            ) =>
+        {
+            error_type.clear();
+            error_type.push_str("nested_auth");
+        }
+        _ => {}
+    }
+}
+
 /// Stamp the nested child view with a real used/window pair. A 0/0 host
 /// reading is not copied onto the overlay. The L1 sampling window is not
 /// copied onto the nested session.
@@ -301,12 +370,28 @@ pub(super) fn handle_session_notification_with_origin(
     let matched = match find_session_match(app, &session_notif.session_id) {
         Some(m) => m,
         None => {
-            tracing::debug!(
-                session_id = session_notif.session_id.0.as_ref(),
-                method = notif.method.as_ref(),
-                "load-race: x.ai/session_notification DROPPED — no agent matches session_id"
-            );
-            return false;
+            // Overlay hydrate can lag `subagent_views`. `find_bound_session_match`
+            // keys only that map. Nested RetryState still lives on
+            // `subagent_sessions`. Dropping it left Waiting for the model with
+            // no recoveredBearer POST. Do not change find_bound_session_match:
+            // ACP SessionNotification Child panics if the view is missing.
+            let child_key = session_notif.session_id.0.as_ref();
+            match app.agents.iter().find_map(|(id, agent)| {
+                agent
+                    .subagent_sessions
+                    .contains_key(child_key)
+                    .then_some(*id)
+            }) {
+                Some(id) => SessionMatch::Child(id),
+                None => {
+                    tracing::debug!(
+                        session_id = session_notif.session_id.0.as_ref(),
+                        method = notif.method.as_ref(),
+                        "load-race: x.ai/session_notification DROPPED — no agent matches session_id"
+                    );
+                    return false;
+                }
+            }
         }
     };
     let parent_id = matched.agent_id();
@@ -1747,11 +1832,34 @@ pub(super) fn handle_child_session_notification(
             // child AutoCompacting or busy.
             false
         }
+        XaiSessionUpdate::RetryState(mut retry) => {
+            let inherit_miss = nested_child_inherit_miss_message(&retry).map(str::to_owned);
+            if let Some(message) = inherit_miss {
+                if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+                    let status = info.status.as_deref().or(info.attempt.status.as_deref());
+                    if !matches!(status, Some("completed") | Some("cancelled")) {
+                        info.attempt.error = Some(std::sync::Arc::from(message.as_str()));
+                    }
+                }
+                // Do not wait for /login. First nested 401 queues recoveredBearer
+                // immediately, including Retrying auth_transient. Operator live:
+                // Waiting for the model 8m 3s with orange AuthTransient chrome.
+                let retry_effects =
+                    crate::app::dispatch::retry_nested_resume_after_missing_auth(agent);
+                agent.pending_effects.extend(retry_effects);
+                rewrite_nested_child_retry_paint(&mut retry);
+            }
+            let update = XaiSessionUpdate::RetryState(retry);
+            let mut changed = false;
+            if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
+                changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
+            }
+            changed
+        }
         XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
-        | XaiSessionUpdate::RetryState(_)
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }
@@ -1761,35 +1869,6 @@ pub(super) fn handle_child_session_notification(
                 && agent.active_subagent.as_deref() == Some(child_sid)
             {
                 agent.close_subagent_fullscreen();
-            }
-            if let XaiSessionUpdate::RetryState(retry) = &update {
-                let message = match retry {
-                    xai_grok_shell::extensions::notification::RetryState::Failed {
-                        message,
-                        ..
-                    } => Some(message.as_str()),
-                    xai_grok_shell::extensions::notification::RetryState::Exhausted {
-                        reason,
-                        ..
-                    } => Some(reason.as_str()),
-                    _ => None,
-                };
-                if let Some(message) = message.filter(|m| {
-                    xai_grok_shell::extensions::notification::is_nested_missing_auth_context(m)
-                }) {
-                    if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
-                        let status = info.status.as_deref().or(info.attempt.status.as_deref());
-                        if !matches!(status, Some("completed") | Some("cancelled")) {
-                            info.attempt.error = Some(std::sync::Arc::from(message));
-                        }
-                    }
-                    // Do not wait for /login. Retry the nested POST with the live
-                    // parent sampler JWT (recoveredBearer). Operator: 4m18s
-                    // Waiting for the model with no POST after Logging in...
-                    let retry_effects =
-                        crate::app::dispatch::retry_nested_resume_after_missing_auth(agent);
-                    agent.pending_effects.extend(retry_effects);
-                }
             }
             let mut changed = false;
             if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {

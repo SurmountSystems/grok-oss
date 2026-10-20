@@ -131,7 +131,7 @@ const WINDOW_CHARS: usize = 768;
 /// Shortest phrase that can count as a loop unit.
 const MIN_PHRASE_CHARS: usize = 24;
 /// Consecutive copies of a short sentence that mean a loop.
-const MIN_SHORT_REPEATS: usize = 4;
+const MIN_SHORT_REPEATS: usize = 5;
 /// Consecutive copies of a longer phrase (a two-sentence cycle).
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
@@ -581,13 +581,13 @@ mod dest_encoder_skip_repetition_tests {
     }
 
     #[test]
-    fn dest_encoder_skip_single_sentence_four_times_is_repetitive() {
+    fn dest_encoder_skip_single_sentence_five_times_is_repetitive() {
         let (first, _) = DEST_ENCODER_SKIP_LOOP
             .split_once(". ")
             .expect("fixture is two sentences");
         let sentence = format!("{first}. ");
-        assert!(!is_repetitive(&sentence.repeat(3)));
-        assert!(is_repetitive(&sentence.repeat(4)));
+        assert!(!is_repetitive(&sentence.repeat(4)));
+        assert!(is_repetitive(&sentence.repeat(5)));
     }
 
     #[test]
@@ -905,7 +905,8 @@ mod dest_encoder_skip_repetition_tests {
     /// the cell `no sample was printed` (21 characters, under the 24-character
     /// phrase minimum). Three rows share a 69-character tail, which is long
     /// enough for the 64-character smear block three times. That table must
-    /// not stop. The same prose sentence four times still must stop.
+    /// not stop. The same prose sentence at the short-phrase threshold still
+    /// must stop.
     #[test]
     fn status_table_repeating_no_sample_was_printed_is_not_a_repeating_sentence() {
         let cell = "no sample was printed";
@@ -950,11 +951,73 @@ mod dest_encoder_skip_repetition_tests {
         );
         assert!(
             !is_repetitive(&sentence.repeat(MIN_SHORT_REPEATS - 1)),
-            "three copies of one prose sentence must not stop"
+            "{} copies of one prose sentence must not stop",
+            MIN_SHORT_REPEATS - 1
         );
         assert!(
             is_repetitive(&sentence.repeat(MIN_SHORT_REPEATS)),
-            "four copies of one prose sentence must still stop"
+            "{} copies of one prose sentence must still stop",
+            MIN_SHORT_REPEATS
+        );
+    }
+
+    /// GitHub #223. Four copies of a short phrase is ordinary restatement
+    /// and must not stop the turn. A true runaway still must: five copies
+    /// of that same short phrase, and three copies of the dest-encoder-skip
+    /// pair from GitHub #133. Do not delete this breaker.
+    #[test]
+    fn short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does() {
+        let short = "Let me try that once more. ";
+        assert!(
+            short.len() >= MIN_PHRASE_CHARS && short.len() < LONG_PHRASE_CHARS,
+            "fixture must use the short-phrase threshold, got {}",
+            short.len()
+        );
+
+        let mut four = StreamRepetitionGuard::default();
+        four.append(SamplingChannel::Text, &short.repeat(4));
+        assert!(
+            !four.is_looping(SamplingChannel::Text),
+            "four copies of a short phrase must not stop the turn"
+        );
+        assert!(
+            !is_repetitive(&short.repeat(4)),
+            "four copies of a short phrase must not count as a loop"
+        );
+
+        let mut five = StreamRepetitionGuard::default();
+        five.append(SamplingChannel::Text, &short.repeat(5));
+        assert!(
+            five.is_looping(SamplingChannel::Text),
+            "five copies of a short phrase must still stop"
+        );
+        assert!(
+            is_repetitive(&short.repeat(5)),
+            "five copies of a short phrase must still count as a loop"
+        );
+        match five.error(SamplingChannel::Text, 1) {
+            SamplingError::RepetitiveGeneration {
+                channel,
+                aborted_at_chunk,
+            } => {
+                assert_eq!(channel, SamplingChannel::Text.as_str());
+                assert_eq!(aborted_at_chunk, Some(1));
+                assert!(
+                    REPETITIVE_GENERATION_USER_MESSAGE.contains("repeating the same sentence"),
+                    "user-facing stop must name repeating sentence, got {REPETITIVE_GENERATION_USER_MESSAGE}"
+                );
+            }
+            other => panic!("expected RepetitiveGeneration, got {other:?}"),
+        }
+
+        let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
+        assert!(
+            !is_repetitive(&one.repeat(2)),
+            "two copies of the dest-encoder-skip pair must still not stop"
+        );
+        assert!(
+            is_repetitive(&one.repeat(3)),
+            "three copies of `{DEST_ENCODER_SKIP_LOOP}` must still stop"
         );
     }
 }

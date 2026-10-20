@@ -1013,6 +1013,95 @@ mod tests {
         assert_ne!(excluded.input_plus_output, Some(0));
     }
 
+    /// GitHub #224 / FORK.md agent-depth: all tokens in an L3 contribute to
+    /// the token costs of the L2. `model_call_cost_for_sessions` sums the L2
+    /// session and each L3 session. A nested completion-notice row is not
+    /// the cost. Input plus output on the L3 `agent_turn` row is.
+    #[test]
+    fn l3_model_call_tokens_contribute_to_l2_cost() {
+        let l2 = model_call_row(
+            "01L2CALLCOST00000000000001",
+            "l2-sess",
+            "agent_turn",
+            "l2",
+            Some(1_000),
+            Some(100),
+            Some(200),
+            Some(40),
+            Some(1_200),
+            false,
+        );
+        let l3 = model_call_row(
+            "01L3CALLCOST00000000000001",
+            "l3-sess",
+            "agent_turn",
+            "l3",
+            Some(500),
+            Some(50),
+            Some(10),
+            Some(20),
+            Some(600),
+            false,
+        );
+        let nested_notice = model_call_row(
+            "01L3NESTEDNOTICE0000000001",
+            "l2-sess",
+            "nested",
+            "l3",
+            None,
+            Some(50),
+            None,
+            Some(20),
+            Some(600),
+            false,
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&store, &l2).unwrap());
+        assert!(insert_local_usage_event(&store, &l3).unwrap());
+        assert!(insert_local_usage_event(&store, &nested_notice).unwrap());
+
+        let l2_only = model_call_cost_for_sessions(&store, &["l2-sess"]).unwrap();
+        assert_eq!(
+            l2_only.input_plus_output,
+            Some(1_100),
+            "L2 own model-call cost is input 1000 + output 100. Nested notice is not the cost."
+        );
+        let l3_only = model_call_cost_for_sessions(&store, &["l3-sess"]).unwrap();
+        assert_eq!(
+            l3_only.input_plus_output,
+            Some(550),
+            "L3 model-call cost is input 500 + output 50"
+        );
+        let l2_with_l3 = model_call_cost_for_sessions(&store, &["l2-sess", "l3-sess"]).unwrap();
+        assert_eq!(
+            l2_with_l3.input_plus_output,
+            Some(1_650),
+            "all L3 tokens contribute to the L2 cost: 1100 + 550 = 1650"
+        );
+        assert_ne!(
+            l2_with_l3.input_plus_output, l2_only.input_plus_output,
+            "omitting the L3 session drops L3 tokens from the L2 cost"
+        );
+        assert_ne!(
+            l2_with_l3.input_plus_output,
+            Some(1_100 + 600),
+            "L3 total_tokens is not the L3 addend"
+        );
+        assert_ne!(
+            l2_with_l3.input_plus_output,
+            Some(1_650 + 200 + 10),
+            "cached_tokens is already inside input_tokens"
+        );
+        assert_ne!(
+            l2_with_l3.input_plus_output,
+            Some(1_650 + 40 + 20),
+            "reasoning_tokens is already inside output_tokens"
+        );
+        assert_ne!(l2_with_l3.input_plus_output, Some(0));
+    }
+
     /// Input and output are disjoint. Reasoning is absent on this row, so it
     /// is not a third addend. Cache reads stay inside input. Provider
     /// `total_tokens` is context length, not the cost. Output alone is not

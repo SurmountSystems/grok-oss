@@ -42,7 +42,8 @@ pub use config::{
     AutoCompactThreshold, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FullReplaceConfig,
     GROK_45_CONTEXT_WINDOW_TOKENS, GROK_45_DEFAULT_AUTO_COMPACT_TOKENS,
     GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS, MIN_SUMMARY_SEED_CHARS,
-    NESTED_SESSION_CONTEXT_CAP, SESSION_ATTENTION_TARGET_PERCENT, session_attention_target_tokens,
+    NESTED_SESSION_CONTEXT_CAP, SESSION_ATTENTION_TARGET_PERCENT, nested_catalog_window,
+    nested_live_sampling_window, session_attention_target_tokens, session_catalog_window,
     session_sampling_window,
 };
 pub use failure::is_context_length_error;
