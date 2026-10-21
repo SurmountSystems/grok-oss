@@ -153,16 +153,19 @@ impl AgentView {
     /// Overlays (dashboard overlay header/popup, dev tracing split) mean the view's rect is not derivable from the event's full-terminal size.
     /// Resize draws are debounced (`RESIZE_DEBOUNCE`), so that window is a frame's worth of events, and a refusal burns nothing.
     /// Isolated Preview / line-viewer overlay markdown is not re-parsed until [`Self::settle_live_resize_overlay`].
+    /// Main conversation wrap (`scrollback.prepare_layout`) is skipped the same way.
     pub(crate) fn note_terminal_resize(&mut self) {
         self.terminal_size_stale = true;
         self.last_resize_at = Some(std::time::Instant::now());
+        self.scrollback.note_live_resize();
         if let Some(viewer) = self.line_viewer.as_mut() {
             viewer.note_live_resize();
         }
     }
 
-    /// Event-loop debounce fired, or a key/mouse arrived. Overlay wrap runs once at the settled width.
+    /// Event-loop debounce fired, or a key/mouse arrived. Overlay wrap and conversation wrap run once at the settled width.
     pub(crate) fn settle_live_resize_overlay(&mut self) {
+        self.scrollback.settle_live_resize();
         if let Some(viewer) = self.line_viewer.as_mut() {
             viewer.settle_live_resize();
         }

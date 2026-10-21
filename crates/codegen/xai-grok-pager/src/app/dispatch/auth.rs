@@ -313,8 +313,11 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
             }
         }
         let nested = enqueue_nested_resume_after_auth(agent);
+        // Waiting for the model after login: a nested 401 row must not skip the
+        // already-typed parent in_flight POST. Prior land only unstuck that
+        // prompt when nested resume was empty, so chrome kept ticking while
+        // nested recoveredBearer still sent a stale Bearer.
         if !had_parent_retry
-            && nested.is_empty()
             && !was_idle
             && let Some(prompt) = agent.session.in_flight_prompt.clone()
             && let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt)
@@ -618,10 +621,25 @@ pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<
 
 /// Live parent sampler JWTs from AuthenticateResponse `_meta`.
 /// Nested recoveredBearer uses these, not AuthManager.
+/// Login meta always replaces a stale pager JWT. Per-session `parentSamplerJwts`
+/// wins over the generic recoveredBearerJwt / parentSamplerJwt.
 fn apply_recovered_parent_sampler_jwts(app: &mut AppView, meta: Option<&serde_json::Value>) {
     let Some(obj) = meta.and_then(|v| v.as_object()) else {
         return;
     };
+    for key in ["recoveredBearerJwt", "parentSamplerJwt"] {
+        if let Some(jwt) = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for agent in app.agents.values_mut() {
+                agent.parent_sampler_jwt = Some(jwt.to_string());
+            }
+            break;
+        }
+    }
     if let Some(map) = obj.get("parentSamplerJwts").and_then(|v| v.as_object()) {
         for agent in app.agents.values_mut() {
             if let Some(sid) = agent.session.session_id.as_ref()
@@ -633,21 +651,6 @@ fn apply_recovered_parent_sampler_jwts(app: &mut AppView, meta: Option<&serde_js
             {
                 agent.parent_sampler_jwt = Some(jwt.to_string());
             }
-        }
-    }
-    for key in ["recoveredBearerJwt", "parentSamplerJwt"] {
-        if let Some(jwt) = obj
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            for agent in app.agents.values_mut() {
-                if agent.parent_sampler_jwt.is_none() {
-                    agent.parent_sampler_jwt = Some(jwt.to_string());
-                }
-            }
-            break;
         }
     }
 }

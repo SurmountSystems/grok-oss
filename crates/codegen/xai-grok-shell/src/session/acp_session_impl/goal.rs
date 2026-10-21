@@ -784,14 +784,61 @@ impl SessionActor {
         )
     }
 
+    /// Rebuild the actor-held GoalPlan from a persisted orchestration on session restore.
+    /// Does not arm post-plan retry: restore must not re-run the planner.
+    pub(crate) fn goal_plan_from_restored_orchestration(
+        restored: Option<&crate::session::goal_tracker::GoalOrchestration>,
+    ) -> crate::session::goal_plan::GoalPlan {
+        let mut plan = crate::session::goal_plan::GoalPlan::new();
+        let Some(snapshot) = restored else {
+            return plan;
+        };
+        let objective = snapshot.objective.trim();
+        if objective.is_empty() {
+            return plan;
+        }
+        plan.restore(crate::session::goal_plan::GoalPlanSnapshot {
+            goals: vec![objective.to_string()],
+            post_plan_retry_pending: false,
+            post_plan_retry_count: 0,
+            extra: Vec::new(),
+        });
+        plan
+    }
+
+    /// Apply `/goal <objective>` to the actor-held GoalPlan. Not a throwaway `GoalPlan::new()`.
+    pub(crate) fn setup_actor_goal_plan(
+        &self,
+        objective: &str,
+    ) -> crate::session::goal_plan::GoalPlanReply {
+        self.goal_plan
+            .lock()
+            .apply_user_goal_message(&format!("/goal {objective}"))
+    }
+
+    /// GoalClear on the actor-held GoalPlan. Not a throwaway `GoalPlan::new()`.
+    pub(crate) fn clear_actor_goal_plan(&self) -> crate::session::goal_plan::GoalPlanReply {
+        self.goal_plan.lock().give_up()
+    }
+
+    pub(crate) fn snapshot_actor_goal_plan(&self) -> crate::session::goal_plan::GoalPlanSnapshot {
+        self.goal_plan.lock().snapshot()
+    }
+
+    pub(crate) fn restore_actor_goal_plan(
+        &self,
+        snapshot: crate::session::goal_plan::GoalPlanSnapshot,
+    ) {
+        self.goal_plan.lock().restore(snapshot);
+    }
+
     pub(super) async fn setup_goal(
         &self,
         objective: &str,
         token_budget: Option<i64>,
     ) -> GoalSetupOutcome {
-        let mut goal_plan = crate::session::goal_plan::GoalPlan::new();
-        let applied = goal_plan.apply_user_goal_message(&format!("/goal {objective}"));
-        let Some(objective) = goal_plan.primary_goal().map(str::to_owned) else {
+        let applied = self.setup_actor_goal_plan(objective);
+        let Some(objective) = self.goal_plan.lock().primary_goal().map(str::to_owned) else {
             return GoalSetupOutcome::Message("Could not start the goal.".to_string());
         };
         let goal_id = uuid::Uuid::new_v4().to_string();

@@ -798,6 +798,327 @@ fn l2_overlay_waiting_row_paints_open_arrow_that_opens_the_waited_l3() {
     );
 }
 
+const OWED_L3_ROW_ARROW: &str = "Still don't see L3 view arrow buttons in your L2 screens despite me telling you this probably dozens of times already.";
+
+/// The L2 overlay lists each live L3 as a specialist row. That row must paint
+/// the same enlarge/open-arrow the L1 Subagents list uses. A waiting-row-only
+/// `[↗]` is not this control: the Operator is looking at the L3 rows.
+#[test]
+fn l2_overlay_l3_specialist_row_paints_open_arrow_that_opens_that_l3() {
+    const L2: &str = "l2-coord";
+    const L3: &str = "l3-open";
+    const SPECIALIST: &str = "Open the specialist view";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let mut specialist = running_subagent_info(L3);
+    specialist.description = Arc::from(SPECIALIST);
+    specialist.attempt.is_background = true;
+    specialist.attempt.depth = Some(2);
+    specialist.attempt.parent_session_id = Some(Arc::from(L2));
+    l1.subagent_sessions.insert(L3.to_owned(), specialist);
+    l1.insert_test_child(L3.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let open_arrow = crate::glyphs::enlarge_button();
+    let status = specialist_status_cell(&buf, area, SPECIALIST).unwrap_or_else(|| {
+        panic!("{OWED_L3_ROW_ARROW} The L2 overlay must paint the L3 specialist row `{SPECIALIST}`:\n{painted}")
+    });
+    let specialist_row = Rect {
+        x: area.x,
+        y: status.1,
+        width: area.width,
+        height: 1,
+    };
+    let arrow = specialist_status_cell(&buf, specialist_row, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_ROW_ARROW} The L3 specialist row at y {} must paint the open-arrow `{open_arrow}`, not only a waiting-row control. hit_overlay_nested_status is {:?}.\n{painted}",
+            status.1,
+            l1.hit_overlay_nested_status.rect
+        )
+    });
+    assert_eq!(
+        arrow.1, status.1,
+        "{OWED_L3_ROW_ARROW} The open arrow must sit on the L3 specialist row, not a different overlay row."
+    );
+    assert!(
+        l1.hit_overlay_nested_status.contains(arrow.0, arrow.1),
+        "{OWED_L3_ROW_ARROW} `{open_arrow}` at ({}, {}) on the L3 row is not a hit target. hit_overlay_nested_status is {:?}.",
+        arrow.0,
+        arrow.1,
+        l1.hit_overlay_nested_status.rect
+    );
+    assert_eq!(
+        l1.overlay_nested_status_child_sid.as_deref(),
+        Some(L3),
+        "{OWED_L3_ROW_ARROW}"
+    );
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow.0,
+        row: arrow.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3),
+        "{OWED_L3_ROW_ARROW} Activating the L3 row open arrow did not set active_subagent to that L3."
+    );
+}
+
+const OWED_L3_ROW_ARROWS: &str = "Still don't see L3 view arrow buttons in your L2 screens";
+
+/// An L2 overlay with two named L3 specialists must paint a distinct
+/// enlarge/open-arrow on each specialist row. One shared hit that only
+/// opens the first painted description is not this control.
+#[test]
+fn l2_overlay_two_named_l3_rows_each_paint_open_arrow_and_second_arrow_opens_second_l3() {
+    const L2: &str = "l2-coord";
+    const L3_A: &str = "l3-first";
+    const L3_B: &str = "l3-second";
+    const SPECIALIST_A: &str = "Review the overlay land";
+    const SPECIALIST_B: &str = "Implement the second specialist";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let start_a = Instant::now();
+    let start_b = start_a + Duration::from_secs(1);
+    let mut first = running_subagent_info(L3_A);
+    first.description = Arc::from(SPECIALIST_A);
+    first.attempt.is_background = true;
+    first.attempt.depth = Some(2);
+    first.attempt.parent_session_id = Some(Arc::from(L2));
+    first.attempt.started_at = start_a;
+    l1.subagent_sessions.insert(L3_A.to_owned(), first);
+    l1.insert_test_child(L3_A.to_owned(), Box::new(make_agent()));
+    let mut second = running_subagent_info(L3_B);
+    second.description = Arc::from(SPECIALIST_B);
+    second.attempt.is_background = true;
+    second.attempt.depth = Some(2);
+    second.attempt.parent_session_id = Some(Arc::from(L2));
+    second.attempt.started_at = start_b;
+    l1.subagent_sessions.insert(L3_B.to_owned(), second);
+    l1.insert_test_child(L3_B.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let open_arrow = crate::glyphs::enlarge_button();
+    let status_a = specialist_status_cell(&buf, area, SPECIALIST_A).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_ROW_ARROWS} The L2 overlay must paint the first L3 specialist row `{SPECIALIST_A}`:\n{painted}"
+        )
+    });
+    let status_b = specialist_status_cell(&buf, area, SPECIALIST_B).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_ROW_ARROWS} The L2 overlay must paint the second L3 specialist row `{SPECIALIST_B}`:\n{painted}"
+        )
+    });
+    assert_ne!(
+        status_a.1, status_b.1,
+        "{OWED_L3_ROW_ARROWS} The two named L3 rows must sit on distinct y rows so each can own an open arrow. First y is {}, second y is {}.\n{painted}",
+        status_a.1, status_b.1
+    );
+    let row_a = Rect {
+        x: area.x,
+        y: status_a.1,
+        width: area.width,
+        height: 1,
+    };
+    let row_b = Rect {
+        x: area.x,
+        y: status_b.1,
+        width: area.width,
+        height: 1,
+    };
+    let arrow_a = specialist_status_cell(&buf, row_a, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_ROW_ARROWS} The first L3 specialist row at y {} must paint `{open_arrow}`.\n{painted}",
+            status_a.1
+        )
+    });
+    let arrow_b = specialist_status_cell(&buf, row_b, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_ROW_ARROWS} The second L3 specialist row at y {} must paint `{open_arrow}`, not share the first row's control. hit_overlay_nested_status is {:?}. overlay_nested_status_child_sid is {:?}.\n{painted}",
+            status_b.1,
+            l1.hit_overlay_nested_status.rect,
+            l1.overlay_nested_status_child_sid
+        )
+    });
+    assert_eq!(
+        arrow_a.1, status_a.1,
+        "{OWED_L3_ROW_ARROWS} The first open arrow must sit on the first L3 specialist row."
+    );
+    assert_eq!(
+        arrow_b.1, status_b.1,
+        "{OWED_L3_ROW_ARROWS} The second open arrow must sit on the second L3 specialist row."
+    );
+    assert_ne!(
+        (arrow_a.0, arrow_a.1),
+        (arrow_b.0, arrow_b.1),
+        "{OWED_L3_ROW_ARROWS} The two named L3 rows must paint distinct open-arrow cells, not one shared hit."
+    );
+    let click_b = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow_b.0,
+        row: arrow_b.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click_b, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3_B),
+        "{OWED_L3_ROW_ARROWS} A left click on the second L3 row open arrow must set active_subagent to that second L3, not the first. First arrow is at ({}, {}), second arrow is at ({}, {}). hit_overlay_nested_status is {:?}. overlay_nested_status_child_sid is {:?}.",
+        arrow_a.0,
+        arrow_a.1,
+        arrow_b.0,
+        arrow_b.1,
+        l1.hit_overlay_nested_status.rect,
+        l1.overlay_nested_status_child_sid
+    );
+    l1.active_subagent = Some(L2.to_owned());
+    let click_a = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow_a.0,
+        row: arrow_a.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click_a, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3_A),
+        "{OWED_L3_ROW_ARROWS} A left click on the first L3 row open arrow must still set active_subagent to that first L3 when two named rows are painted."
+    );
+}
+
+const OWED_LAST_TOOL_ARROW: &str =
+    "L3 view arrow buttons on L2 screens, without eating the last-tool name.";
+
+/// Overlay wait chrome names the specialist last tool. The L3 open arrow
+/// must not overwrite that tool (`[↗]ad_file` from `read_file`).
+#[test]
+fn l2_overlay_wait_open_arrow_does_not_eat_last_tool_name() {
+    use agent_client_protocol as acp;
+    const L2: &str = "l2-coord";
+    const L3: &str = "l3-gate";
+    const SPECIALIST: &str = "Land check-remote full gate";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let meta = crate::acp::meta::NotificationMeta::default();
+    l2.session.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from("wait-l3")),
+                "get_command_or_subagent_output",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+            .locations(vec![]),
+        ),
+        &meta,
+        &mut l2.scrollback,
+    );
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("General Fix nested wait overlay");
+    l2_info.attempt.started_at = Instant::now() - Duration::from_secs(3 * 60 + 12);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let mut specialist = running_subagent_info(L3);
+    specialist.description = Arc::from(SPECIALIST);
+    specialist.attempt.is_background = true;
+    specialist.attempt.depth = Some(2);
+    specialist.attempt.parent_session_id = Some(Arc::from(L2));
+    specialist.attempt.tools_used = vec![Arc::from("read_file")];
+    specialist.attempt.tool_call_count = Some(4);
+    l1.subagent_sessions.insert(L3.to_owned(), specialist);
+    l1.insert_test_child(L3.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let open_arrow = crate::glyphs::enlarge_button();
+    assert!(
+        painted.contains(SPECIALIST),
+        "{OWED_LAST_TOOL_ARROW} The overlay wait must name the specialist:\n{painted}"
+    );
+    assert!(
+        painted.contains("read_file"),
+        "{OWED_LAST_TOOL_ARROW} The overlay wait must keep the last-tool name `read_file`, not mash it into the open arrow:\n{painted}"
+    );
+    assert!(
+        !painted.contains(&format!("{open_arrow}ad_file")),
+        "{OWED_LAST_TOOL_ARROW} `[↗]` must not share glyphs with `read_file` (`{open_arrow}ad_file`):\n{painted}"
+    );
+    assert!(
+        painted.contains(open_arrow),
+        "{OWED_LAST_TOOL_ARROW} The L2 overlay must still paint the L3 open-arrow `{open_arrow}`:\n{painted}"
+    );
+}
+
 #[test]
 fn l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn() {
     use agent_client_protocol as acp;

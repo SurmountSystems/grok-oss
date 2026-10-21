@@ -1301,7 +1301,12 @@ impl SessionActor {
                     // Turn the "planning…" badge off NOW, before the plan/baseline I/O below, instead of only at the very end.
                     // That way the UI never advertises "planning" while it can no longer replan.
                     self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
-                    if attempt_file.persist(&plan_file).is_err() {
+                    // Snapshot the actor-held GoalPlan across attempt-file persist so a
+                    // PLAN_FILE stop stays Planned and restore still has the goals.
+                    let goal_plan_snapshot = self.snapshot_actor_goal_plan();
+                    let persist_err = attempt_file.persist(&plan_file).is_err();
+                    self.restore_actor_goal_plan(goal_plan_snapshot);
+                    if persist_err {
                         let still_same_goal =
                             self.goal_tracker.lock().snapshot().is_some_and(|goal| {
                                 same_active_goal(goal) && goal.plan_file.is_none()

@@ -43,6 +43,8 @@ const _: () = assert!(
 /// Skip paints while the debounce is armed so overlay markdown and scrollback wrap
 /// are not rebuilt on every SIGWINCH. `iterm2_erase` is the one cheap paint that
 /// hides smeared iTerm2 pixels on the first drag event.
+/// That erase paint still calls `scrollback.prepare_layout`; live-resize skip keeps
+/// the last conversation wrap until settle (not overlay-only).
 /// Typing/mouse clear the debounce and paint immediately (no spin that blocks typing).
 pub(crate) fn should_paint_during_live_resize(
     resize_debounce_pending: bool,
@@ -2562,7 +2564,7 @@ pub(crate) async fn run(
                         resize_debounce_at = Some(Instant::now() + RESIZE_DEBOUNCE);
                         // One immediate draw repaints the (now hidden) preview cells — the erase on iTerm2, which smears committed pixels during a drag (see resize_hides_prompt_preview).
                         // Ownership then clears, so later drag events fall back to pure debounce.
-                        // Overlay markdown still skips wrap (`note_live_resize`) on this erase paint.
+                        // Overlay markdown and conversation wrap still skip (`note_live_resize`) on this erase paint.
                         if crate::terminal::overlay::has_committed_owner()
                             && crate::terminal::image::prompt_preview_graphics_protocol()
                                 == crate::terminal::image::GraphicsProtocol::ITerm2
@@ -5869,6 +5871,34 @@ mod tests {
         assert!(
             should_paint_during_live_resize(false, true),
             "erase after settle still paints"
+        );
+    }
+    /// Operator contract (GitHub #235): resizing a large conversation must not hitch
+    /// on every SIGWINCH. A burst is one size; mid-drag paints stay skipped.
+    /// Conversation wrap skip (`scrollback.prepare_layout`) is the other half:
+    /// iTerm2 erase may paint, wrap waits for settle.
+    #[test]
+    fn live_resize_does_not_hitch_large_conversation_on_every_sigwinch() {
+        let events = (0..20u16)
+            .map(|i| TimedInputEvent::now(Event::Resize(80 + i, 24)))
+            .collect::<Vec<_>>();
+        let result = coalesce_consecutive_resizes(events);
+        assert_eq!(
+            result.len(),
+            1,
+            "a SIGWINCH burst is one event, not one wrap per event"
+        );
+        assert!(
+            matches!(nth(&result, 0).event, Event::Resize(99, 24)),
+            "the surviving event is the last size"
+        );
+        assert!(
+            !should_paint_during_live_resize(true, false),
+            "mid-drag paints hitch conversation wrap"
+        );
+        assert!(
+            should_paint_during_live_resize(false, false),
+            "typing/settle must paint immediately so wrap runs once after settle"
         );
     }
     #[test]

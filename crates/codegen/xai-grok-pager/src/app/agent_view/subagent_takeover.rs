@@ -17,6 +17,7 @@ use crate::scrollback::render::ScratchBuffer;
 use crate::theme::Theme;
 use crate::views::agent;
 use crate::views::shortcuts_bar::PendingHint;
+use crate::views::tasks_pane::TaskEntryId;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -280,6 +281,7 @@ impl AgentView {
         use unicode_width::UnicodeWidthStr;
         self.hit_overlay_nested_status.clear();
         self.overlay_nested_status_child_sid = None;
+        self.tasks.view_button_rects.clear();
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let compact = appearance.prompt.compact;
@@ -570,13 +572,18 @@ impl AgentView {
 
     /// The specialist status the L2 overlay just painted is a click target.
     /// A left click opens that L3 session view.
-    /// `Waiting on 1 task...` wins when that row is painted, including when a
-    /// description phrase is also on screen. The hit is the lowest row of
-    /// that phrase, plus the open-arrow control painted on that row. An
-    /// unlabeled `Waiting on task output…` title and a bottom `1 subagent
-    /// still running` cue for this one-task wait are rewritten to the same
-    /// phrase so the lower row is the control. A description phrase stays
-    /// the target when the waiting row is not painted.
+    /// `Waiting on 1 task...` wins when that row is painted and the specialist
+    /// description is empty. The hit is the lowest row of that phrase, plus
+    /// the open-arrow control painted on that row. An unlabeled `Waiting on
+    /// task output…` title and a bottom `1 subagent still running` cue for
+    /// this one-task wait are rewritten to the same phrase so the lower row
+    /// is the control. Named L3 specialist rows also paint that same
+    /// enlarge/open-arrow; activating it opens that L3. Each named row
+    /// gets its own arrow and hit. One shared sid is not enough when two
+    /// named L3 rows are on screen. A waiting-row-only arrow is not the
+    /// L3-row control. Wait chrome that already paints
+    /// `{description}: {last tool}` keeps that tool name; the arrow does
+    /// not share glyphs with it (`[↗]ad_file` from `read_file`).
     fn record_overlay_specialist_status_hit(
         &mut self,
         buf: &mut Buffer,
@@ -603,11 +610,11 @@ impl AgentView {
             if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
                 paint_one_task_wait_over_still_running(buf, area);
                 if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
-                    && let Some((id, _, _)) = specialists.first()
+                    && let Some((id, phrase, _)) = specialists.first()
+                    && phrase.is_empty()
                 {
                     let hit = paint_waiting_row_open_arrow(buf, area, rect);
-                    self.hit_overlay_nested_status.set(Some(hit));
-                    self.overlay_nested_status_child_sid = Some(id.clone());
+                    self.record_overlay_nested_status_hit(id.clone(), hit);
                     return;
                 }
             }
@@ -616,12 +623,44 @@ impl AgentView {
             if phrase.is_empty() {
                 continue;
             }
-            let Some(rect) = painted_phrase_rect(buf, area, &phrase) else {
+            let Some(rect) = painted_open_control_phrase_rect(buf, area, &phrase) else {
                 continue;
             };
-            self.hit_overlay_nested_status.set(Some(rect));
+            let hit = paint_waiting_row_open_arrow(buf, area, rect);
+            self.record_overlay_nested_status_hit(id, hit);
+        }
+    }
+
+    /// One named L3 row, or the empty-description one-task wait, is a
+    /// click target that opens that child. The first painted row also
+    /// fills the single overlay status hit so older one-row tests still
+    /// read `hit_overlay_nested_status`. Later named rows keep their
+    /// own rect in `view_button_rects`.
+    fn record_overlay_nested_status_hit(&mut self, id: String, hit: Rect) {
+        self.tasks
+            .view_button_rects
+            .push((TaskEntryId::Agent(id.clone()), hit));
+        if self.overlay_nested_status_child_sid.is_none() {
+            self.hit_overlay_nested_status.set(Some(hit));
             self.overlay_nested_status_child_sid = Some(id);
-            return;
+        }
+    }
+
+    /// Left-click target for an overlay L3 open-arrow. Per-row hits win
+    /// so two named specialists do not share the first painted sid.
+    fn overlay_nested_open_sid_at(&self, column: u16, row: u16) -> Option<String> {
+        let point = (column, row).into();
+        for (id, rect) in &self.tasks.view_button_rects {
+            if rect.contains(point)
+                && let TaskEntryId::Agent(sid) = id
+            {
+                return Some(sid.clone());
+            }
+        }
+        if self.hit_overlay_nested_status.contains(column, row) {
+            self.overlay_nested_status_child_sid.clone()
+        } else {
+            None
         }
     }
 
@@ -715,10 +754,7 @@ impl AgentView {
         }
         if let Event::Mouse(mouse) = ev
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self
-                .hit_overlay_nested_status
-                .contains(mouse.column, mouse.row)
-            && let Some(sid) = self.overlay_nested_status_child_sid.clone()
+            && let Some(sid) = self.overlay_nested_open_sid_at(mouse.column, mouse.row)
             && self.subagent_views.contains_key(&sid)
         {
             let open_is_l2_floor = self
@@ -853,9 +889,13 @@ fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
     paint_one_task_wait_over_phrase(buf, area, ONE_SUBAGENT_STILL_RUNNING);
 }
 
-/// Paint `[↗]` on the one-task wait row so the waited L3 is an open control.
-/// The hit covers the waiting phrase and that arrow. Do not overwrite the
-/// waiting phrase when the row is too short for the arrow.
+/// Paint `[↗]` as an open control for an overlay phrase.
+/// Named L3 rows and the one-task wait row get the arrow after the phrase.
+/// Wait chrome that already paints `{description}: {tool}` keeps that last
+/// tool; the arrow sits in the blank gap left of the description so the
+/// two do not share glyphs (`[↗]ad_file` from `read_file`). The hit covers
+/// the phrase and that arrow. Do not overwrite the phrase when the row is
+/// too short for the arrow.
 fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> Rect {
     let arrow = crate::glyphs::enlarge_button();
     let arrow_w: u16 = 3;
@@ -864,7 +904,12 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
         return phrase;
     }
     let after_phrase = phrase.x.saturating_add(phrase.width);
-    let arrow_x = if after_phrase.saturating_add(1).saturating_add(arrow_w) <= right {
+    let arrow_x = if phrase_followed_by_last_tool_sep(buf, phrase) {
+        match open_arrow_x_left_of_last_tool(buf, area, phrase, arrow_w) {
+            Some(x) => x,
+            None => return phrase,
+        }
+    } else if after_phrase.saturating_add(1).saturating_add(arrow_w) <= right {
         after_phrase.saturating_add(1)
     } else if after_phrase.saturating_add(arrow_w) <= right {
         after_phrase
@@ -878,8 +923,89 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
         &Span::styled(arrow, Style::default().fg(theme.gray)),
         arrow_w,
     );
-    let hit_end = arrow_x.saturating_add(arrow_w);
-    Rect::new(phrase.x, phrase.y, hit_end.saturating_sub(phrase.x), 1)
+    let hit_x = arrow_x.min(phrase.x);
+    let hit_end = after_phrase.max(arrow_x.saturating_add(arrow_w));
+    Rect::new(hit_x, phrase.y, hit_end.saturating_sub(hit_x), 1)
+}
+
+/// `{description}: {tool}` wait chrome. The colon is the last-tool separator,
+/// not room for `[↗]`.
+fn phrase_followed_by_last_tool_sep(buf: &Buffer, phrase: Rect) -> bool {
+    if phrase.height == 0 {
+        return false;
+    }
+    let x = phrase.x.saturating_add(phrase.width);
+    buf.cell((x, phrase.y))
+        .is_some_and(|cell| cell.symbol() == ":")
+}
+
+fn cells_are_blank(buf: &Buffer, x: u16, y: u16, width: u16) -> bool {
+    (0..width).all(|i| {
+        buf.cell((x.saturating_add(i), y)).is_none_or(|cell| {
+            let symbol = cell.symbol();
+            symbol.is_empty() || symbol == " "
+        })
+    })
+}
+
+/// Sit `[↗]` in the blank gap left of `{description}: {tool}` so the last
+/// tool stays whole. None when that gap is too short or already painted.
+fn open_arrow_x_left_of_last_tool(
+    buf: &Buffer,
+    area: Rect,
+    phrase: Rect,
+    arrow_w: u16,
+) -> Option<u16> {
+    let gap: u16 = 1;
+    let left_room = phrase.x.saturating_sub(area.x);
+    let candidate = if left_room >= arrow_w.saturating_add(gap) {
+        phrase.x.saturating_sub(arrow_w.saturating_add(gap))
+    } else if left_room >= arrow_w {
+        phrase.x.saturating_sub(arrow_w)
+    } else {
+        return None;
+    };
+    (candidate >= area.x && cells_are_blank(buf, candidate, phrase.y, arrow_w)).then_some(candidate)
+}
+
+/// First dedicated L3-row paint of `phrase` (not `{desc}: {tool}` wait
+/// chrome). Falls back to the first last-tool occurrence so that row can
+/// still host an open arrow left of the tool name.
+fn painted_open_control_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let bottom = area.y.saturating_add(area.height);
+    let right = area.x.saturating_add(area.width);
+    let mut last_tool_fallback = None;
+    for y in area.y..bottom {
+        let symbols: Vec<String> = (area.x..right)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            let end = start + glyphs.len();
+            if symbols.get(start..end) != Some(glyphs.as_slice()) {
+                continue;
+            }
+            let width = u16::try_from(glyphs.len()).unwrap_or(u16::MAX);
+            let x = area
+                .x
+                .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
+            let rect = Rect::new(x, y, width, 1);
+            if !phrase_followed_by_last_tool_sep(buf, rect) {
+                return Some(rect);
+            }
+            if last_tool_fallback.is_none() {
+                last_tool_fallback = Some(rect);
+            }
+            break;
+        }
+    }
+    last_tool_fallback
 }
 
 /// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the

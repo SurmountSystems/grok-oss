@@ -901,12 +901,7 @@ impl SessionActor {
                 unreachable!("GoalResume is intercepted in handle_prompt")
             }
             BuiltinAction::GoalClear => {
-                let mut goal_plan = crate::session::goal_plan::GoalPlan::new();
-                if let Some(objective) = self.goal_tracker.lock().objective() {
-                    goal_plan.set_goals(vec![objective.to_string()]);
-                    let _ = goal_plan.post_plan_action();
-                }
-                let give_up = goal_plan.give_up();
+                let give_up = self.clear_actor_goal_plan();
                 if !give_up.text.is_empty()
                     && !give_up
                         .text

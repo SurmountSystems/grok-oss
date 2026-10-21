@@ -1,7 +1,7 @@
 //! Detect high-repetition assistant / reasoning blocks for compact recovery.
 //!
 //! Same thresholds as the live-stream breaker in `xai-grok-sampler` (copied,
-//! not imported): a short sentence five times, a two-sentence cycle three
+//! not imported): a short sentence eight times, a two-sentence cycle three
 //! times, or a 64-character block three times when a smear keeps that block.
 //! Compact must drop that wall so summarizer input and reseed are not
 //! `Context compacted: 75.2k → 75.2k tokens`. Not a second stream stop.
@@ -19,7 +19,10 @@ const WINDOW_CHARS: usize = 768;
 /// Shortest phrase that can count as a loop unit.
 const MIN_PHRASE_CHARS: usize = 24;
 /// Consecutive copies of a short sentence that mean a loop.
-const MIN_SHORT_REPEATS: usize = 5;
+/// GitHub #223: 4 then 5 was still a hair trigger on a nested L3 reviewer
+/// restating a short PASS/FAIL verdict a few times. Eight still strips a
+/// tight loop. Do not delete this breaker.
+const MIN_SHORT_REPEATS: usize = 8;
 /// Consecutive copies of a longer phrase (a two-sentence cycle).
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
@@ -441,10 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn dest_encoder_skip_single_sentence_five_times_is_repetitive() {
+    fn dest_encoder_skip_single_sentence_at_min_short_repeats_is_repetitive() {
         let sentence = "Spawn dests of dest encoder skip. ";
         assert!(!is_repetitive_generation(&sentence.repeat(4)));
-        assert!(is_repetitive_generation(&sentence.repeat(5)));
+        assert!(is_repetitive_generation(
+            &sentence.repeat(MIN_SHORT_REPEATS)
+        ));
     }
 
     #[test]
@@ -501,17 +506,16 @@ mod tests {
         assert!(table.matches(shared).count() >= MIN_LONG_REPEATS);
         assert!(!is_repetitive_generation(table));
         let sentence = "I am repeating this exact prose sentence. ";
-        assert!(!is_repetitive_generation(
-            &sentence.repeat(MIN_SHORT_REPEATS - 1)
-        ));
+        assert!(!is_repetitive_generation(&sentence.repeat(5)));
         assert!(is_repetitive_generation(
             &sentence.repeat(MIN_SHORT_REPEATS)
         ));
     }
 
     /// GitHub #223. Same live-stream thresholds: four copies of a short
-    /// phrase must not strip. Five copies, and three dest-encoder-skip
-    /// pairs, still must.
+    /// phrase must not strip. [`MIN_SHORT_REPEATS`] copies, and three
+    /// dest-encoder-skip pairs, still must. Five copies is not the trip;
+    /// see `nested_reviewer_short_verdict_repeated_a_few_times_is_not_stripped`.
     #[test]
     fn short_repeated_phrase_is_not_stripped_runaway_loop_still_is() {
         let short = "Let me try that once more. ";
@@ -525,8 +529,53 @@ mod tests {
             "four copies of a short phrase must not strip"
         );
         assert!(
-            is_repetitive_generation(&short.repeat(5)),
-            "five copies of a short phrase must still strip"
+            is_repetitive_generation(&short.repeat(MIN_SHORT_REPEATS)),
+            "{MIN_SHORT_REPEATS} copies of a short phrase must still strip"
+        );
+        let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
+        assert!(
+            !is_repetitive_generation(&one.repeat(2)),
+            "two copies of the dest-encoder-skip pair must still not strip"
+        );
+        assert!(
+            is_repetitive_generation(&one.repeat(3)),
+            "three copies of `{DEST_ENCODER_SKIP_LOOP}` must still strip"
+        );
+    }
+
+    /// GitHub #223 follow-up. Operator 2026-10-21: "The first reviewer
+    /// stopped on a repeating sentence. This is concerning to see in one
+    /// of your L2s." Prior land raised MIN_SHORT_REPEATS from 4 to 5.
+    /// That is not done. Compact must not strip a nested L3 reviewer
+    /// finishing a report that restates a short PASS/FAIL verdict a few
+    /// times. A real tight loop still must strip.
+    #[test]
+    fn nested_reviewer_short_verdict_repeated_a_few_times_is_not_stripped() {
+        let operator = "The first reviewer stopped on a repeating sentence. This is concerning to see in one of your L2s.";
+        assert_eq!(
+            operator,
+            "The first reviewer stopped on a repeating sentence. This is concerning to see in one of your L2s.",
+            "quote the Operator outcome; this death is a product miss, not a normal review path"
+        );
+
+        let pass = "L3 reviewer PASS the contract. ";
+        let fail = "L3 reviewer FAIL the contract. ";
+        for verdict in [pass, fail] {
+            assert!(
+                verdict.len() >= MIN_PHRASE_CHARS && verdict.len() < LONG_PHRASE_CHARS,
+                "fixture must use the short-phrase threshold, got {} for {verdict}",
+                verdict.len()
+            );
+            for copies in [5usize, 7] {
+                assert!(
+                    !is_repetitive_generation(&verdict.repeat(copies)),
+                    "{copies} copies of a nested reviewer short verdict must not strip"
+                );
+            }
+        }
+        assert!(
+            is_repetitive_generation(&pass.repeat(MIN_SHORT_REPEATS)),
+            "{MIN_SHORT_REPEATS} copies of that short verdict is a tight loop and must still strip"
         );
         let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
         assert!(

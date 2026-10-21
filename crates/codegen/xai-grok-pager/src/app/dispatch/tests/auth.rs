@@ -622,6 +622,128 @@ fn auth_complete_after_login_posts_in_flight_prompt_while_waiting_for_the_model(
     );
 }
 
+/// Operator 2026-10-21 after the claimed AuthComplete / UnstickResendPrompt / recoveredBearer install:
+/// "After logging in, nothing really happens still."
+/// "Waiting for the model with a counter that ticks toward hours."
+/// "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)."
+///
+/// Prior named tests missed this combination: parent already TurnRunning (Waiting for the model)
+/// with an in_flight already-typed prompt, a nested 401 row, and a stale pager JWT from before
+/// login. `enqueue_prompts_after_auth` skipped the parent POST when nested resume was non-empty,
+/// and `apply_recovered_parent_sampler_jwts` left the expired JWT in place when login meta had
+/// recoveredBearerJwt. Nested then POSTed that expired Bearer with xai-grok-cli Token-Auth.
+/// Do not tell the Operator to /login. They already logged in.
+#[test]
+fn auth_complete_after_login_posts_waiting_parent_and_nested_401_with_login_jwt_not_stale() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-after-login"));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "already typed parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(3),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-wait-after-login"),
+        );
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 43,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 43,
+            meta: Some(serde_json::json!({
+                "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+            })),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some(PARENT_SAMPLER_CURRENT_API_KEY),
+        "AuthComplete after login must replace the stale pager JWT with recoveredBearerJwt from login meta, not keep expired-stale-jwt"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-after-login"
+                && text == "already typed parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "After logging in, nothing really happens still. Waiting for the model with a counter that ticks toward hours. AuthComplete must POST the already-typed parent prompt immediately with the login JWT, not skip it because a nested 401 row exists. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context). Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "cs-nested-401"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "nested 401 resume after login must POST recoveredBearer with the login JWT, not expired-stale-jwt. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context). Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if jwt == "expired-stale-jwt"
+        )),
+        "stale pager JWT must not ride recoveredBearer after login, got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.session.state.is_turn_running(),
+        "after login the parent must not sit idle; the waiting parent POST is in flight"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "nested 401 with no auth context must not tell the Operator to /login while L1 still talks"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for banned in [
+        "/login",
+        "Logging in...",
+        "Authentication temporarily unavailable",
+    ] {
+        assert!(
+            !scrollback_text.contains(banned),
+            "must not paint {banned:?} on nested no-auth-context while L1 still talks, scrollback={scrollback_text}"
+        );
+    }
+}
+
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer
 /// puts this on `_meta.recoveredBearerJwt`.
 const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";

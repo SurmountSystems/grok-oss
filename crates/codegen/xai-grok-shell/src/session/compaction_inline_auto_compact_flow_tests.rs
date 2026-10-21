@@ -208,6 +208,7 @@ async fn create_test_actor(
                 "/tmp/test-session",
             )),
         )),
+        goal_plan: parking_lot::Mutex::new(crate::session::goal_plan::GoalPlan::new()),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),

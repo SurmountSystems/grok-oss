@@ -74,18 +74,15 @@ impl GoalPlan {
                     post_plan_retry: retry,
                 }
             }
-            None => GoalPlanReply::default(),
+            None => empty_host_reply(),
         }
     }
 
-    /// Abandon current goals. Empty goals must not reply [`NO_CURRENT_GOALS`].
+    /// Abandon current goals. Empty and non-empty must not reply [`NO_CURRENT_GOALS`].
     pub(crate) fn give_up(&mut self) -> GoalPlanReply {
-        if self.goals.is_empty() {
-            return GoalPlanReply::default();
-        }
         self.goals.clear();
         self.post_plan_retry_pending = false;
-        GoalPlanReply::default()
+        empty_host_reply()
     }
 
     /// Replace the goal list. Empty-on-empty must not reply [`NO_CURRENT_GOALS`].
@@ -96,7 +93,7 @@ impl GoalPlan {
             .filter(|goal| !goal.is_empty())
             .collect();
         if incoming.is_empty() && self.goals.is_empty() {
-            return GoalPlanReply::default();
+            return empty_host_reply();
         }
         if incoming.is_empty() {
             return self.give_up();
@@ -196,6 +193,17 @@ fn extract_tagged<'a>(message: &'a str, tag: &str) -> Option<&'a str> {
     Some(message[start..end].trim())
 }
 
+/// Empty host-turn reply. Must never contain [`NO_CURRENT_GOALS`].
+fn empty_host_reply() -> GoalPlanReply {
+    let reply = GoalPlanReply::default();
+    debug_assert!(
+        !reply_has_no_current_goals(&reply),
+        "empty host reply must not contain {NO_CURRENT_GOALS:?}, got {:?}",
+        reply.text
+    );
+    reply
+}
+
 fn reply_has_no_current_goals(reply: &GoalPlanReply) -> bool {
     reply.text.to_ascii_lowercase().contains(NO_CURRENT_GOALS)
 }
@@ -233,6 +241,51 @@ mod tests {
         assert!(plan.goals().is_empty());
         assert!(!reply.goals_set);
         assert!(!reply.post_plan_retry);
+    }
+
+    /// Operator 2026-10-21: Goals are still broken. `/goal` still replies
+    /// "no current goals". Production builds a throwaway [`GoalPlan`] (no
+    /// session store) for each `/goal` / give-up. That host line is forbidden.
+    #[test]
+    fn test_goal_slash_with_no_stored_plan_does_not_reply_no_current_goals() {
+        let mut plan = GoalPlan::new();
+        for message in [
+            "/goal",
+            "/goal ",
+            "/GOAL",
+            "/goal status",
+            "/goal clear",
+            "/goal pause",
+            "/goal resume",
+            "",
+        ] {
+            let reply = plan.apply_user_goal_message(message);
+            assert!(
+                !reply_has_no_current_goals(&reply),
+                "Goals are still broken: /goal still replies no current goals. \
+                 throwaway apply {message:?} must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+                reply.text
+            );
+        }
+        let empty_give_up = plan.give_up();
+        assert!(
+            !reply_has_no_current_goals(&empty_give_up),
+            "Goals are still broken: /goal still replies no current goals. \
+             throwaway empty give_up must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            empty_give_up.text
+        );
+        let applied = plan.apply_user_goal_message("/goal ship the parser");
+        assert!(applied.goals_set);
+        let give_up = plan.give_up();
+        assert!(
+            !reply_has_no_current_goals(&give_up),
+            "Goals are still broken: /goal still replies no current goals. \
+             give_up after set_goals must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            give_up.text
+        );
+        assert!(plan.goals().is_empty());
+        assert!(!give_up.goals_set);
+        assert!(!give_up.post_plan_retry);
     }
 
     #[test]

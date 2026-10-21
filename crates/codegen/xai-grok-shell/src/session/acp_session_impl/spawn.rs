@@ -743,6 +743,8 @@ pub(crate) async fn spawn_session_actor(
         Arc::new(parking_lot::Mutex::new(tracker))
     };
     let goal_was_restored = persisted_goal_mode.is_some();
+    let restored_goal_plan =
+        SessionActor::goal_plan_from_restored_orchestration(persisted_goal_mode.as_ref());
     let goal_tracker = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
         let tracker = if let Some(snapshot) = persisted_goal_mode {
@@ -2043,6 +2045,7 @@ pub(crate) async fn spawn_session_actor(
         }),
         goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
+        goal_plan: parking_lot::Mutex::new(restored_goal_plan),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),

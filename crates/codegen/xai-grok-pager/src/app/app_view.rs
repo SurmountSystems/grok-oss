@@ -2122,7 +2122,7 @@ impl AppView {
         self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
     }
-    /// Overlay wrap runs once after a resize drag settles (or a key/mouse arrives).
+    /// Overlay wrap and main conversation wrap run once after a resize drag settles (or a key/mouse arrives).
     /// SIGWINCH itself only arms live-resize skip via [`crate::app::agent_view::AgentView::note_terminal_resize`].
     pub(crate) fn settle_live_resize_overlays(&mut self) {
         for agent in self.agents.values_mut() {
