@@ -736,7 +736,7 @@ pub(crate) fn build_hints(
     selected_supports_copy: bool,
     selected_meta_label: Option<&'static str>,
     selected_supports_fullscreen: bool,
-    can_demote: bool,
+    _can_demote: bool,
     selected_can_kill: bool,
     multiline_mode: bool,
     vim_mode: bool,
@@ -1083,12 +1083,6 @@ pub(crate) fn build_hints(
     {
         hints.push(def.hint());
     }
-    if can_demote
-        && surface == ViewSurface::Root
-        && let Some(key) = registry.key_for(ActionId::SendToBackground)
-    {
-        hints.push(HintItem::new(key, "send to bg"));
-    }
     hints
 }
 #[cfg(test)]
@@ -1288,7 +1282,7 @@ mod tests {
         assert!(!frame_text(&buf).contains("hover-hook"));
     }
     #[test]
-    fn demotion_hint_uses_registered_ctrl_b_binding() {
+    fn demotion_hint_is_not_an_operator_control() {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
@@ -1318,11 +1312,10 @@ mod tests {
             false,
             None,
         );
-        let hint = hints
-            .iter()
-            .find(|hint| hint.label == "send to bg")
-            .expect("running Execute should advertise demotion");
-        assert_eq!(hint.keys, vec![crate::key!('b', CONTROL)]);
+        assert!(
+            hints.iter().all(|hint| hint.label != "send to bg"),
+            "GitHub #232: send to bg is not a required hint"
+        );
     }
     fn queue_hint_labels(queue_mutation: QueueMutation, is_turn_running: bool) -> Vec<String> {
         let registry = ActionRegistry::defaults();
@@ -1423,7 +1416,7 @@ mod tests {
             None,
         )
     }
-    /// The child surface adds `q/Esc back` and drops the demote chip and the `BackTab mode` hint; the root keeps all three.
+    /// The child surface adds `q/Esc back` and drops the `BackTab mode` hint; neither surface advertises send to bg.
     #[test]
     fn build_hints_child_surface_adds_back_and_hides_demote_and_mode() {
         let has = |hints: &[HintItem], label: &str| hints.iter().any(|h| h.label == label);
@@ -1431,7 +1424,7 @@ mod tests {
         prompt.textarea.insert_str("draft");
         let root = surface_hints(ActivePane::Scrollback, ViewSurface::Root, &prompt);
         let child = surface_hints(ActivePane::Scrollback, ViewSurface::ChildTakeover, &prompt);
-        assert!(!has(&root, "back") && has(&root, "send to bg"));
+        assert!(!has(&root, "back") && !has(&root, "send to bg"));
         assert!(has(&child, "back") && !has(&child, "send to bg"));
         assert!(has(&root, "prompt") && !has(&child, "prompt"));
         let pinned_focus = prompt_focus_hint().pinned();

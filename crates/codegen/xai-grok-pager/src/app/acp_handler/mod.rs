@@ -149,6 +149,8 @@ fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
 }
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
     let state_changed = handle_inner(msg, app);
+    let auto_bg = crate::app::dispatch::maybe_auto_background_l1_blocking_execute(app);
+    app.pending_effects.extend(auto_bg);
     let flushed = app.flush_image_notices_if_root();
     state_changed || flushed
 }

@@ -1039,12 +1039,7 @@ impl AgentView {
                     selected_entry.is_some_and(|e| e.block.supports_fullscreen()),
                 )
             };
-        let can_demote = self.surface() == ViewSurface::Root
-            && self
-                .session
-                .tracker
-                .running_execute_tool_call_id()
-                .is_some();
+        let can_demote = false;
         let selected_can_kill = if self.surface() == ViewSurface::ChildTakeover {
             false
         } else if self.active_pane == ActivePane::Dock {

@@ -6,6 +6,7 @@ use super::*;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
+use xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentCancelTarget, SubagentEvent, SubagentResult, SubagentSpawnRequest,
 };
@@ -36,6 +37,12 @@ enum SpawnBehaviour {
     NoWriteThenDone,
     /// Reply with subagent runtime failure.
     Runtime { message: String, cancelled: bool },
+    /// Write `{PLAN_FILE}` then reply with subagent runtime failure (repeating-sentence / cancel-after-write).
+    WritePlanThenRuntime {
+        body: &'static [u8],
+        message: String,
+        cancelled: bool,
+    },
     /// First spawn fails with `Runtime { message, cancelled: false }`; every later spawn behaves as `WritePlanThenDone`.
     RuntimeThenWritePlan {
         message: String,
@@ -150,6 +157,22 @@ fn spawn_planner_coordinator_capturing(
                         child_session_id: req.id.clone(),
                         ..Default::default()
                     },
+                    SpawnBehaviour::WritePlanThenRuntime {
+                        body,
+                        message,
+                        cancelled,
+                    } => {
+                        let written = plan_written(&req, plan_path.as_deref(), body);
+                        SubagentResult {
+                            success: false,
+                            error: Some(message.clone()),
+                            cancelled: *cancelled,
+                            output: written.output,
+                            subagent_id: req.id.clone(),
+                            child_session_id: req.id.clone(),
+                            ..Default::default()
+                        }
+                    }
                     SpawnBehaviour::RuntimeThenWritePlan { message, body } => {
                         if count_task.load(SeqOrd::SeqCst) == 1 {
                             SubagentResult {
@@ -778,6 +801,78 @@ async fn planner_runtime_failure_pauses_goal_with_canonical_message() {
                 snap.pause_message.as_deref(),
                 Some(planner_failure_pause_message().as_str()),
             );
+        })
+        .await;
+}
+
+/// GitHub #234: nested writer repeating-sentence stop after writing `{PLAN_FILE}`
+/// must publish the plan. #228 only auto-retried the parent goal turn.
+#[tokio::test(flavor = "current_thread")]
+async fn planner_repeating_sentence_stop_with_plan_file_does_not_pause_with_no_plan_was_produced() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenRuntime {
+                    body: b"# Plan\n",
+                    message: format!("Session error: {REPETITIVE_GENERATION_USER_MESSAGE}"),
+                    cancelled: false,
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.status,
+                crate::session::goal_tracker::GoalStatus::Active,
+                "a written plan must not pause with \"No plan was produced.\""
+            );
+            assert!(
+                snap.plan_file.is_some(),
+                "repeating-sentence after write must publish the plan"
+            );
+            assert!(
+                snap.pause_message.is_none(),
+                "must not store {}: {:?}",
+                planner_failure_pause_message(),
+                snap.pause_message
+            );
+        })
+        .await;
+}
+
+/// Repeating-sentence with no file is Interrupted: retry this `maybe_run_goal_planner`
+/// call. The Operator does not type `/goal resume`.
+#[tokio::test(flavor = "current_thread")]
+async fn planner_repeating_sentence_stop_without_plan_retries_then_publishes() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::RuntimeThenWritePlan {
+                    message: format!("Session error: {REPETITIVE_GENERATION_USER_MESSAGE}"),
+                    body: b"# Plan\n",
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                2,
+                "repeating-sentence with no plan must retry inside maybe_run_goal_planner"
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.status,
+                crate::session::goal_tracker::GoalStatus::Active,
+                "the retry that writes the plan must not pause"
+            );
+            assert!(snap.plan_file.is_some());
         })
         .await;
 }

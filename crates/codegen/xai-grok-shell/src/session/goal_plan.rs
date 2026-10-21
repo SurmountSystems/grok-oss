@@ -1,0 +1,360 @@
+//! Host-owned goal plan applied from Operator messages.
+//!
+//! Isolated `rustc --test` of this file is supported: no crate imports.
+
+/// Reply text the Operator must never see from an empty give-up / replace.
+pub(crate) const NO_CURRENT_GOALS: &str = "no current goals";
+
+const GOAL_SLASH: &str = "/goal";
+
+/// Durable goal list plus the one-shot post-plan retry latch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GoalPlan {
+    goals: Vec<String>,
+    post_plan_retry_pending: bool,
+    post_plan_retry_count: u32,
+    extra: Vec<(String, String)>,
+}
+
+/// Result of applying a user message, giving up, or replacing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GoalPlanReply {
+    /// Host-turn text. Empty means no reply.
+    pub text: String,
+    /// True when [`GoalPlan::set_goals`] ran for this action.
+    pub goals_set: bool,
+    /// True when [`GoalPlan::post_plan_action`] should fire once after set.
+    pub post_plan_retry: bool,
+}
+
+impl GoalPlan {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn goals(&self) -> &[String] {
+        &self.goals
+    }
+
+    pub(crate) fn primary_goal(&self) -> Option<&str> {
+        self.goals
+            .iter()
+            .map(String::as_str)
+            .find(|goal| !goal.is_empty())
+    }
+
+    pub(crate) fn extra(&self) -> &[(String, String)] {
+        &self.extra
+    }
+
+    pub(crate) fn post_plan_retry_count(&self) -> u32 {
+        self.post_plan_retry_count
+    }
+
+    /// Replace the goal list. Arms the one-shot post-plan retry.
+    pub(crate) fn set_goals(&mut self, goals: Vec<String>) {
+        self.goals = goals
+            .into_iter()
+            .map(|goal| goal.trim().to_string())
+            .filter(|goal| !goal.is_empty())
+            .collect();
+        self.post_plan_retry_pending = true;
+    }
+
+    /// Apply an Operator message. Goal-plan messages call [`Self::set_goals`].
+    /// Other messages do not reply [`NO_CURRENT_GOALS`].
+    pub(crate) fn apply_user_goal_message(&mut self, message: &str) -> GoalPlanReply {
+        match parse_goal_plan_message(message) {
+            Some(goals) => {
+                self.set_goals(goals);
+                let retry = self.post_plan_action();
+                GoalPlanReply {
+                    text: String::new(),
+                    goals_set: true,
+                    post_plan_retry: retry,
+                }
+            }
+            None => GoalPlanReply::default(),
+        }
+    }
+
+    /// Abandon current goals. Empty goals must not reply [`NO_CURRENT_GOALS`].
+    pub(crate) fn give_up(&mut self) -> GoalPlanReply {
+        if self.goals.is_empty() {
+            return GoalPlanReply::default();
+        }
+        self.goals.clear();
+        self.post_plan_retry_pending = false;
+        GoalPlanReply::default()
+    }
+
+    /// Replace the goal list. Empty-on-empty must not reply [`NO_CURRENT_GOALS`].
+    pub(crate) fn replace(&mut self, goals: Vec<String>) -> GoalPlanReply {
+        let incoming: Vec<String> = goals
+            .into_iter()
+            .map(|goal| goal.trim().to_string())
+            .filter(|goal| !goal.is_empty())
+            .collect();
+        if incoming.is_empty() && self.goals.is_empty() {
+            return GoalPlanReply::default();
+        }
+        if incoming.is_empty() {
+            return self.give_up();
+        }
+        self.set_goals(incoming);
+        let retry = self.post_plan_action();
+        GoalPlanReply {
+            text: String::new(),
+            goals_set: true,
+            post_plan_retry: retry,
+        }
+    }
+
+    /// Fire the post-plan retry at most once after [`Self::set_goals`].
+    pub(crate) fn post_plan_action(&mut self) -> bool {
+        if !self.post_plan_retry_pending {
+            return false;
+        }
+        self.post_plan_retry_pending = false;
+        self.post_plan_retry_count = self.post_plan_retry_count.saturating_add(1);
+        true
+    }
+
+    /// Session-update merge: other fields may change; goals stay.
+    pub(crate) fn apply_session_update(&mut self, extra: Vec<(String, String)>) {
+        self.extra = extra;
+    }
+
+    /// Conversation compaction must not drop the goal list.
+    pub(crate) fn after_conversation_compaction(&mut self) {}
+
+    pub(crate) fn snapshot(&self) -> GoalPlanSnapshot {
+        GoalPlanSnapshot {
+            goals: self.goals.clone(),
+            post_plan_retry_pending: self.post_plan_retry_pending,
+            post_plan_retry_count: self.post_plan_retry_count,
+            extra: self.extra.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: GoalPlanSnapshot) {
+        self.goals = snapshot.goals;
+        self.post_plan_retry_pending = snapshot.post_plan_retry_pending;
+        self.post_plan_retry_count = snapshot.post_plan_retry_count;
+        self.extra = snapshot.extra;
+    }
+}
+
+/// Persistable GoalPlan. Survives session restore.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GoalPlanSnapshot {
+    pub goals: Vec<String>,
+    pub post_plan_retry_pending: bool,
+    pub post_plan_retry_count: u32,
+    pub extra: Vec<(String, String)>,
+}
+
+fn parse_goal_plan_message(message: &str) -> Option<Vec<String>> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(inner) = extract_tagged(trimmed, "goal-plan") {
+        let goals = inner
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        return (!goals.is_empty()).then_some(goals);
+    }
+    let rest = trimmed
+        .strip_prefix(GOAL_SLASH)
+        .or_else(|| trimmed.strip_prefix("/GOAL"))?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if is_goal_subcommand(rest) {
+        return None;
+    }
+    Some(vec![rest.to_string()])
+}
+
+fn is_goal_subcommand(rest: &str) -> bool {
+    matches!(
+        rest.split_whitespace().next().unwrap_or(""),
+        "status" | "pause" | "resume" | "clear"
+    ) && rest.split_whitespace().nth(1).is_none()
+}
+
+fn extract_tagged<'a>(message: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = message.find(&open)? + open.len();
+    let end = message[start..].find(&close)? + start;
+    Some(message[start..end].trim())
+}
+
+fn reply_has_no_current_goals(reply: &GoalPlanReply) -> bool {
+    reply.text.to_ascii_lowercase().contains(NO_CURRENT_GOALS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_goal_plan_apply_sets_goals_from_user_message() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.apply_user_goal_message("/goal ship the parser");
+        assert!(
+            reply.goals_set,
+            "apply_user_goal_message must call set_goals"
+        );
+        assert_eq!(plan.goals(), &["ship the parser".to_string()]);
+        assert_eq!(plan.primary_goal(), Some("ship the parser"));
+        assert!(
+            !reply_has_no_current_goals(&reply),
+            "setting goals must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            reply.text
+        );
+    }
+
+    #[test]
+    fn test_goal_plan_give_up_empty_goals_does_not_reply_no_current_goals() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.give_up();
+        assert!(
+            !reply_has_no_current_goals(&reply),
+            "empty give_up must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            reply.text
+        );
+        assert!(plan.goals().is_empty());
+        assert!(!reply.goals_set);
+        assert!(!reply.post_plan_retry);
+    }
+
+    #[test]
+    fn test_goal_plan_replace_empty_goals_does_not_reply_no_current_goals() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.replace(Vec::new());
+        assert!(
+            !reply_has_no_current_goals(&reply),
+            "empty replace must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            reply.text
+        );
+        assert!(plan.goals().is_empty());
+        assert!(!reply.post_plan_retry);
+    }
+
+    #[test]
+    fn test_goal_plan_user_message_without_goal_plan_does_not_reply_no_current_goals() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.apply_user_goal_message("what is the weather in Austin");
+        assert!(
+            !reply.goals_set,
+            "a plain user message is not a goal plan and must not call set_goals"
+        );
+        assert!(
+            !reply_has_no_current_goals(&reply),
+            "a plain user message must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            reply.text
+        );
+        assert!(plan.goals().is_empty());
+        assert!(!reply.post_plan_retry);
+    }
+
+    #[test]
+    fn test_goal_plan_empty_give_up_does_not_invoke_post_plan_retry() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.give_up();
+        assert!(
+            !reply.post_plan_retry,
+            "empty give_up must not arm post_plan retry"
+        );
+        assert!(
+            !plan.post_plan_action(),
+            "empty give_up must not leave a pending post_plan retry"
+        );
+        assert_eq!(plan.post_plan_retry_count(), 0);
+    }
+
+    #[test]
+    fn test_goal_plan_post_plan_retry_fires_once_after_set_goals() {
+        let mut plan = GoalPlan::new();
+        let reply = plan.apply_user_goal_message("/goal land the restore path");
+        assert!(reply.goals_set);
+        assert!(
+            reply.post_plan_retry,
+            "post_plan_action must fire once after set_goals"
+        );
+        assert_eq!(plan.post_plan_retry_count(), 1);
+        assert!(
+            !plan.post_plan_action(),
+            "post_plan retry is one-shot after set_goals"
+        );
+        assert_eq!(plan.post_plan_retry_count(), 1);
+    }
+
+    #[test]
+    fn test_goal_plan_empty_goals_does_not_reply_no_current_goals() {
+        let mut plan = GoalPlan::new();
+        for reply in [
+            plan.give_up(),
+            plan.replace(Vec::new()),
+            plan.apply_user_goal_message(""),
+            plan.apply_user_goal_message("/goal status"),
+        ] {
+            assert!(
+                !reply_has_no_current_goals(&reply),
+                "empty goals must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+                reply.text
+            );
+        }
+    }
+
+    #[test]
+    fn test_goal_plan_persists_across_session_update() {
+        let mut plan = GoalPlan::new();
+        plan.apply_user_goal_message("/goal keep this goal");
+        plan.apply_session_update(vec![("cursor".into(), "42".into())]);
+        assert_eq!(plan.goals(), &["keep this goal".to_string()]);
+        assert_eq!(plan.extra(), &[("cursor".to_string(), "42".to_string())]);
+    }
+
+    #[test]
+    fn test_goal_plan_persists_across_conversation_compaction() {
+        let mut plan = GoalPlan::new();
+        plan.apply_user_goal_message("/goal survive compact");
+        plan.after_conversation_compaction();
+        assert_eq!(plan.goals(), &["survive compact".to_string()]);
+    }
+
+    #[test]
+    fn test_goal_plan_survives_session_restore() {
+        let mut plan = GoalPlan::new();
+        plan.apply_user_goal_message("/goal restore me");
+        plan.apply_session_update(vec![("tab".into(), "1".into())]);
+        let snapshot = plan.snapshot();
+        let mut restored = GoalPlan::new();
+        restored.restore(snapshot);
+        assert_eq!(restored.goals(), &["restore me".to_string()]);
+        assert_eq!(restored.primary_goal(), Some("restore me"));
+    }
+
+    #[test]
+    fn test_goal_plan_not_lost_on_restore_when_other_fields_change() {
+        let mut plan = GoalPlan::new();
+        plan.apply_user_goal_message("/goal keep across restore");
+        let snapshot = plan.snapshot();
+        let mut restored = GoalPlan::new();
+        restored.restore(snapshot);
+        restored.apply_session_update(vec![
+            ("model".into(), "grok-4.7".into()),
+            ("cwd".into(), "/tmp".into()),
+        ]);
+        assert_eq!(restored.goals(), &["keep across restore".to_string()]);
+        assert_eq!(restored.extra().len(), 2);
+    }
+}

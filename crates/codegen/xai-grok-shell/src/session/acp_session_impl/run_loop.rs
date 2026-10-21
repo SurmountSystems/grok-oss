@@ -2436,13 +2436,15 @@ pub(super) async fn run_session(
                     // Drain monitor events that were routed to the mid-turn buffer but arrived after the turn ended
                     // The is_turn_active check races the buffer push
                     session.drain_monitor_buffer_to_pending().await;
-                    if let Some(message) = infra_pause_message {
-                        session.apply_infra_pause_after_turn_err(message).await;
-                    }
-                    // Goal continuation (success) or back-off (non-success).
-                    // Owns the streak-tracking and reminder-injection path.
+                    // Goal infra auto-retry queues the continuation and must
+                    // skip handle_turn_end so the streak and repeat-stop cap
+                    // stay honest. Other turns still run handle_turn_end.
                     session
-                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .apply_goal_turn_infra_then_maybe_turn_end(
+                            infra_pause_message,
+                            turn_succeeded,
+                            suppress_goal_continuation,
+                        )
                         .await;
                     // Convert them to front-of-queue prompt turns so the message runs instead of stranding.
                     // INVARIANT: this flush must only ever see interjections aimed at the turn that just completed.

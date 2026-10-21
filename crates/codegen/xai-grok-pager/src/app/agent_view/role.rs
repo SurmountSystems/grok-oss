@@ -2,6 +2,8 @@
 //! The role is set once, by [`AgentView::insert_subagent_view`]; every child-specific read site
 //! derives its answer from it here instead of keeping a second flag that could drift.
 
+use crate::app::actions::Effect;
+use crate::app::agent::AgentState;
 use crate::app::agent_view::AgentView;
 use agent_client_protocol as acp;
 
@@ -80,6 +82,37 @@ impl AgentView {
             AgentRole::Root => ViewSurface::Root,
             AgentRole::Child(_) => ViewSurface::ChildTakeover,
         }
+    }
+
+    /// GitHub #232: L1 root execute that can block the Operator box
+    /// auto-backgrounds. None when this view is not that case.
+    pub(crate) fn l1_blocking_execute_auto_background_effect(&self) -> Option<Effect> {
+        if self.surface() != ViewSurface::Root {
+            return None;
+        }
+        if self.session.loading_replay {
+            return None;
+        }
+        if !matches!(
+            self.session.state,
+            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+        ) {
+            return None;
+        }
+        let session_id = self.session.session_id.clone()?;
+        let tool_call_id = self
+            .session
+            .tracker
+            .running_execute_tool_call_id()?
+            .to_string();
+        if self.l1_auto_background_tool_call_id.as_deref() == Some(tool_call_id.as_str()) {
+            return None;
+        }
+        tracing::info!(tool_call_id = %tool_call_id, "Auto-backgrounding L1 blocking execute");
+        Some(Effect::DemoteToBackground {
+            session_id,
+            tool_call_id,
+        })
     }
 
     pub(crate) fn composer_route(&self) -> ComposerRoute {

@@ -816,6 +816,7 @@ impl acp::Agent for MvpAgent {
                 self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
                 let auth_for_settings = auth.clone();
+                let login_jwt = auth.key.clone();
                 {
                     let mut sampling_config = self.sampling_config.borrow_mut();
                     sampling_config.api_key = Some(auth.key);
@@ -826,6 +827,7 @@ impl acp::Agent for MvpAgent {
                         None,
                     );
                 }
+                self.restamp_resident_samplers_after_login(&login_jwt);
                 self.set_auth_method(arguments.method_id.clone());
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
@@ -963,6 +965,7 @@ impl acp::Agent for MvpAgent {
                         None,
                     );
                 }
+                self.restamp_resident_samplers_after_login(&auth.key);
                 self.auth_manager.hot_swap(auth.clone());
                 self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
@@ -1270,7 +1273,13 @@ impl acp::Agent for MvpAgent {
             } else if let Some(parent_sid) = handle.parent_session_id.as_ref() {
                 let parent_id = acp::SessionId::new(parent_sid.clone());
                 match self.session_registry.resident_handle(&parent_id) {
-                    Some(parent) => parent.sampler_handle.current_api_key().await,
+                    Some(parent) => {
+                        if let Some(key) = parent.sampler_handle.live_api_key() {
+                            Some(key)
+                        } else {
+                            parent.sampler_handle.current_api_key().await
+                        }
+                    }
                     None => None,
                 }
             } else {
@@ -1287,12 +1296,10 @@ impl acp::Agent for MvpAgent {
                 ));
             };
             handle.sampler_handle.set_api_key(Some(recovered.clone()));
-            // SetApiKey is a mailbox command. Await CurrentApiKey so the
-            // restamp lands before this prompt reconstructs and POSTs.
-            // Fire-and-forget left spawn-time JWT on the wire (Operator:
-            // same 401 after Logging in..., then 4m Waiting for the model).
-            let flushed = handle.sampler_handle.current_api_key().await;
-            if flushed.as_deref() != Some(recovered.as_str()) {
+            // set_api_key restamps the shared inherit resolver and live_api_key
+            // immediately. Do not wait on CurrentApiKey: a busy mailbox left
+            // chrome on Waiting for the model with no POST after login.
+            if handle.sampler_handle.live_api_key().as_deref() != Some(recovered.as_str()) {
                 return Err(acp::Error::internal_error().data(
                     "nested recoveredBearer SetApiKey did not restamp live parent sampler JWT",
                 ));

@@ -1100,34 +1100,40 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
     effects
 }
 
+fn take_l1_blocking_execute_auto_background(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Option<Effect> {
+    let effect = app
+        .agents
+        .get(&agent_id)
+        .and_then(AgentView::l1_blocking_execute_auto_background_effect)?;
+    let tool_call_id = match &effect {
+        Effect::DemoteToBackground { tool_call_id, .. } => tool_call_id.clone(),
+        _ => return None,
+    };
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.l1_auto_background_tool_call_id = Some(tool_call_id);
+    }
+    Some(effect)
+}
+
 pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    if !agent.session.state.is_turn_running() {
-        return vec![];
-    }
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
-    };
-    let Some(tool_call_id) = agent
-        .session
-        .tracker
-        .running_execute_tool_call_id()
-        .map(|s| s.to_string())
-    else {
-        return vec![];
-    };
+    take_l1_blocking_execute_auto_background(app, id)
+        .into_iter()
+        .collect()
+}
 
-    tracing::info!(tool_call_id = %tool_call_id, "Demoting execute tool to background");
-
-    vec![Effect::DemoteToBackground {
-        session_id,
-        tool_call_id,
-    }]
+/// GitHub #232: an L1 execute / CommandRunning that can block the Operator
+/// box auto-backgrounds. send to bg is not an Operator control.
+pub(crate) fn maybe_auto_background_l1_blocking_execute(app: &mut AppView) -> Vec<Effect> {
+    let ids: Vec<_> = app.agents.keys().copied().collect();
+    ids.into_iter()
+        .filter_map(|id| take_l1_blocking_execute_auto_background(app, id))
+        .collect()
 }
 
 // TaskResult handlers.

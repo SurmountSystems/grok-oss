@@ -3029,6 +3029,9 @@ enum MemoryStorageSelection {
     DisabledByConfig,
     UnavailableForEphemeralWorkspace,
 }
+/// Nested L2/L3 seed catalog 200k even when the model catalog is smaller
+/// (grok-4.6-build ~32k). Live sampling is then 80k, not 40% of 32k.
+/// L1 keeps the model catalog. GitHub #233 / #221.
 pub(super) fn seed_sampling_context_window(
     catalog: std::num::NonZeroU64,
     override_window: Option<std::num::NonZeroU64>,
@@ -3232,6 +3235,41 @@ mod seed_sampling_window_tests {
         let l1 = std::num::NonZeroU64::new(500_000).expect("L1 catalog");
         assert_eq!(seed_sampling_context_window(l1, None, false).get(), 500_000);
         assert_eq!(session_sampling_window(1_000_000, false), 1_000_000);
+    }
+
+    /// GitHub #233 / #221. Nested spawn with a grok-4.6-build 32k model
+    /// catalog still seeds nested catalog 200k so live is 80k. Do not apply
+    /// 40% to 32k (that death was 47689/12800).
+    #[test]
+    fn nested_spawn_with_32k_model_catalog_seeds_200k_catalog_and_80k_live() {
+        let catalog = std::num::NonZeroU64::new(32_000).expect("32k grok-4.6-build catalog");
+        let seeded = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            seeded.get(),
+            200_000,
+            "nested spawn must seed catalog 200k, not the 32k model catalog"
+        );
+        assert_eq!(
+            session_sampling_window(seeded.get(), true),
+            80_000,
+            "nested live is 80k after the 200k catalog seed"
+        );
+        assert_ne!(
+            nested_live_sampling_window(catalog.get()),
+            12_800,
+            "must not apply 40% to a catalog already under 200k"
+        );
+        assert_eq!(
+            nested_live_sampling_window(catalog.get()),
+            32_000,
+            "if the small catalog is still passed through, live equals it"
+        );
+        let l1 = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            l1.get(),
+            32_000,
+            "L1 keeps the model catalog; the 200k floor is nested-only"
+        );
     }
 }
 #[cfg(test)]

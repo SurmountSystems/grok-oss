@@ -50,12 +50,13 @@ pub struct TurnStatusOutput {
     /// Hit area for the global pause / resume button, if rendered.
     pub pause_button: Option<Rect>,
     /// Hit area for the background-demote button, if rendered.
+    /// L1 blocking execute auto-backgrounds (GitHub #232), so this stays `None`.
     pub bg_button: Option<Rect>,
     /// Hit area for the still-running watcher cue (click opens the tasks pane).
     /// `None` on keyboard-only hosts.
     pub watching_cue: Option<Rect>,
 }
-/// Hover state for the turn-status row's mouse affordances (`[stop]`, `[↓]`, the still-running watcher cue).
+/// Hover state for the turn-status row's mouse affordances (`[stop]`, the still-running watcher cue).
 /// `Some(_)` renders them; `None` marks a keyboard-only host (minimal mode, no mouse capture) and suppresses all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MouseButtons {
@@ -63,7 +64,8 @@ pub struct MouseButtons {
     pub cancel_hovered: bool,
     /// Whether the mouse is over the `[pause]` / `[resume]` button.
     pub pause_hovered: bool,
-    /// Whether the mouse is over the `[↓]` send-to-background button.
+    /// Whether the mouse is over the send-to-background button.
+    /// Unused while L1 auto-backgrounds blocking execute (GitHub #232).
     pub bg_hovered: bool,
     /// Whether the mouse is over the still-running watcher cue.
     pub watching_hovered: bool,
@@ -243,7 +245,7 @@ pub fn render_turn_status(
         tick,
         drain_blocked,
         buttons,
-        has_running_execute,
+        has_running_execute: _,
         total_tokens,
         session_starting_since,
         is_bash_turn,
@@ -259,7 +261,6 @@ pub fn render_turn_status(
     let show_buttons = buttons.is_some();
     let cancel_hovered = buttons.is_some_and(|b| b.cancel_hovered);
     let pause_hovered = buttons.is_some_and(|b| b.pause_hovered);
-    let bg_hovered = buttons.is_some_and(|b| b.bg_hovered);
     if area.height == 0 || area.width < 10 {
         return TurnStatusOutput::default();
     }
@@ -516,35 +517,21 @@ pub fn render_turn_status(
         _ => String::new(),
     };
     let turn_timer_width = turn_timer_str.width();
-    let show_bg = show_cancel
-        && has_running_execute
-        && matches!(
-            state,
-            AgentState::TurnRunning | AgentState::CommandRunning { .. }
-        );
-    let bg_str = if show_bg {
-        if bg_hovered {
-            " [send to bg]"
-        } else {
-            " [\u{2193}]"
-        }
-    } else {
-        ""
-    };
-    let bg_width = bg_str.width();
+    // GitHub #232: L1 blocking execute auto-backgrounds. send to bg is not
+    // an Operator hover control.
     let pause_str: &str = if show_pause {
-        pause_button_str(chrome.pause_is_resume, show_bg || turn_timer_width > 0)
+        pause_button_str(chrome.pause_is_resume, turn_timer_width > 0)
     } else {
         ""
     };
     let pause_width = pause_str.width();
     let cancel_str: &str = if show_cancel {
-        stop_button_str(show_bg || show_pause || turn_timer_width > 0)
+        stop_button_str(show_pause || turn_timer_width > 0)
     } else {
         ""
     };
     let cancel_width = cancel_str.width();
-    let right_width = turn_timer_width + bg_width + pause_width + cancel_width;
+    let right_width = turn_timer_width + pause_width + cancel_width;
     let spinner_str = if is_pending_user_input {
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
@@ -669,20 +656,7 @@ pub fn render_turn_status(
         buf.set_span(x, area.y, &span, turn_timer_width as u16);
         x += turn_timer_width as u16;
     }
-    let bg_button_rect = if show_bg && !bg_str.is_empty() {
-        let bg_x = x;
-        let bg_style = if bg_hovered {
-            right_style(theme.accent_running)
-        } else {
-            right_style(theme.gray)
-        };
-        let span = Span::styled(bg_str, bg_style);
-        buf.set_span(x, area.y, &span, bg_width as u16);
-        x += bg_width as u16;
-        Some(Rect::new(bg_x, area.y, bg_str.width() as u16, 1))
-    } else {
-        None
-    };
+    let bg_button_rect = None;
     // Pause / resume. Quiet white (`text_primary`) on hover, gray at rest.
     let pause_button_rect = if show_pause && !pause_str.is_empty() {
         let pause_x = x;
@@ -1400,6 +1374,37 @@ mod tests {
         assert!(
             text.contains("12s"),
             "family-switch compact must show the elapsed timer like /compact, got: {text:?}"
+        );
+    }
+    /// GitHub #232: L1 CommandRunning that can block the Operator box must not
+    /// paint `[send to bg]` or the hover arrow. Auto-background is the path.
+    #[test]
+    fn l1_command_running_does_not_paint_send_to_bg() {
+        let state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: Instant::now(),
+        };
+        let mut args = idle_args(Watchers::default());
+        args.state = &state;
+        args.has_running_execute = true;
+        args.turn_elapsed = Some(Duration::from_secs(3));
+        args.buttons = Some(MouseButtons {
+            bg_hovered: true,
+            ..MouseButtons::default()
+        });
+        let (output, buf) = render_row(args, 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            !text.contains("[send to bg]"),
+            "CommandRunning must not paint [send to bg] as an Operator control, got: {text:?}"
+        );
+        assert!(
+            !text.contains('\u{2193}'),
+            "CommandRunning must not paint the send-to-bg arrow, got: {text:?}"
+        );
+        assert!(
+            output.bg_button.is_none(),
+            "send to bg must not remain a hover hit target"
         );
     }
     #[test]

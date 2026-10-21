@@ -1056,6 +1056,7 @@ impl AgentView {
             last_turn_summary: None,
             last_turn_summary_gen: 0,
             pending_effects: Vec::new(),
+            l1_auto_background_tool_call_id: None,
             paste_probe_in_flight: 0,
             deferred_send: None,
             pending_turn_end_reconcile: None,
@@ -1270,6 +1271,9 @@ impl AgentView {
             workflow_runs: std::mem::take(&mut self.workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            goal_state: self.goal_state.clone(),
+            last_cleared_goal_id: self.last_cleared_goal_id.clone(),
+            show_goal_detail: self.show_goal_detail,
         }
     }
     /// Put a taken [`ReplayRebuiltState`] back: the counterpart of [`Self::take_replay_rebuilt_state`].
@@ -1287,6 +1291,26 @@ impl AgentView {
         self.workflow_runs = taken.workflow_runs;
         self.workflow_run_revisions = taken.workflow_run_revisions;
         self.cleared_workflow_runs = taken.cleared_workflow_runs;
+        self.restore_goal_plan_from_stash(
+            taken.goal_state,
+            taken.last_cleared_goal_id,
+            taken.show_goal_detail,
+        );
+    }
+
+    fn restore_goal_plan_from_stash(
+        &mut self,
+        stashed_goal: Option<crate::app::agent::GoalDisplayState>,
+        stashed_cleared_id: Option<String>,
+        stashed_show_detail: bool,
+    ) {
+        if self.goal_state.is_none() {
+            self.goal_state = stashed_goal;
+            self.show_goal_detail = stashed_show_detail;
+        }
+        if self.last_cleared_goal_id.is_none() {
+            self.last_cleared_goal_id = stashed_cleared_id;
+        }
     }
     /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
@@ -1587,6 +1611,11 @@ impl AgentView {
             self.scrollback.remove_entry(pid);
         }
         let dropped_heavy = if success && reload.saw_replay {
+            self.restore_goal_plan_from_stash(
+                reload.stash.goal_state.clone(),
+                reload.stash.last_cleared_goal_id.clone(),
+                reload.stash.show_goal_detail,
+            );
             self.scrollback.end_batch();
             true
         } else if success {
@@ -1657,6 +1686,11 @@ impl AgentView {
             if !reload.saw_todo_update {
                 self.todo = stash.todo;
             }
+            self.restore_goal_plan_from_stash(
+                stash.goal_state,
+                stash.last_cleared_goal_id,
+                stash.show_goal_detail,
+            );
             false
         } else {
             self.restore_replay_rebuilt_state(reload.stash);

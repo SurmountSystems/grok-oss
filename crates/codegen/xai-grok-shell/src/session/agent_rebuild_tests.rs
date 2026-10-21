@@ -141,6 +141,94 @@ async fn child_agent(
         .unwrap()
 }
 
+async fn advertised_names(agent: &Agent) -> Vec<String> {
+    agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|definition| definition.function.name)
+        .collect()
+}
+
+/// GitHub #236: nested L2 rebuild must advertise native spawn_subagent.
+#[tokio::test(flavor = "current_thread")]
+async fn l2_rebuild_advertises_native_spawn_subagent() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut spec = test_rebuild_spec_default();
+            let fields = Arc::get_mut(&mut spec).unwrap();
+            fields.prompt_audience = PromptAudience::Subagent;
+            fields.subagent_depth = 1;
+            fields.subagents_enabled = true;
+            fields.subagents_max_depth =
+                xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+            fields.subagent_event_tx = Some(event_tx);
+            let agent = spec
+                .build_agent(
+                    AgentDefinition::explore(),
+                    xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL,
+                )
+                .await
+                .expect("L2 rebuild should build");
+            let names = advertised_names(&agent).await;
+            assert!(
+                names.iter().any(|name| name == "spawn_subagent"),
+                "L2 rebuild must inject native spawn_subagent; got {names:?}"
+            );
+            assert!(
+                names
+                    .iter()
+                    .any(|name| name == "get_command_or_subagent_output"),
+                "L2 rebuild spawn_subagent requires get_command_or_subagent_output; got {names:?}"
+            );
+            assert!(
+                names.iter().any(|name| name == "kill_command_or_subagent"),
+                "L2 rebuild spawn_subagent requires kill_command_or_subagent; got {names:?}"
+            );
+            assert_eq!(
+                xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
+                2,
+                "MAX_SUBAGENT_DEPTH stays 2"
+            );
+        })
+        .await;
+}
+
+/// GitHub #236: L3 rebuild omits spawn_subagent. Depth stays 2.
+#[tokio::test(flavor = "current_thread")]
+async fn l3_rebuild_omits_native_spawn_subagent() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut spec = test_rebuild_spec_default();
+            let fields = Arc::get_mut(&mut spec).unwrap();
+            fields.prompt_audience = PromptAudience::Subagent;
+            fields.subagent_depth = 2;
+            fields.subagents_enabled = false;
+            fields.subagents_max_depth =
+                xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+            fields.subagent_event_tx = Some(event_tx);
+            let agent = spec
+                .build_agent(
+                    AgentDefinition::general_purpose(),
+                    xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL,
+                )
+                .await
+                .expect("L3 rebuild should build");
+            let names = advertised_names(&agent).await;
+            assert!(
+                !names.iter().any(|name| name == "spawn_subagent"),
+                "an L3 still cannot spawn; got {names:?}"
+            );
+            assert!(
+                names.iter().any(|name| name == "todo_write"),
+                "L3 keeps todo_write; got {names:?}"
+            );
+        })
+        .await;
+}
+
 async fn assert_no_child_messaging(agent: &Agent) {
     let bridge = agent.tool_bridge();
     assert!(

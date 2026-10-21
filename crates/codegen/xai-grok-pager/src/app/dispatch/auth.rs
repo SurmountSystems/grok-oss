@@ -144,7 +144,7 @@ pub(super) fn scrollback_has_recent_context_too_large(
     trailing_session_events(scrollback).any(|(_, ev)| {
         matches!(
             ev,
-            SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
+            SessionEvent::ContextTooLarge { .. } | SessionEvent::CompactionFailed { .. }
         )
     })
 }
@@ -165,7 +165,7 @@ pub(in crate::app) fn scrollback_has_recent_error_banner(
         matches!(
             ev,
             SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
+                | SessionEvent::ContextTooLarge { .. }
                 | SessionEvent::DiskFull
                 | SessionEvent::RequestFailed { .. }
         )
@@ -257,24 +257,71 @@ fn take_prompt_to_retry_after_auth(
         .or_else(|| agent.session.compact_held_prompt.take())
 }
 
+fn recovered_parent_jwt(agent: &AgentView) -> Option<String> {
+    agent
+        .parent_sampler_jwt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Waiting for the model after login: `maybe_drain_queue` is blocked while
+/// TurnRunning. UnstickResendPrompt POSTs immediately with recoveredBearer.
+fn unstick_waiting_parent_after_auth(
+    agent: &mut AgentView,
+    prompt: crate::app::agent::InFlightPrompt,
+) -> Option<Effect> {
+    let session_id = agent.session.session_id.clone()?;
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    agent.session.current_prompt_id = Some(prompt_id.clone());
+    Some(Effect::UnstickResendPrompt {
+        agent_id: agent.session.id,
+        session_id,
+        text: prompt.text,
+        prompt_id,
+        images: Vec::new(),
+        images_dir: None,
+        recovered_bearer: true,
+        recovered_bearer_jwt: recovered_parent_jwt(agent),
+    })
+}
+
 /// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
 /// the login did not stash a return view (dashboard or another-process login).
+/// Parent already TurnRunning (Waiting for the model) must still POST immediately.
 fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     let mut retry_effects = Vec::new();
     let mut page_flips = Vec::new();
     for agent in app.agents.values_mut() {
         agent.nested_auth_resume_retries = 0;
         strip_trailing_auth_error_blocks(agent);
-        if let Some(prompt) = take_prompt_to_retry_after_auth(agent) {
+        let was_idle = agent.session.state.is_idle();
+        let parent_retry = take_prompt_to_retry_after_auth(agent);
+        let had_parent_retry = parent_retry.is_some();
+        if let Some(prompt) = parent_retry {
             agent.scrollback.push_block(RenderBlock::system(
                 "Re-authenticated. Retrying\u{2026}".to_string(),
             ));
-            agent.session.enqueue_in_flight_prompt_front(prompt);
-            let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
-            retry_effects.extend(drain.effects);
-            page_flips.push((agent.session.id, drain.page_flip_entry));
+            if was_idle {
+                agent.session.enqueue_in_flight_prompt_front(prompt);
+                let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
+                retry_effects.extend(drain.effects);
+                page_flips.push((agent.session.id, drain.page_flip_entry));
+            } else if let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt) {
+                retry_effects.push(effect);
+            }
         }
-        retry_effects.extend(enqueue_nested_resume_after_auth(agent));
+        let nested = enqueue_nested_resume_after_auth(agent);
+        if !had_parent_retry
+            && nested.is_empty()
+            && !was_idle
+            && let Some(prompt) = agent.session.in_flight_prompt.clone()
+            && let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt)
+        {
+            retry_effects.push(effect);
+        }
+        retry_effects.extend(nested);
     }
     for (id, page_flip_entry) in page_flips {
         note_peek_page_flip(app, id, page_flip_entry);
@@ -416,12 +463,7 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
         info.status = None;
         info.attempt.status = None;
     }
-    let recovered_bearer_jwt = agent
-        .parent_sampler_jwt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let recovered_bearer_jwt = recovered_parent_jwt(agent);
     let mut effects = Vec::new();
     for (child_sid, text) in resumes {
         if text.is_empty() {

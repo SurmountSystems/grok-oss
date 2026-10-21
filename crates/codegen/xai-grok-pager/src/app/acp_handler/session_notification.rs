@@ -2757,8 +2757,9 @@ pub(super) fn apply_retry_state_with_nested(
                 }
             } else if wire == crate::app::error_display::WireErrorType::ContextLength {
                 if !scrollback_has_recent_compaction_failed(scrollback) {
-                    scrollback
-                        .push_block(RenderBlock::session_event(SessionEvent::ContextTooLarge));
+                    scrollback.push_block(RenderBlock::session_event(
+                        SessionEvent::context_too_large_from_message(message),
+                    ));
                 }
             } else if wire == crate::app::error_display::WireErrorType::EncryptedContentMismatch
                 || wire == crate::app::error_display::WireErrorType::LegacyAuth

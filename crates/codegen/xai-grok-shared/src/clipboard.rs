@@ -338,7 +338,8 @@ pub fn spool_for_stdin(data: &[u8]) -> anyhow::Result<std::fs::File> {
 }
 
 /// Build the OSC 52 clipboard-set byte sequence written to the TTY.
-/// When `tmux_passthrough` is true, wrap it in the tmux DCS passthrough envelope; that is only correct when tmux is the IMMEDIATE terminal.
+/// When `tmux_passthrough` is true, wrap it in the tmux DCS passthrough envelope; that is only correct when tmux is the IMMEDIATE local terminal.
+/// Remote SSH / Eternal Terminal sessions must pass `false`: et does not unwrap DCS, and tmux drops DCS while `allow-passthrough` is off.
 /// Otherwise emit a plain OSC 52.
 pub fn osc52_clipboard_sequence(text: &str, tmux_passthrough: bool) -> Vec<u8> {
     use base64::Engine as _;
@@ -351,8 +352,9 @@ pub fn osc52_clipboard_sequence(text: &str, tmux_passthrough: bool) -> Vec<u8> {
 }
 
 /// Writes OSC 52 to the controlling TTY so it tunnels et/tmux/ssh to the outer terminal.
-/// The caller decides `tmux_passthrough`: the tmux DCS envelope is only correct when tmux is the IMMEDIATE terminal.
+/// The caller decides `tmux_passthrough`: the tmux DCS envelope is only correct when tmux is the IMMEDIATE local terminal.
 /// Inside an editor `:terminal` (Neovim/Vim/Emacs) the immediate emulator is the editor's libvterm, not tmux.
+/// On SSH or Eternal Terminal, pass `false` so tmux `set-clipboard` can forward plain OSC 52; DCS wrap is dropped when `allow-passthrough` is off.
 /// Falls back to the TUI stderr fd when `/dev/tty` cannot be opened (no controlling terminal).
 pub fn set_text_osc52(text: &str, tmux_passthrough: bool) -> anyhow::Result<()> {
     use std::io::Write;

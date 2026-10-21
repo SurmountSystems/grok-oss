@@ -2126,6 +2126,46 @@ fn resize_event_closes_tip_show_gate_until_redraw() {
     assert!(agent.show_ephemeral_tip(tip(), &mut counts));
     assert_eq!(counts.get("t_seen"), Some(&2));
 }
+/// GitHub #235: SIGWINCH must arm overlay live-resize skip. Settle (debounce / typing)
+/// clears it so the overlay wraps once, not on every drag step.
+#[test]
+fn resize_event_arms_overlay_live_resize_skip_until_settle() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "plan.md",
+                "# Plan\n\n- do the thing\n".to_owned(),
+                None,
+            )
+            .expect("markdown content should open");
+        assert!(
+            !viewer.live_resize_for_test(),
+            "a freshly opened overlay is not in a live resize"
+        );
+        agent.line_viewer = Some(viewer);
+    }
+    let _ = app.handle_input(&Event::Resize(120, 50));
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let viewer = agent.line_viewer.as_ref().expect("overlay still docked");
+        assert!(
+            viewer.live_resize_for_test(),
+            "SIGWINCH must skip overlay body rebuild until settle"
+        );
+    }
+    app.settle_live_resize_overlays();
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let viewer = agent.line_viewer.as_ref().expect("overlay still docked");
+        assert!(
+            !viewer.live_resize_for_test(),
+            "settle (debounce or typing) must allow one wrap at the final width"
+        );
+    }
+}
 #[test]
 fn external_auth_provider_keeps_billing_off_after_auth_meta() {
     let mut app = test_app();

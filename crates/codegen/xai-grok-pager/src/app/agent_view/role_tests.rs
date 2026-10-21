@@ -23,7 +23,8 @@ fn root_surface_reproduces_legacy_sites() {
         agent
             .current_shortcut_hints(&registry)
             .iter()
-            .any(|hint| hint.label == "send to bg")
+            .all(|hint| hint.label != "send to bg"),
+        "GitHub #232: send to bg is not an Operator hint on L1"
     );
 }
 /// The composer is unreachable on a child: the constructor moves a prompt-focused view off the prompt, every later

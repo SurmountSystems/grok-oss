@@ -507,6 +507,121 @@ fn auth_complete_retries_stashed_prompt_without_a_return_view() {
     );
 }
 
+/// Operator 2026-10-21: "Hello??? I just logged in and it just says Waiting for the model... it's been a minute."
+/// AuthComplete after login must POST the interrupted turn immediately with recoveredBearer / live parent JWT.
+/// Parent already TurnRunning (Waiting for the model) must not block that POST.
+#[test]
+fn auth_complete_after_login_posts_immediately_while_waiting_for_the_model() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-after-login"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: "interrupted parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 41,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 41,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-after-login"
+                && text == "interrupted parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        ) || matches!(
+            e,
+            Effect::SendPrompt { session_id, text, .. }
+                if session_id.0.as_ref() == "sess-wait-after-login"
+                    && text == "interrupted parent turn"
+        )),
+        "AuthComplete after login must POST immediately with recoveredBearer / live parent JWT while chrome is Waiting for the model, got: {effects:?}"
+    );
+}
+
+/// Operator 2026-10-21: login while the parent turn is still in flight (no reauth stash).
+/// AuthComplete must POST that interrupted in_flight prompt immediately. Do not sit on Waiting for the model with no POST.
+#[test]
+fn auth_complete_after_login_posts_in_flight_prompt_while_waiting_for_the_model() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-in-flight"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "still waiting parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(2),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 42,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 42,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-in-flight"
+                && text == "still waiting parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "AuthComplete after login must POST the in-flight parent turn immediately with recoveredBearer / live parent JWT, got: {effects:?}"
+    );
+}
+
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer
 /// puts this on `_meta.recoveredBearerJwt`.
 const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";

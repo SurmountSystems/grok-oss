@@ -40,6 +40,159 @@ fn demote_dispatch_keeps_turn_session_and_execute_guards() {
     assert!(dispatch(Action::DemoteToBackground, &mut app).is_empty());
 }
 
+/// GitHub #232: an L1 execute / CommandRunning that can block the Operator box
+/// auto-backgrounds immediately. send to bg is not a control the Operator clicks.
+#[test]
+fn l1_command_running_execute_auto_backgrounds_and_does_not_paint_send_to_bg() {
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentCommand;
+    use crate::views::turn_status::{self, MouseButtons, TurnStatusArgs, Watchers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::time::{Duration, Instant};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        crate::app::agent_view::test_fixtures::add_running_execute(agent);
+        agent.session.state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: Instant::now(),
+        };
+        assert!(
+            agent
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some(),
+            "setup: CommandRunning must still hold the foreground execute"
+        );
+        assert!(agent.set_active_pane(ActivePane::Prompt, true));
+    }
+
+    let effects = crate::app::dispatch::maybe_auto_background_l1_blocking_execute(&mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            }] if session_id.0.as_ref() == "test-session" && tool_call_id == "exec-1"
+        ),
+        "L1 CommandRunning execute must auto-background without send to bg, got {effects:?}"
+    );
+
+    let state = AgentState::CommandRunning {
+        command: AgentCommand::Compact,
+        started_at: Instant::now(),
+    };
+    let area = Rect::new(0, 0, 80, 1);
+    let mut buf = Buffer::empty(area);
+    let output = turn_status::render_turn_status(
+        &mut buf,
+        area,
+        TurnStatusArgs {
+            state: &state,
+            activity: &None,
+            turn_elapsed: Some(Duration::from_secs(3)),
+            activity_started_at: None,
+            tick: 0,
+            drain_blocked: false,
+            buttons: Some(MouseButtons {
+                bg_hovered: true,
+                ..MouseButtons::default()
+            }),
+            has_running_execute: true,
+            total_tokens: None,
+            session_starting_since: None,
+            is_bash_turn: false,
+            is_pending_user_input: false,
+            goal_verifying: false,
+            watchers: Watchers::default(),
+            parked: false,
+            flat_background: false,
+            held_queue: 0,
+            held_queue_top_sendable: false,
+            global_paused: false,
+        },
+    );
+    let text: String = (0..area.width)
+        .filter_map(|x| buf.cell((x, area.y)).map(|c| c.symbol().to_string()))
+        .collect();
+    assert!(
+        !text.contains("[send to bg]"),
+        "send to bg is not an Operator control, got {text:?}"
+    );
+    assert!(
+        !text.contains('\u{2193}'),
+        "the ↓ send-to-bg chip is not an Operator control, got {text:?}"
+    );
+    assert!(
+        output.bg_button.is_none(),
+        "CommandRunning must not arm a send-to-bg hit target"
+    );
+
+    let registry = ActionRegistry::defaults();
+    let agent = app.agents.get_mut(&id).unwrap();
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        &registry,
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "the Operator box must accept typing while L1 auto-backgrounds a blocking execute"
+    );
+}
+
+/// Live ACP execute during L1 CommandRunning must queue auto-background without Ctrl+B.
+#[test]
+fn l1_command_running_live_execute_update_auto_backgrounds() {
+    use crate::app::agent::AgentCommand;
+    use std::time::Instant;
+    use xai_acp_lib::AcpClientMessage;
+    use xai_grok_test_support::acp_fixtures;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::CommandRunning {
+        command: AgentCommand::Compact,
+        started_at: Instant::now(),
+    };
+
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    crate::app::acp_handler::handle(
+        AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request: acp_fixtures::session_notification(
+                "test-session",
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(acp_fixtures::tool_call_id("exec-1"), "sleep 5")
+                        .kind(acp::ToolKind::Execute)
+                        .status(acp::ToolCallStatus::InProgress)
+                        .content(vec![])
+                        .locations(vec![]),
+                ),
+            ),
+            response_tx: tx,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        app.pending_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            } if session_id.0.as_ref() == "test-session" && tool_call_id == "exec-1"
+        )),
+        "live L1 execute during CommandRunning must auto-background, got {:?}",
+        app.pending_effects
+    );
+}
+
 /// Regression (leader mode): a queued prompt's parked `session/prompt` RPC can resolve as an *error*.
 /// That surfaces as `Internal error: "session failed to respond"`.
 /// An `acp::Error` carries no `promptId`, so before the Err-arm gate this error was misattributed to the running turn.

@@ -2122,6 +2122,16 @@ impl AppView {
         self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
     }
+    /// Overlay wrap runs once after a resize drag settles (or a key/mouse arrives).
+    /// SIGWINCH itself only arms live-resize skip via [`crate::app::agent_view::AgentView::note_terminal_resize`].
+    pub(crate) fn settle_live_resize_overlays(&mut self) {
+        for agent in self.agents.values_mut() {
+            agent.settle_live_resize_overlay();
+            for child in agent.subagent_views.values_mut() {
+                child.settle_live_resize_overlay();
+            }
+        }
+    }
     /// Recompute the render-value compact flag from the user setting and terminal height (`views::agent::effective_compact`).
     /// Propagate it to the appearance fan-out and every agent's prompt widget when it changed.
     /// In-memory only: never touches the user setting (`current_ui.compact_mode`), the render cache, or disk.

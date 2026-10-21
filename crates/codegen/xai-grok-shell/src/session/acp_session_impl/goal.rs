@@ -789,6 +789,11 @@ impl SessionActor {
         objective: &str,
         token_budget: Option<i64>,
     ) -> GoalSetupOutcome {
+        let mut goal_plan = crate::session::goal_plan::GoalPlan::new();
+        let applied = goal_plan.apply_user_goal_message(&format!("/goal {objective}"));
+        let Some(objective) = goal_plan.primary_goal().map(str::to_owned) else {
+            return GoalSetupOutcome::Message("Could not start the goal.".to_string());
+        };
         let goal_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
@@ -797,7 +802,7 @@ impl SessionActor {
                 .await;
         self.goal_tracker.lock().create_goal(
             goal_id,
-            objective.to_owned(),
+            objective.clone(),
             token_budget,
             token_baseline,
             created_at,
@@ -822,7 +827,9 @@ impl SessionActor {
             );
         }
 
-        self.maybe_run_goal_planner(objective).await;
+        if applied.post_plan_retry {
+            self.maybe_run_goal_planner(&objective).await;
+        }
         if let Some(msg) = self.planner_pause_short_circuit_message("Goal paused.") {
             return GoalSetupOutcome::Message(msg);
         }
@@ -838,7 +845,7 @@ impl SessionActor {
                 let scratch = scratch_dir.to_string_lossy();
                 if self.goal_runs_on_workflow_engine() {
                     render_goal_rules(
-                        objective,
+                        &objective,
                         &names,
                         "",
                         "",
@@ -848,7 +855,7 @@ impl SessionActor {
                     )
                 } else {
                     render_goal_rules_legacy(
-                        objective,
+                        &objective,
                         &names,
                         "",
                         "",
