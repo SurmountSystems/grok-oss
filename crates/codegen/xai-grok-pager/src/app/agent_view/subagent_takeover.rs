@@ -583,7 +583,12 @@ impl AgentView {
     /// named L3 rows are on screen. A waiting-row-only arrow is not the
     /// L3-row control. Wait chrome that already paints
     /// `{description}: {last tool}` keeps that tool name; the arrow does
-    /// not share glyphs with it (`[↗]ad_file` from `read_file`).
+    /// not share glyphs with it (`[↗]ad_file` from `read_file`). Live wait
+    /// chrome clamps a long description (`{prefix}…: {tool}`); the named
+    /// path must still find that painted prefix so a normal-width L2
+    /// overlay shows the enlarge/open-arrow. When the specialist list also
+    /// paints a dedicated prefix, wait-chrome last-tool still hosts `[↗]`
+    /// on the row that names `read_file`, and the named row keeps its own.
     fn record_overlay_specialist_status_hit(
         &mut self,
         buf: &mut Buffer,
@@ -623,11 +628,22 @@ impl AgentView {
             if phrase.is_empty() {
                 continue;
             }
-            let Some(rect) = painted_open_control_phrase_rect(buf, area, &phrase) else {
-                continue;
-            };
-            let hit = paint_waiting_row_open_arrow(buf, area, rect);
-            self.record_overlay_nested_status_hit(id, hit);
+            let mut rects = Vec::new();
+            // Wait-chrome `{prefix}…: {tool}` wins for overlay hit paint when
+            // the specialist list also painted a dedicated prefix. The named
+            // test looks at the `read_file` wait-chrome row, not the list.
+            if let Some(rect) = painted_last_tool_wait_chrome_phrase_rect(buf, area, &phrase) {
+                rects.push(rect);
+            }
+            if let Some(rect) = painted_specialist_phrase_rect(buf, area, &phrase)
+                && !rects.iter().any(|existing| existing.y == rect.y)
+            {
+                rects.push(rect);
+            }
+            for rect in rects {
+                let hit = paint_waiting_row_open_arrow(buf, area, rect);
+                self.record_overlay_nested_status_hit(id.clone(), hit);
+            }
         }
     }
 
@@ -893,9 +909,11 @@ fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
 /// Named L3 rows and the one-task wait row get the arrow after the phrase.
 /// Wait chrome that already paints `{description}: {tool}` keeps that last
 /// tool; the arrow sits in the blank gap left of the description so the
-/// two do not share glyphs (`[↗]ad_file` from `read_file`). The hit covers
-/// the phrase and that arrow. Do not overwrite the phrase when the row is
-/// too short for the arrow.
+/// two do not share glyphs (`[↗]ad_file` from `read_file`). A clamped
+/// `{prefix}…: {tool}` row is the same last-tool chrome. When that left
+/// gap is the spinner, the arrow sits after the tool or over the spinner
+/// so a normal-width L2 overlay still shows the button. The hit covers
+/// the phrase and that arrow.
 fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> Rect {
     let arrow = crate::glyphs::enlarge_button();
     let arrow_w: u16 = 3;
@@ -905,7 +923,10 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
     }
     let after_phrase = phrase.x.saturating_add(phrase.width);
     let arrow_x = if phrase_followed_by_last_tool_sep(buf, phrase) {
-        match open_arrow_x_left_of_last_tool(buf, area, phrase, arrow_w) {
+        match open_arrow_x_left_of_last_tool(buf, area, phrase, arrow_w)
+            .or_else(|| open_arrow_x_after_last_tool(buf, area, phrase, arrow_w))
+            .or_else(|| open_arrow_x_over_spinner(area, phrase, arrow_w))
+        {
             Some(x) => x,
             None => return phrase,
         }
@@ -914,7 +935,10 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
     } else if after_phrase.saturating_add(arrow_w) <= right {
         after_phrase
     } else {
-        return phrase;
+        match open_arrow_x_over_spinner(area, phrase, arrow_w) {
+            Some(x) => x,
+            None => return phrase,
+        }
     };
     let theme = Theme::current();
     buf.set_span_safe(
@@ -928,15 +952,17 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
     Rect::new(hit_x, phrase.y, hit_end.saturating_sub(hit_x), 1)
 }
 
-/// `{description}: {tool}` wait chrome. The colon is the last-tool separator,
+/// `{description}: {tool}` wait chrome, including a clamped
+/// `{prefix}…: {tool}` subject. The colon is the last-tool separator,
 /// not room for `[↗]`.
 fn phrase_followed_by_last_tool_sep(buf: &Buffer, phrase: Rect) -> bool {
     if phrase.height == 0 {
         return false;
     }
-    let x = phrase.x.saturating_add(phrase.width);
-    buf.cell((x, phrase.y))
-        .is_some_and(|cell| cell.symbol() == ":")
+    let y = phrase.y;
+    let mut x = phrase.x.saturating_add(phrase.width);
+    x = skip_ellipsis_cells(buf, x, y);
+    buf.cell((x, y)).is_some_and(|cell| cell.symbol() == ":")
 }
 
 fn cells_are_blank(buf: &Buffer, x: u16, y: u16, width: u16) -> bool {
@@ -968,10 +994,144 @@ fn open_arrow_x_left_of_last_tool(
     (candidate >= area.x && cells_are_blank(buf, candidate, phrase.y, arrow_w)).then_some(candidate)
 }
 
+fn is_ellipsis_symbol(symbol: &str) -> bool {
+    symbol == "\u{2026}"
+}
+
+/// Skip a painted truncation ellipsis (`…` or `. . .`) so `{prefix}…: {tool}`
+/// still reads as last-tool chrome.
+fn skip_ellipsis_cells(buf: &Buffer, mut x: u16, y: u16) -> u16 {
+    if buf
+        .cell((x, y))
+        .is_some_and(|cell| is_ellipsis_symbol(cell.symbol()))
+    {
+        return x.saturating_add(1);
+    }
+    let dots = (0..3).all(|i| {
+        buf.cell((x.saturating_add(i), y))
+            .is_some_and(|cell| cell.symbol() == ".")
+    });
+    if dots {
+        x = x.saturating_add(3);
+    }
+    x
+}
+
+/// Sit `[↗]` after `{desc}: {tool}` (and a trailing ellipsis) when the left
+/// gap is the spinner. None when that run would leave the row.
+fn open_arrow_x_after_last_tool(
+    buf: &Buffer,
+    area: Rect,
+    phrase: Rect,
+    arrow_w: u16,
+) -> Option<u16> {
+    let y = phrase.y;
+    let right = area.x.saturating_add(area.width);
+    let mut x = skip_ellipsis_cells(buf, phrase.x.saturating_add(phrase.width), y);
+    if !buf.cell((x, y)).is_some_and(|cell| cell.symbol() == ":") {
+        return None;
+    }
+    x = x.saturating_add(1);
+    if buf.cell((x, y)).is_some_and(|cell| cell.symbol() == " ") {
+        x = x.saturating_add(1);
+    }
+    while x < right {
+        let symbol = buf
+            .cell((x, y))
+            .map(|cell| cell.symbol().to_owned())
+            .unwrap_or_default();
+        if symbol.is_empty() || symbol == " " || is_ellipsis_symbol(&symbol) {
+            break;
+        }
+        x = x.saturating_add(1);
+    }
+    x = skip_ellipsis_cells(buf, x, y);
+    let with_gap = x.saturating_add(1);
+    if with_gap.saturating_add(arrow_w) <= right && cells_are_blank(buf, with_gap, y, arrow_w) {
+        return Some(with_gap);
+    }
+    if x.saturating_add(arrow_w) <= right && cells_are_blank(buf, x, y, arrow_w) {
+        return Some(x);
+    }
+    None
+}
+
+/// Last resort on a packed wait row: paint `[↗]` over the spinner left of
+/// the phrase so a normal-width overlay still shows the button. Does not
+/// sit on the phrase (the last-tool name stays whole).
+fn open_arrow_x_over_spinner(area: Rect, phrase: Rect, arrow_w: u16) -> Option<u16> {
+    let candidate = phrase.x.saturating_sub(arrow_w);
+    (candidate >= area.x && candidate.saturating_add(arrow_w) <= phrase.x).then_some(candidate)
+}
+
+/// Painted specialist phrase, including a clamped wait-chrome prefix when
+/// the full description is not on screen. Prefers a dedicated L3-row run,
+/// then last-tool chrome.
+fn painted_specialist_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    painted_specialist_phrase_matching(buf, area, phrase, false)
+}
+
+/// Last-tool wait chrome (`{prefix}…: {tool}`), including a clamped prefix
+/// when the full description is not on screen. Dedicated specialist-list
+/// rows are skipped so wait chrome still hosts `[↗]` when both exist.
+fn painted_last_tool_wait_chrome_phrase_rect(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+) -> Option<Rect> {
+    painted_specialist_phrase_matching(buf, area, phrase, true)
+}
+
+fn painted_specialist_phrase_matching(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+    last_tool_only: bool,
+) -> Option<Rect> {
+    let phrase = phrase.trim();
+    if phrase.is_empty() {
+        return None;
+    }
+    if let Some(rect) = painted_open_control_phrase_rect_kind(buf, area, phrase, last_tool_only) {
+        return Some(rect);
+    }
+    let clamped = crate::acp::tracker::clamp_activity_subject(phrase);
+    if clamped != phrase
+        && let Some(rect) =
+            painted_open_control_phrase_rect_kind(buf, area, &clamped, last_tool_only)
+    {
+        return Some(rect);
+    }
+    let chars: Vec<char> = phrase.chars().collect();
+    let min = 8.min(chars.len());
+    if min == 0 {
+        return None;
+    }
+    for len in (min..chars.len()).rev() {
+        let Some(prefix_chars) = chars.get(..len) else {
+            continue;
+        };
+        let prefix: String = prefix_chars.iter().copied().collect();
+        if let Some(rect) =
+            painted_open_control_phrase_rect_kind(buf, area, &prefix, last_tool_only)
+        {
+            return Some(rect);
+        }
+    }
+    None
+}
+
 /// First dedicated L3-row paint of `phrase` (not `{desc}: {tool}` wait
-/// chrome). Falls back to the first last-tool occurrence so that row can
-/// still host an open arrow left of the tool name.
-fn painted_open_control_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+/// chrome) unless `last_tool_only`. Last-tool-only skips specialist-list
+/// rows so wait chrome still hosts `[↗]`. Otherwise falls back to the
+/// first last-tool occurrence so that row can still host an open arrow
+/// left of the tool name.
+fn painted_open_control_phrase_rect_kind(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+    last_tool_only: bool,
+) -> Option<Rect> {
     let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
     if glyphs.is_empty() || area.width == 0 || area.height == 0 {
         return None;
@@ -996,16 +1156,26 @@ fn painted_open_control_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> O
                 .x
                 .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
             let rect = Rect::new(x, y, width, 1);
-            if !phrase_followed_by_last_tool_sep(buf, rect) {
-                return Some(rect);
+            if phrase_followed_by_last_tool_sep(buf, rect) {
+                if last_tool_only {
+                    return Some(rect);
+                }
+                if last_tool_fallback.is_none() {
+                    last_tool_fallback = Some(rect);
+                }
+                break;
             }
-            if last_tool_fallback.is_none() {
-                last_tool_fallback = Some(rect);
+            if last_tool_only {
+                break;
             }
-            break;
+            return Some(rect);
         }
     }
-    last_tool_fallback
+    if last_tool_only {
+        None
+    } else {
+        last_tool_fallback
+    }
 }
 
 /// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the

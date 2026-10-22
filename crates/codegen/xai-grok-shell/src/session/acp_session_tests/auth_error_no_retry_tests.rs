@@ -2132,6 +2132,130 @@ async fn nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt() {
         .await;
 }
 
+/// Operator 2026-10-21 after grok-oss 1.0.45: "Logging in still fails to resume the conversation"
+/// "This is still a problem also: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+///
+/// After login restamp, the waiting parent conversation POSTs with the live login JWT (not
+/// xai-grok-cli Token-Auth alone), AND a nested spawn with reason=no auth context retries with
+/// that same live JWT so the turn resumes. Do not tell the Operator to /login.
+#[tokio::test(flavor = "current_thread")]
+async fn nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_the_turn_resumes() {
+    use reqwest::header::{AUTHORIZATION, HeaderName};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let mut extra_headers = indexmap::IndexMap::new();
+            extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+            let spawn_time = xai_grok_sampler::SamplerConfig {
+                api_key: Some("spawn-time-jwt".into()),
+                base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                model: "test".into(),
+                context_window: 256_000,
+                extra_headers,
+                ..Default::default()
+            };
+            let handle = xai_grok_sampler::SamplerActor::spawn(
+                spawn_time,
+                xai_grok_sampler::RetryPolicy::default(),
+                event_tx,
+            );
+            let (dir, am) = auth_manager_with_valid_token("recovered-am-token");
+            let _dir = dir;
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "spawn-time-jwt".into(),
+            )
+            .await;
+            actor
+                .chat_state_handle
+                .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+                    base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                    model: "test".into(),
+                    context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+                    ..Default::default()
+                });
+            let mut hints = actor.startup_hints.clone();
+            hints.is_subagent = true;
+            actor.startup_hints = hints;
+            actor.sampler_handle = handle;
+            // Login restamp: the parent sampler JWT the waiting conversation must POST with.
+            actor
+                .sampler_handle
+                .set_api_key(Some("live-login-jwt".into()));
+            assert_eq!(
+                actor.sampler_handle.live_api_key().as_deref(),
+                Some("live-login-jwt"),
+                "after login the waiting parent conversation must POST with the live login JWT, not spawn-time-jwt"
+            );
+            let actor = Arc::new(actor);
+            let nested_401 = xai_grok_sampler::SamplingErrorInfo {
+                message: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)".to_string(),
+                credential: xai_grok_sampling_types::SentCredential::Sent,
+                ..auth_error()
+            };
+            let result = actor
+                .handle_sampling_failure(
+                    nested_401,
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        credential: xai_grok_sampling_types::SentCredential::Sent,
+                    })
+                ),
+                "Logging in still fails to resume the conversation. Nested spawn with reason=no auth context must retry with the live login JWT so the turn resumes. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)."
+            );
+            let creds = actor.chat_state_handle.get_credentials().await;
+            assert_eq!(
+                creds.api_key.as_deref(),
+                Some("live-login-jwt"),
+                "after login, the waiting parent conversation POSTs with the live login JWT (not xai-grok-cli). Nested spawn with reason=no auth context retries with that same live JWT"
+            );
+            assert_ne!(
+                creds.api_key.as_deref(),
+                Some("spawn-time-jwt"),
+                "spawn-time JWT that just 401'd must not ride the nested retry after login"
+            );
+            assert_ne!(
+                creds.api_key.as_deref(),
+                Some("recovered-am-token"),
+                "AuthManager recovered token must not replace the live login JWT"
+            );
+            let reconstructed = actor.reconstruct_full_config().await;
+            let client =
+                xai_grok_sampler::SamplingClient::new(reconstructed).expect("client should build");
+            let headers = client.post_headers();
+            assert_eq!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer live-login-jwt"),
+                "after login, the waiting parent conversation POSTs with the live login JWT (not xai-grok-cli). Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                None,
+                "Token-Auth xai-grok-cli alone is the live miss; Authorization must be the live login JWT"
+            );
+            assert_eq!(
+                headers
+                    .get(HeaderName::from_static("x-xai-token-auth"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("xai-grok-cli"),
+                "Token-Auth stays when Authorization is the live login JWT"
+            );
+        })
+        .await;
+}
+
 /// Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty,
 /// copy the JWT the live sampler still talks with.
 #[tokio::test(flavor = "current_thread")]
