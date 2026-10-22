@@ -61,12 +61,32 @@ impl GoalPlan {
         self.post_plan_retry_pending = true;
     }
 
+    /// After the planner writes PLAN_FILE, the current goal is the planned work.
+    /// Does not arm post-plan retry: the plan already happened.
+    pub(crate) fn adopt_planned_goal(&mut self, title: &str) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        self.goals = vec![title.to_string()];
+        self.post_plan_retry_pending = false;
+    }
+
     /// Apply an Operator message. Goal-plan messages call [`Self::set_goals`].
     /// Other messages do not reply [`NO_CURRENT_GOALS`].
+    /// The same prompt as the current goals does not reset or re-arm post-plan retry.
     pub(crate) fn apply_user_goal_message(&mut self, message: &str) -> GoalPlanReply {
         match parse_goal_plan_message(message) {
             Some(goals) => {
-                self.set_goals(goals);
+                let incoming: Vec<String> = goals
+                    .into_iter()
+                    .map(|goal| goal.trim().to_string())
+                    .filter(|goal| !goal.is_empty())
+                    .collect();
+                if incoming.is_empty() || incoming == self.goals {
+                    return empty_host_reply();
+                }
+                self.set_goals(incoming);
                 let retry = self.post_plan_action();
                 GoalPlanReply {
                     text: String::new(),
@@ -350,6 +370,44 @@ mod tests {
         assert_eq!(plan.post_plan_retry_count(), 1);
     }
 
+    /// Operator 2026-10-21: "When I scrolled up and re-ran the goal prompt, goals are
+    /// fixed, it's just that your fix also reset the earlier goal."
+    #[test]
+    fn test_goal_plan_same_prompt_does_not_reset_earlier_goal() {
+        let mut plan = GoalPlan::new();
+        let prompt = "/goal We need to update to Lean 4.35, in parallel, using our seven team mates and Hunter as a watcher.";
+        let first = plan.apply_user_goal_message(prompt);
+        assert!(first.goals_set);
+        assert!(first.post_plan_retry);
+        let progress = plan.goals().to_vec();
+        assert!(
+            !progress.is_empty(),
+            "the earlier goal must be stored before the same prompt is re-run"
+        );
+        let retry_count = plan.post_plan_retry_count();
+        let second = plan.apply_user_goal_message(prompt);
+        assert!(
+            !second.goals_set,
+            "When I scrolled up and re-ran the goal prompt, goals are fixed, it's just that your fix also reset the earlier goal. \
+             same prompt must not call set_goals"
+        );
+        assert!(
+            !second.post_plan_retry,
+            "same prompt must not re-arm post_plan retry (that restarts planning)"
+        );
+        assert_eq!(
+            plan.goals(),
+            progress.as_slice(),
+            "same prompt must keep the earlier GoalPlan, not a new empty one"
+        );
+        assert_eq!(plan.post_plan_retry_count(), retry_count);
+        assert!(
+            !reply_has_no_current_goals(&second),
+            "same-prompt resume must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            second.text
+        );
+    }
+
     #[test]
     fn test_goal_plan_empty_goals_does_not_reply_no_current_goals() {
         let mut plan = GoalPlan::new();
@@ -409,5 +467,34 @@ mod tests {
         ]);
         assert_eq!(restored.goals(), &["keep across restore".to_string()]);
         assert_eq!(restored.extra().len(), 2);
+    }
+
+    /// Operator 2026-10-21: the goal got lost. After Planned, the GoalPlan
+    /// names the planned work, not the original complaint, and give_up still
+    /// does not reply no current goals.
+    #[test]
+    fn test_goal_plan_adopt_planned_goal_names_the_work_without_arming_retry() {
+        let mut plan = GoalPlan::new();
+        let applied = plan.apply_user_goal_message(
+            "/goal Goal planning is still entirely broken after the claimed fix.",
+        );
+        assert!(applied.goals_set);
+        assert!(applied.post_plan_retry);
+        plan.adopt_planned_goal("Rewrite tests onto production GoalPlan arms");
+        assert_eq!(
+            plan.primary_goal(),
+            Some("Rewrite tests onto production GoalPlan arms"),
+            "Operator: the goal got lost. After Planned, GoalPlan must name the current planned work"
+        );
+        assert!(
+            !plan.post_plan_action(),
+            "adopting a written plan must not arm another post-plan retry"
+        );
+        let give_up = plan.give_up();
+        assert!(
+            !reply_has_no_current_goals(&give_up),
+            "give_up after adopt_planned_goal must not reply {NO_CURRENT_GOALS:?}, got {:?}",
+            give_up.text
+        );
     }
 }

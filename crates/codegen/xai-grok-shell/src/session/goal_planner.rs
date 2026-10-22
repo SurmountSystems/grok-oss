@@ -555,6 +555,25 @@ fn planned_outcome(
     }
 }
 
+/// Headline from a planner markdown file (`# Plan: <work>`).
+/// `None` when the heading has no headline (`# Plan`) or is not that contract.
+pub(crate) fn planned_goal_title(markdown: &str) -> Option<&str> {
+    let line = markdown
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let rest = line.strip_prefix('#')?.trim();
+    let title = rest.strip_prefix("Plan:")?.trim();
+    (!title.is_empty()).then_some(title)
+}
+
+/// Read [`planned_goal_title`] from a PLAN_FILE path. `None` if the file is
+/// missing, unreadable, or the heading has no headline.
+pub(crate) fn planned_goal_title_from_path(path: &Path) -> Option<String> {
+    let markdown = std::fs::read_to_string(path).ok()?;
+    planned_goal_title(&markdown).map(str::to_owned)
+}
+
 fn record_fail_closed(
     reason: GoalPlannerFailClosedReason,
     attempt: u32,
@@ -689,6 +708,18 @@ mod tests {
         assert!(!parse_terminal_response("Done."));
         assert!(!parse_terminal_response("Done!"));
         assert!(!parse_terminal_response(""));
+    }
+
+    #[test]
+    fn planned_goal_title_reads_the_plan_headline() {
+        let markdown = "# Plan: Rewrite tests onto production GoalPlan arms\n\n## Goal kind\n";
+        assert_eq!(
+            planned_goal_title(markdown),
+            Some("Rewrite tests onto production GoalPlan arms"),
+            "Operator: the goal got lost. PLAN_FILE `# Plan: <work>` is the current planned goal"
+        );
+        assert_eq!(planned_goal_title("# Plan\n\n1. do it\n"), None);
+        assert_eq!(planned_goal_title(""), None);
     }
 
     /// Deterministic spawner with knobs for response text, whether to write the plan file, and the file body.

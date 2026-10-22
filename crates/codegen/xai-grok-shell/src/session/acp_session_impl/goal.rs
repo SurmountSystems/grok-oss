@@ -832,11 +832,49 @@ impl SessionActor {
         self.goal_plan.lock().restore(snapshot);
     }
 
+    /// Same `/goal` prompt on an in-flight goal resumes it. Complete and budget-limited still create.
+    fn same_prompt_resumes_existing_goal(&self, objective: &str) -> bool {
+        use crate::session::goal_tracker::GoalStatus;
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return false;
+        }
+        let tracker = self.goal_tracker.lock();
+        let Some(orchestration) = tracker.snapshot() else {
+            return false;
+        };
+        if matches!(
+            orchestration.status,
+            GoalStatus::Complete | GoalStatus::BudgetLimited
+        ) {
+            return false;
+        }
+        orchestration.objective.trim() == objective
+    }
+
+    /// Active goal already has PLAN_FILE. A later `/goal` reminds of that planned
+    /// work instead of `create_goal` over the live goal.
+    fn has_active_planned_goal(&self) -> bool {
+        use crate::session::goal_tracker::GoalStatus;
+        self.goal_tracker
+            .lock()
+            .snapshot()
+            .is_some_and(|o| o.status == GoalStatus::Active && o.plan_file.is_some())
+    }
+
     pub(super) async fn setup_goal(
         &self,
         objective: &str,
         token_budget: Option<i64>,
     ) -> GoalSetupOutcome {
+        if self.same_prompt_resumes_existing_goal(objective) || self.has_active_planned_goal() {
+            return match self.resume_goal().await {
+                GoalResumeOutcome::Inference { reminder, .. } => {
+                    GoalSetupOutcome::Inference { reminder }
+                }
+                GoalResumeOutcome::Message(msg) => GoalSetupOutcome::Message(msg),
+            };
+        }
         let applied = self.setup_actor_goal_plan(objective);
         let Some(objective) = self.goal_plan.lock().primary_goal().map(str::to_owned) else {
             return GoalSetupOutcome::Message("Could not start the goal.".to_string());
@@ -881,6 +919,15 @@ impl SessionActor {
             return GoalSetupOutcome::Message(msg);
         }
 
+        // After Planned, GoalPlan / tracker name the written work, not the
+        // original complaint captured before the planner.
+        let reminder_objective = self
+            .goal_plan
+            .lock()
+            .primary_goal()
+            .map(str::to_owned)
+            .unwrap_or(objective);
+
         let names = self.resolve_goal_tool_names().await;
         let planner_enabled = self.goal_planner_enabled;
         let body = {
@@ -892,7 +939,7 @@ impl SessionActor {
                 let scratch = scratch_dir.to_string_lossy();
                 if self.goal_runs_on_workflow_engine() {
                     render_goal_rules(
-                        &objective,
+                        &reminder_objective,
                         &names,
                         "",
                         "",
@@ -902,7 +949,7 @@ impl SessionActor {
                     )
                 } else {
                     render_goal_rules_legacy(
-                        &objective,
+                        &reminder_objective,
                         &names,
                         "",
                         "",
@@ -1070,6 +1117,7 @@ impl SessionActor {
         };
 
         let planner_enabled = self.goal_planner_enabled;
+        let planned = self.goal_plan.lock().primary_goal().map(str::to_owned);
         let reminder = {
             let mut tracker = self.goal_tracker.lock();
             tracker.account_elapsed();
@@ -1084,9 +1132,13 @@ impl SessionActor {
                 let scratch_dir =
                     crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
                 let scratch = scratch_dir.to_string_lossy();
+                let reminder_objective = planned
+                    .as_deref()
+                    .filter(|goal| !goal.is_empty())
+                    .unwrap_or(o.objective.as_str());
                 let body = if self.goal_runs_on_workflow_engine() {
                     render_goal_rules(
-                        &o.objective,
+                        reminder_objective,
                         &names,
                         &block_recap,
                         &goal_state,
@@ -1096,7 +1148,7 @@ impl SessionActor {
                     )
                 } else {
                     render_goal_rules_legacy(
-                        &o.objective,
+                        reminder_objective,
                         &names,
                         &block_recap,
                         &goal_state,

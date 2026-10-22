@@ -1322,6 +1322,14 @@ impl SessionActor {
                         }
                         break;
                     }
+                    // After Planned, the current goal is the plan headline, not
+                    // the original complaint. Restore already kept the GoalPlan;
+                    // adopt the written work so a later `/goal` reminder names it.
+                    let planned_title =
+                        crate::session::goal_planner::planned_goal_title_from_path(&plan_file);
+                    if let Some(title) = planned_title.as_deref() {
+                        self.goal_plan.lock().adopt_planned_goal(title);
+                    }
                     // Record `plan_file`, then snapshot the planner's ORIGINAL plan as the immutable baseline the verifier diffs later edits against
                     // Capture once: this runs only when no plan exists yet, and the `is_none()` guard keeps a restart / re-entry from overwriting it
                     let baseline_target = {
@@ -1336,8 +1344,20 @@ impl SessionActor {
                         };
                         let need_baseline = goal.plan_baseline_file.is_none();
                         goal.plan_file = Some(plan_file);
+                        if let Some(title) = planned_title.as_deref() {
+                            goal.objective = title.to_string();
+                        }
                         need_baseline.then_some((src, dst))
                     };
+                    if planned_title.is_some() {
+                        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                        self.goal_notify_sender().emit_goal_updated(
+                            &mut self.goal_tracker.lock(),
+                            tokens_used,
+                            finished_marginal,
+                        );
+                    }
                     if let Some((src, dst)) = baseline_target {
                         let tmp = dst
                             .with_file_name(format!("plan-baseline-{}.md", uuid::Uuid::now_v7()));
