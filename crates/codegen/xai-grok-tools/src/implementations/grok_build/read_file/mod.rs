@@ -391,8 +391,10 @@ pub fn extract_file_content_lines(
     }
 }
 /// Operator 2026-10-23 / GitHub #245: session compaction segment.
-/// `$GROK_HOME/sessions/<id>/compaction/segment_*.md` and `INDEX.md` must be
-/// readable even when a FileSystem adapter denies the rest of `sessions/`.
+/// `$GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction/segment_*.md` and
+/// `INDEX.md` must be readable even when a FileSystem adapter returns
+/// `PermissionDenied` (os error 13) on Linux. Unix mode 0644 is not that deny.
+/// Seatbelt last-match is not this prevent. Writes stay on the adapter.
 pub(crate) fn is_session_compaction_store_path(path: &std::path::Path) -> bool {
     xai_grok_sandbox::command::policy::is_session_compaction_store_path(path)
 }
@@ -1094,6 +1096,161 @@ mod tests {
         resources.insert(FileSystem(Arc::new(LocalFs)));
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources
+    }
+
+    /// FileSystem adapter that always returns EACCES. Unix mode is not this deny.
+    /// In-process `read_file` maps `ErrorKind::PermissionDenied` to
+    /// `ReadFileOutput::PermissionDenied` unless the compaction-store bypass
+    /// reads the bytes with `tokio::fs::read`.
+    struct AdapterReturnsEacces;
+
+    fn adapter_eacces(path: &std::path::Path) -> crate::computer::types::ComputerError {
+        crate::computer::types::ComputerError::io_with_kind(
+            format!("Permission denied (os error 13): {}", path.display()),
+            std::io::ErrorKind::PermissionDenied,
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl crate::computer::types::AsyncFileSystem for AdapterReturnsEacces {
+        async fn read_file(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+            Err(adapter_eacces(path))
+        }
+
+        async fn write_file(
+            &self,
+            path: &std::path::Path,
+            _data: &[u8],
+        ) -> Result<(), crate::computer::types::ComputerError> {
+            Err(adapter_eacces(path))
+        }
+
+        async fn delete_file(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<(), crate::computer::types::ComputerError> {
+            Err(adapter_eacces(path))
+        }
+    }
+
+    fn resources_with_eacces_adapter(cwd: &std::path::Path) -> Resources {
+        let mut resources = Resources::new();
+        resources.insert(Cwd(cwd.to_path_buf()));
+        resources.insert(FileSystem(Arc::new(AdapterReturnsEacces)));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        resources
+    }
+
+    /// Operator 2026-10-23 / GitHub #245: screenshot layout
+    /// `$GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction/segment_006.md`.
+    /// Would go red if in-process `read_file` still returned Permission denied
+    /// after the FileSystem adapter returned EACCES. Seatbelt last-match is not
+    /// this Linux prevent. Writes stay on the adapter (still denied).
+    #[tokio::test]
+    async fn read_file_reads_encoded_cwd_uuid_compaction_segment_when_adapter_returns_eacces() {
+        let tmp = TempDir::new().unwrap();
+        let encoded_cwd = "%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build";
+        let session_id = "01a10146-489e-7b91-88cb-fd2dc2222244";
+        let compaction = tmp
+            .path()
+            .join("sessions")
+            .join(encoded_cwd)
+            .join(session_id)
+            .join("compaction");
+        std::fs::create_dir_all(&compaction).unwrap();
+        let segment = compaction.join("segment_006.md");
+        std::fs::write(&segment, "screenshot-compaction-segment\n").unwrap();
+        std::fs::write(compaction.join("INDEX.md"), "index\n").unwrap();
+        let events = compaction
+            .parent()
+            .expect("session id dir")
+            .join("events.jsonl");
+        std::fs::write(&events, "{}\n").unwrap();
+
+        assert!(
+            is_session_compaction_store_path(&segment),
+            "screenshot layout must name a compaction store path"
+        );
+
+        let segment_out = xai_tool_runtime::Tool::run(
+            &ReadFileTool,
+            test_ctx(resources_with_eacces_adapter(tmp.path()).into_shared()),
+            ReadFileInput {
+                path: segment.to_string_lossy().into_owned(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        match segment_out {
+            ReadFileOutput::FileContent(content) => {
+                assert!(
+                    content.content.contains("screenshot-compaction-segment"),
+                    "got {}",
+                    content.content
+                );
+            }
+            other => panic!(
+                "screenshot-layout compaction segment must not be PermissionDenied, got {other:?}"
+            ),
+        }
+
+        let index_out = xai_tool_runtime::Tool::run(
+            &ReadFileTool,
+            test_ctx(resources_with_eacces_adapter(tmp.path()).into_shared()),
+            ReadFileInput {
+                path: compaction.join("INDEX.md").to_string_lossy().into_owned(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        match index_out {
+            ReadFileOutput::FileContent(content) => {
+                assert!(content.content.contains("index"), "got {}", content.content);
+            }
+            other => panic!("compaction INDEX.md must not be PermissionDenied, got {other:?}"),
+        }
+
+        let events_out = xai_tool_runtime::Tool::run(
+            &ReadFileTool,
+            test_ctx(resources_with_eacces_adapter(tmp.path()).into_shared()),
+            ReadFileInput {
+                path: events.to_string_lossy().into_owned(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        match events_out {
+            ReadFileOutput::PermissionDenied(_) => {}
+            other => panic!("non-compaction sessions file must stay adapter-denied, got {other:?}"),
+        }
+
+        let write_err = crate::computer::types::AsyncFileSystem::write_file(
+            &AdapterReturnsEacces,
+            &segment,
+            b"nope",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            write_err.io_error_kind(),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "compaction writes stay denied"
+        );
     }
     #[tokio::test]
     async fn read_file_basic() {

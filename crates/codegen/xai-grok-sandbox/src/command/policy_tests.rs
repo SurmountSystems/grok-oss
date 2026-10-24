@@ -292,6 +292,41 @@ fn is_session_compaction_store_path_names_segments_and_index_only() {
     assert!(!is_session_compaction_store_path(Path::new(
         "/home/u/.grok/sessions/01k8id/compaction/segment_00a.md"
     )));
+    assert!(is_session_compaction_store_path(Path::new(
+        "/home/hunter/.grok/sessions/%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build/01a10146-489e-7b91-88cb-fd2dc2222244/compaction/segment_006.md"
+    )));
+}
+
+/// Operator 2026-10-23 / GitHub #245: the screenshot path is
+/// `$GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction/segment_006.md`.
+/// Reads stay allowed. Writes stay denied. This is not the Linux in-process
+/// `read_file` prevent; that lives in grok_build `read_file`.
+#[test]
+fn screenshot_encoded_cwd_uuid_compaction_segment_writes_stay_denied() {
+    let f = Fixture::new("screenshot-compaction-layout");
+    let policy = f.build(&[], None);
+    let segment = f
+        .grok_home
+        .join("sessions")
+        .join("%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build")
+        .join("01a10146-489e-7b91-88cb-fd2dc2222244")
+        .join("compaction")
+        .join("segment_006.md");
+    let index = segment.with_file_name("INDEX.md");
+    let events = segment
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .join("events.jsonl");
+    let read = |path: PathBuf| policy.would_allow(&Blocked::FsRead { path });
+    let write = |path: PathBuf| policy.would_allow(&Blocked::FsWrite { path });
+
+    assert!(read(segment.clone()));
+    assert!(read(index.clone()));
+    assert!(!read(events.clone()));
+    assert!(!write(segment));
+    assert!(!write(index));
+    assert!(!write(events));
 }
 
 /// A hook source the process-wide profile write-denies — here a `hooks-paths` entry inside the

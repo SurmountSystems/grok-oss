@@ -50,7 +50,7 @@ pub use observe::{
 pub use policy::{
     BUILD_CACHE_TREES, DenyEntry, EnvPolicy, NetworkPolicy, PolicyError, PolicyInputs,
     ProxyEndpoint, ReadPolicy, SandboxPolicy, VERIFIED_BUILD_CACHES, WritableLocations,
-    daemon_tmp_dirs, default_tmp_dirs,
+    daemon_tmp_dirs, default_tmp_dirs, is_session_compaction_store_path,
 };
 pub use protected::Protected;
 pub use violation::{
