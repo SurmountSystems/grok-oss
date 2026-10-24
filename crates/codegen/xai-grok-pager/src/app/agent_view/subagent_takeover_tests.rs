@@ -1238,6 +1238,235 @@ fn l2_overlay_clamped_wait_chrome_paints_open_arrow_that_opens_that_l3() {
     );
 }
 
+const OWED_L3_VIEWS: &str = "we still haven't recovered the L3 views";
+
+/// From the L2 overlay the Operator can see, each live L3 must expose a
+/// visible open control on that L2's tasks pane, and activating it must
+/// show that specialist's view (`active_subagent` set to that L3).
+/// Wait-chrome `[↗]` that paints in a unit test is not this control.
+#[test]
+fn l2_overlay_tasks_pane_open_control_opens_each_live_l3_view() {
+    use crate::views::tasks_pane::TaskEntryId;
+    use agent_client_protocol as acp;
+    const L2: &str = "l2-coord";
+    const L3_A: &str = "l3-first";
+    const L3_B: &str = "l3-second";
+    // Native tasks pane [↗] stores TaskEntry.subagent_id, not the L1 view key.
+    const L3_A_CHIP: &str = "sa-l3-first";
+    const L3_B_CHIP: &str = "sa-l3-second";
+    const LINE_A: &str = "L3_VIEW_FIRST_TRANSCRIPT";
+    const LINE_B: &str = "L3_VIEW_SECOND_TRANSCRIPT";
+    const SPECIALIST_A: &str = "Review the first specialist";
+    const SPECIALIST_B: &str = "Implement the second specialist";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+    let mut l2 = make_agent();
+    l2.session.session_id = Some(acp::SessionId::new(L2));
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.insert_subagent_view(
+        L2.to_owned(),
+        Box::new(l2),
+        crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+    let start_a = Instant::now();
+    let start_b = start_a + Duration::from_secs(1);
+    let mut first = running_subagent_info(L3_A);
+    first.description = Arc::from(SPECIALIST_A);
+    first.attempt.is_background = true;
+    first.attempt.depth = Some(2);
+    first.attempt.parent_session_id = Some(Arc::from(L2));
+    first.attempt.started_at = start_a;
+    l1.subagent_sessions.insert(L3_A.to_owned(), first);
+    let mut l3_a = make_agent();
+    l3_a.session.session_id = Some(acp::SessionId::new(L3_A));
+    l3_a.scrollback
+        .push_block(crate::scrollback::block::RenderBlock::user_prompt(LINE_A));
+    l1.insert_test_child(L3_A.to_owned(), Box::new(l3_a));
+    let mut second = running_subagent_info(L3_B);
+    second.description = Arc::from(SPECIALIST_B);
+    second.attempt.is_background = true;
+    second.attempt.depth = Some(2);
+    second.attempt.parent_session_id = Some(Arc::from(L2));
+    second.attempt.started_at = start_b;
+    l1.subagent_sessions.insert(L3_B.to_owned(), second);
+    let mut l3_b = make_agent();
+    l3_b.session.session_id = Some(acp::SessionId::new(L3_B));
+    l3_b.scrollback
+        .push_block(crate::scrollback::block::RenderBlock::user_prompt(LINE_B));
+    l1.insert_test_child(L3_B.to_owned(), Box::new(l3_b));
+    l1.open_subagent_fullscreen(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let open_arrow = crate::glyphs::enlarge_button();
+    let l2_view = l1.subagent_view(L2).expect(OWED_L3_VIEWS);
+    let native: Vec<(String, ratatui::layout::Rect)> = l2_view
+        .tasks
+        .view_button_rects
+        .iter()
+        .filter_map(|(id, rect)| match id {
+            TaskEntryId::Agent(sid) => Some((sid.clone(), *rect)),
+            _ => None,
+        })
+        .collect();
+    let rect_a = native
+        .iter()
+        .find(|(sid, _)| sid == L3_A_CHIP)
+        .map(|(_, rect)| *rect)
+        .unwrap_or_else(|| {
+            panic!(
+                "{OWED_L3_VIEWS} The L2 overlay tasks pane must expose a visible open control for live L3 `{L3_A}` (`{SPECIALIST_A}`). Native chip sid is `{L3_A_CHIP}`. L2 tasks pane open rects: {native:?}.\n{painted}"
+            )
+        });
+    let rect_b = native
+        .iter()
+        .find(|(sid, _)| sid == L3_B_CHIP)
+        .map(|(_, rect)| *rect)
+        .unwrap_or_else(|| {
+            panic!(
+                "{OWED_L3_VIEWS} The L2 overlay tasks pane must expose a visible open control for live L3 `{L3_B}` (`{SPECIALIST_B}`). Native chip sid is `{L3_B_CHIP}`. L2 tasks pane open rects: {native:?}.\n{painted}"
+            )
+        });
+    assert_ne!(
+        (rect_a.x, rect_a.y),
+        (rect_b.x, rect_b.y),
+        "{OWED_L3_VIEWS} Each live L3 must own a distinct tasks pane open control. First is {rect_a:?}, second is {rect_b:?}.\n{painted}"
+    );
+    assert!(
+        specialist_status_cell(&buf, rect_a, open_arrow).is_some(),
+        "{OWED_L3_VIEWS} The L2 tasks pane open control for `{L3_A}` at {rect_a:?} must paint `{open_arrow}`.\n{painted}"
+    );
+    let arrow_b = specialist_status_cell(&buf, rect_b, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_VIEWS} The L2 tasks pane open control for `{L3_B}` at {rect_b:?} must paint `{open_arrow}`.\n{painted}"
+        )
+    });
+    let click_b = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow_b.0,
+        row: arrow_b.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click_b, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3_B),
+        "{OWED_L3_VIEWS} Activating the L2 tasks pane open control for `{L3_B}` at ({}, {}) must set active_subagent to that L3. L1 overlay hits: {:?}. overlay_nested_status_child_sid is {:?}.",
+        arrow_b.0,
+        arrow_b.1,
+        l1.tasks.view_button_rects,
+        l1.overlay_nested_status_child_sid
+    );
+    let mut buf_b = Buffer::empty(area);
+    let _ = l1.draw(
+        area,
+        &mut buf_b,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted_b = buffer_text(&buf_b, area);
+    assert!(
+        painted_b.contains(LINE_B),
+        "{OWED_L3_VIEWS} Opening `{L3_B}` must show that specialist's view:\n{painted_b}"
+    );
+    l1.open_subagent_fullscreen(L2.to_owned());
+    let mut buf_l2 = Buffer::empty(area);
+    let _ = l1.draw(
+        area,
+        &mut buf_l2,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted_l2 = buffer_text(&buf_l2, area);
+    let l2_again = l1.subagent_view(L2).expect(OWED_L3_VIEWS);
+    let rect_a_again = l2_again
+        .tasks
+        .view_button_rects
+        .iter()
+        .find_map(|(id, rect)| match id {
+            TaskEntryId::Agent(sid) if sid == L3_A_CHIP => Some(*rect),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{OWED_L3_VIEWS} After returning to the L2 overlay, the tasks pane must still expose an open control for `{L3_A}` (native chip `{L3_A_CHIP}`).\n{painted_l2}"
+            )
+        });
+    let arrow_a = specialist_status_cell(&buf_l2, rect_a_again, open_arrow).unwrap_or_else(|| {
+        panic!(
+            "{OWED_L3_VIEWS} The L2 tasks pane open control for `{L3_A}` at {rect_a_again:?} must paint `{open_arrow}`.\n{painted_l2}"
+        )
+    });
+    let click_a = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: arrow_a.0,
+        row: arrow_a.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click_a, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3_A),
+        "{OWED_L3_VIEWS} Activating the L2 tasks pane open control for `{L3_A}` at ({}, {}) must set active_subagent to that L3.",
+        arrow_a.0,
+        arrow_a.1
+    );
+    let mut buf_a = Buffer::empty(area);
+    let _ = l1.draw(
+        area,
+        &mut buf_a,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted_a = buffer_text(&buf_a, area);
+    assert!(
+        painted_a.contains(LINE_A),
+        "{OWED_L3_VIEWS} Opening `{L3_A}` must show that specialist's view:\n{painted_a}"
+    );
+}
+
 #[test]
 fn l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn() {
     use agent_client_protocol as acp;

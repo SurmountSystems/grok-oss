@@ -662,10 +662,56 @@ impl AgentView {
         }
     }
 
-    /// Left-click target for an overlay L3 open-arrow. Per-row hits win
-    /// so two named specialists do not share the first painted sid.
+    /// Left-click target for an overlay L3 open-arrow. The live L2 overlay
+    /// tasks pane paints `[↗]` on the child view. Those hits open that L3
+    /// on this view. Per-row overlay hits still win over the single status
+    /// sid so two named specialists do not share the first painted sid.
     fn overlay_nested_open_sid_at(&self, column: u16, row: u16) -> Option<String> {
         let point = (column, row).into();
+        // Live L2 overlay: the inner tasks pane `[↗]` is the control the
+        // Operator clicks. It lives on the child view, not on L1 hits.
+        if let Some(child_sid) = self.active_subagent.as_deref()
+            && let Some(child) = self.subagent_views.get(child_sid)
+        {
+            for (id, rect) in &child.tasks.view_button_rects {
+                if rect.contains(point)
+                    && let TaskEntryId::Agent(sid) = id
+                {
+                    // Native chip stores TaskEntry.subagent_id (sa-l3-first),
+                    // not the L1 view key (l3-first). Match registry key,
+                    // subagent_id, or child_session_id, then pick the id that
+                    // is actually in subagent_views. Skip the L2 floor.
+                    if self.subagent_views.contains_key(sid) && sid.as_str() != child_sid {
+                        return Some(sid.clone());
+                    }
+                    let native_sid = sid.as_str();
+                    let resolved = self
+                        .subagent_sessions
+                        .iter()
+                        .find(|(key, info)| {
+                            key.as_str() == native_sid
+                                || info.subagent_id.as_ref() == native_sid
+                                || info.child_session_id.as_ref() == native_sid
+                        })
+                        .and_then(|(key, info)| {
+                            [
+                                info.child_session_id.as_ref(),
+                                key.as_str(),
+                                native_sid,
+                                info.subagent_id.as_ref(),
+                            ]
+                            .into_iter()
+                            .find(|id| self.subagent_views.contains_key(*id))
+                            .map(str::to_owned)
+                        });
+                    if let Some(view_sid) = resolved
+                        && view_sid != child_sid
+                    {
+                        return Some(view_sid);
+                    }
+                }
+            }
+        }
         for (id, rect) in &self.tasks.view_button_rects {
             if rect.contains(point)
                 && let TaskEntryId::Agent(sid) = id
