@@ -946,6 +946,9 @@ pub(crate) struct SessionActor {
     /// Session-scoped state for the `/goal` Design-Execute-Verify loop.
     /// Modeled after `plan_mode` above.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
+    /// Host-owned GoalPlan for this session. `setup_goal`, GoalClear, and restore share this instance.
+    /// Isolated snapshot/restore is stored here; do not construct a throwaway `GoalPlan::new()` per call.
+    pub(crate) goal_plan: parking_lot::Mutex<crate::session::goal_plan::GoalPlan>,
     /// `task_id`s of background tasks (and monitors) that originated during the goal turn.
     /// Either spawned by the goal model itself or reparented from a harness verifier/planner subagent on its exit.
     /// Their late auto-wake completions are dropped by [`Self::maybe_drain_notifications`] regardless of the goal's current status.
@@ -2305,6 +2308,9 @@ mod managed_gateway_tool_tests {
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_compaction_reseed_tests.rs"]
 mod goal_compaction_reseed_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/goal/goal_plan_actor_tests.rs"]
+mod goal_plan_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;

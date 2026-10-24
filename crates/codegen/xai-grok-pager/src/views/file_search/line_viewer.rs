@@ -829,6 +829,9 @@ pub struct LineViewerState {
     markdown_width_probes: u32,
     /// How many times the markdown body was actually re-parsed.
     markdown_rebuilds: u32,
+    /// True while `Event::Resize` is still arriving (event-loop debounce not yet fired).
+    /// Overlay body rebuild (markdown parse) is skipped until [`Self::settle_live_resize`].
+    live_resize: bool,
     /// Copy of comments last applied via `rebuild_with_comments`, so that a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
     /// `(source_lines index to follow, diagram source)` for affordance rows.
@@ -885,6 +888,7 @@ impl LineViewerState {
             last_rebuild_width: None,
             markdown_width_probes: 0,
             markdown_rebuilds: 0,
+            live_resize: false,
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
@@ -948,6 +952,7 @@ impl LineViewerState {
             last_rebuild_width: None,
             markdown_width_probes: 0,
             markdown_rebuilds: 0,
+            live_resize: false,
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
@@ -984,6 +989,23 @@ impl LineViewerState {
         }
     }
 
+    /// SIGWINCH path: skip overlay markdown rebuild until the size settles.
+    /// A dragged window fires a stream of widths; re-parsing the plan body on each one hitches.
+    pub fn note_live_resize(&mut self) {
+        self.live_resize = true;
+    }
+
+    /// Debounce fired, or a non-resize input arrived. The next [`Self::prepare_layout`] rebuilds
+    /// at the pending width (one wrap, not one per SIGWINCH).
+    pub fn settle_live_resize(&mut self) {
+        self.live_resize = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_resize_for_test(&self) -> bool {
+        self.live_resize
+    }
+
     /// Rebuild markdown items when the available content width changes. Recomputes `max_table_width`
     /// from the ListPane's content width (total width minus line-number prefix). Markdown then
     /// re-renders with constrained tables so box-drawing borders aren't word-wrapped.
@@ -993,6 +1015,11 @@ impl LineViewerState {
         };
         // Same-width paints (every keystroke) must not walk the plan body.
         if self.last_rebuild_width == Some(width) {
+            return;
+        }
+
+        // Live resize: keep the last wrapped body. Chrome still follows the new popup size.
+        if self.live_resize && self.last_rebuild_width.is_some() {
             return;
         }
 
@@ -2774,6 +2801,85 @@ mod tests {
         assert!(
             viewer.markdown_width_probes > probes,
             "a real width change must still rebuild"
+        );
+    }
+
+    /// Operator contract (GitHub #235): a live window drag must not re-parse the overlay
+    /// body on every SIGWINCH. No multi-second hitch, no spin that blocks typing.
+    /// Earlier pager-resize work was quit/crash. This is performance while the window stays up.
+    #[test]
+    fn plan_overlay_live_resize_drag_does_not_rebuild_markdown_until_settle() {
+        let mut body = String::from("# Plan\n\n");
+        body.push_str(&"step\n".repeat(48_000));
+        assert!(
+            body.len() >= 240_000,
+            "fixture must be a large plan body, got {}",
+            body.len()
+        );
+        let mut viewer = LineViewerState::open_markdown_content("plan.md", body, None)
+            .expect("markdown content should open");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.prepare_layout(80, 24);
+        let rebuilds = viewer.markdown_rebuilds;
+        let probes = viewer.markdown_width_probes;
+        assert!(
+            rebuilds >= 1 && probes >= 1,
+            "first layout must probe and rebuild, probes={probes} rebuilds={rebuilds}"
+        );
+
+        viewer.note_live_resize();
+        for width in [79u16, 78, 77, 76, 75, 90, 110, 120] {
+            viewer.prepare_layout(width, 24);
+        }
+        assert_eq!(
+            viewer.markdown_rebuilds, rebuilds,
+            "live resize must not re-parse the overlay body on every width step"
+        );
+        assert_eq!(
+            viewer.markdown_width_probes, probes,
+            "live resize must not walk the 240k plan body mid-drag"
+        );
+
+        viewer.settle_live_resize();
+        viewer.prepare_layout(120, 24);
+        assert_eq!(
+            viewer.markdown_rebuilds,
+            rebuilds + 1,
+            "exactly one overlay wrap after the drag settles, not one per SIGWINCH"
+        );
+        assert!(
+            viewer.markdown_width_probes > probes,
+            "settle must still rebuild at the final width"
+        );
+    }
+
+    /// Repeated prepare_layout at changing widths without settle must not accumulate
+    /// rebuilds (the spin: CPU pegged on markdown parse while the window stays up).
+    #[test]
+    fn plan_overlay_live_resize_does_not_spin_on_repeated_width_steps() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            format!("# Plan\n\n{}", "paragraph text that wraps. ".repeat(400)),
+            None,
+        )
+        .expect("markdown content should open");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.prepare_layout(80, 20);
+        let rebuilds = viewer.markdown_rebuilds;
+        viewer.note_live_resize();
+        for step in 0..40u16 {
+            viewer.prepare_layout(80 - (step % 20), 20);
+        }
+        assert_eq!(
+            viewer.markdown_rebuilds, rebuilds,
+            "40 mid-drag width steps must not spin overlay markdown parse"
+        );
+        viewer.settle_live_resize();
+        viewer.prepare_layout(70, 20);
+        assert_eq!(
+            viewer.markdown_rebuilds,
+            rebuilds + 1,
+            "typing/settle after the drag still gets one wrap at the new width"
         );
     }
 

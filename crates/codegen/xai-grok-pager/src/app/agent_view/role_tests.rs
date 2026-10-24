@@ -1,7 +1,10 @@
 use super::{ComposerRoute, ViewSurface};
 use crate::actions::ActionRegistry;
+use crate::app::actions::Effect;
+use crate::app::agent::AgentState;
 use crate::app::agent_view::test_fixtures::{
     add_running_bg_task, add_running_execute, ctrl, make_agent, parent_with_child,
+    running_subagent_info, simulate_subagent_wait, simulate_task_output_wait,
 };
 use crate::app::agent_view::{AgentPane, AgentView};
 use crate::scrollback::render::ScratchBuffer;
@@ -23,7 +26,8 @@ fn root_surface_reproduces_legacy_sites() {
         agent
             .current_shortcut_hints(&registry)
             .iter()
-            .any(|hint| hint.label == "send to bg")
+            .all(|hint| hint.label != "send to bg"),
+        "GitHub #232: send to bg is not an Operator hint on L1"
     );
 }
 /// The composer is unreachable on a child: the constructor moves a prompt-focused view off the prompt, every later
@@ -112,4 +116,81 @@ fn child_surface_never_advertises_kill() {
         advertises_kill(parent.subagent_view_mut("child").expect("child view"));
     assert!(!child_advertises_kill);
     assert!(advertises_kill(&mut parent));
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: keep send-to-background for a blocking nested agent, and
+/// auto-background that same wait so L1 is not stuck. Do not delete one to
+/// stand in for the other.
+#[test]
+fn send_blocking_subagent_to_background_is_kept_and_l1_auto_backgrounds() {
+    let mut agent = make_agent();
+    agent.session.session_id = Some(agent_client_protocol::SessionId::new("test-session"));
+    agent.session.state = AgentState::TurnRunning;
+    simulate_subagent_wait(&mut agent);
+    agent
+        .subagent_sessions
+        .insert("child-sid".into(), running_subagent_info("child-sid"));
+    assert!(
+        agent.can_send_to_background(),
+        "send-to-background for a blocking subagent must still exist"
+    );
+    assert!(
+        agent
+            .l1_blocking_subagent_auto_background_effect()
+            .is_some(),
+        "L1 must auto-background a blocking nested agent so the Operator can type"
+    );
+
+    let effect = agent.take_send_blocking_subagent_to_background().expect(
+        "Ctrl+B / send-to-background must still send a blocking subagent to the background",
+    );
+    assert!(
+        matches!(
+            effect,
+            Effect::DemoteToBackground { ref tool_call_id, .. }
+                if tool_call_id == "task-tc-1" || tool_call_id == "sa-child-sid"
+        ),
+        "send-to-background must still emit DemoteToBackground, got {effect:?}"
+    );
+    assert!(
+        !agent.has_running_foreground_subagent(),
+        "send-to-background must move the blocking subagent to the background"
+    );
+}
+
+/// Operator 2026-10-23: a blocking `get_command_or_subagent_output` wait is
+/// an agent blocking the L1 context. Keep send-to-background. Also
+/// auto-background so the Operator box is not stuck.
+#[test]
+fn send_blocking_get_command_or_subagent_output_wait_to_background_is_kept() {
+    let mut agent = make_agent();
+    agent.session.session_id = Some(agent_client_protocol::SessionId::new("test-session"));
+    agent.session.state = AgentState::TurnRunning;
+    simulate_task_output_wait(&mut agent, "sa-child-sid");
+    assert!(
+        agent.can_send_to_background(),
+        "send-to-background for a blocking get_command_or_subagent_output wait must still exist"
+    );
+    let auto = agent
+        .take_l1_blocking_auto_background()
+        .expect("L1 must auto-background a blocking nested wait");
+    assert!(
+        matches!(
+            auto,
+            Effect::DemoteToBackground { ref tool_call_id, .. } if tool_call_id == "wait-1"
+        ),
+        "auto-background must not be deleted as a stand-in for send-to-background, got {auto:?}"
+    );
+    assert!(
+        agent
+            .session
+            .tracker
+            .blocking_subagent_tool_call_id()
+            .is_none(),
+        "auto-background must clear the blocking get_command_or_subagent_output wait"
+    );
 }

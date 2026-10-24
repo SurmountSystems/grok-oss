@@ -353,6 +353,28 @@ fn pinned_filters(
     }
 }
 
+/// Operator 2026-10-23 / GitHub #245: `DenyEntry::covers` already excepts a
+/// session compaction segment (`segment_*.md` / `INDEX.md`). Seatbelt last-match
+/// still returns EACCES unless the same carve-out is in the read-deny filter.
+fn except_session_compaction_store(
+    tree: &Path,
+    filters: Vec<PathFilter>,
+) -> Result<Vec<PathFilter>, SandboxCommandError> {
+    let mut store = glob_filters(tree, "**/compaction/INDEX.md")?;
+    store.extend(glob_filters(tree, "**/compaction/segment_*.md")?);
+    let not_store = PathFilter::Not(Box::new(PathFilter::Any(store)));
+    Ok(filters
+        .into_iter()
+        .map(|filter| match filter {
+            PathFilter::All(mut parts) => {
+                parts.push(not_store.clone());
+                PathFilter::All(parts)
+            }
+            other => PathFilter::All(vec![other, not_store.clone()]),
+        })
+        .collect())
+}
+
 fn render_network(
     out: &mut ProfileBuilder,
     policy: &SandboxPolicy,
@@ -384,7 +406,12 @@ fn render_mandatory(
     let mut read_filters: Vec<Vec<PathFilter>> = Vec::with_capacity(policy.read.deny().len());
     for (index, entry) in policy.read.deny().iter().enumerate() {
         let pinned = Pinned::from(entry);
-        let filters = pinned_filters(out, &pinned, &format!("DENY_{index}"))?;
+        let mut filters = pinned_filters(out, &pinned, &format!("DENY_{index}"))?;
+        if let DenyEntry::TreeExcept { tree, .. } = entry
+            && tree.file_name() == Some(std::ffi::OsStr::new("sessions"))
+        {
+            filters = except_session_compaction_store(tree, filters)?;
+        }
         if denies.contains(&pinned) {
             deny_writes_links_and_sockets(out, &filters);
         }

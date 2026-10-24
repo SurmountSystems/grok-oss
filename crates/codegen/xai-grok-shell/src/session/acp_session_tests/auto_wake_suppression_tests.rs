@@ -1638,6 +1638,105 @@ async fn promotion_drops_reported_wake_without_running_turn() {
         })
         .await;
 }
+
+/// Screenshot class (GitHub #246): after `/rebuild` resume at 6/500K, cancelled
+/// nested runners left a `task_wake` (`subagent-completed-*`) holding the
+/// sample until `queued_user_promotion`. Chrome sat `waiting_model` for
+/// 311599 ms with no HTTP POST and no first token.
+///
+/// A queued human prompt must preempt that wake so the first POST is the
+/// continue-interrupted turn, not a five-minute empty wait.
+#[tokio::test(flavor = "current_thread")]
+async fn after_rebuild_resume_cancelled_nested_task_wake_must_not_hold_queued_user_from_posting() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            if let Some(gate) = &actor.tool_context.task_wake_suppressed {
+                gate.set(true);
+            }
+            actor.state.lock().await.notifications_suppressed = true;
+            let (respond_to, mut wake_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(
+                        vec![],
+                        "subagent-completed-cancelled-l2",
+                        respond_to,
+                    )
+                })
+                .await;
+            {
+                let mut state = actor.state.lock().await;
+                state.running_task =
+                    Some(running_task_stub("subagent-completed-cancelled-l2"));
+            }
+            let (respond_to, mut user_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(vec![], "user-continue-after-rebuild", respond_to)
+                })
+                .await;
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            {
+                let mut state = actor.state.try_lock().expect("uncontended test state");
+                assert_eq!(
+                    state.running_prompt_id(),
+                    Some("user-continue-after-rebuild"),
+                    "rebuild/resume must promote the queued user so the first POST is not held by task_wake until queued_user_promotion; running={:?}",
+                    state.running_prompt_id()
+                );
+                let queued: Vec<&str> = state
+                    .pending_inputs
+                    .iter()
+                    .map(|i| i.prompt_id.as_str())
+                    .collect();
+                assert_eq!(
+                    queued.first().copied(),
+                    Some("user-continue-after-rebuild"),
+                    "human continue-interrupted must be the front, not the cancelled nested wake, got {queued:?}"
+                );
+                assert!(
+                    !queued.contains(&"subagent-completed-cancelled-l2"),
+                    "cancelled nested task_wake must not keep the sample slot, got {queued:?}"
+                );
+                if let Some(task) = state.running_task.take() {
+                    task.abort();
+                }
+            }
+            assert!(
+                actor
+                    .tool_context
+                    .task_wake_suppressed
+                    .as_ref()
+                    .is_some_and(|gate| !gate.get()),
+                "queued_user_promotion must clear the task_wake gate so Waiting for the model is a live POST, not a 311599 ms hole"
+            );
+            assert!(
+                !actor.state.lock().await.notifications_suppressed,
+                "queued_user_promotion must clear notifications_suppressed"
+            );
+            assert!(
+                matches!(
+                    wake_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    }))
+                ),
+                "the cancelled nested wake must leave the queue so it cannot hold the sample"
+            );
+            assert!(
+                matches!(user_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "the promoted user turn must still be the in-flight sample"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn preempted_wake_is_redelivered_by_next_between_turn_drain() {
     let local = tokio::task::LocalSet::new();

@@ -811,7 +811,9 @@ pub struct TasksPane {
     /// Full row hit targets for a single left click that opens the task.
     /// Kill and view buttons are smaller rects checked first.
     pub row_hit_rects: Vec<(TaskEntryId, Rect)>,
-    /// Completed child sessions hidden from this list. A running attempt shows again.
+    /// Child sessions hidden from this list by dock `[clear]`. A live attempt
+    /// with no terminal host status shows again; a stale `is_running()` leftover
+    /// stays hidden.
     cleared_completed_ids: HashSet<String>,
     /// Hit target for `[clear]` on the Subagents header.
     pub clear_button_rect: Option<Rect>,
@@ -1042,10 +1044,10 @@ impl TasksPane {
             if skip_duplicate_running.contains(info.child_session_id.as_ref()) {
                 continue;
             }
-            if !info.is_running()
-                && self
-                    .cleared_completed_ids
-                    .contains(info.child_session_id.as_ref())
+            if self
+                .cleared_completed_ids
+                .contains(info.child_session_id.as_ref())
+                && info.should_hide_on_dock_clear()
             {
                 continue;
             }
@@ -1241,6 +1243,23 @@ impl TasksPane {
                 .filter(|run| !run.is_active() && !run.is_terminal())
                 .count(),
         }
+    }
+    /// Running and total Subagents rows the dock list currently paints.
+    pub(crate) fn listed_subagent_counts(&self) -> (usize, usize) {
+        let mut total = 0usize;
+        let mut running = 0usize;
+        for item in &self.items {
+            if let TaskEntry::Agent {
+                running: is_run, ..
+            } = item
+            {
+                total += 1;
+                if *is_run {
+                    running += 1;
+                }
+            }
+        }
+        (running, total)
     }
     pub fn hide_completed_subagent(&mut self, child_session_id: &str) {
         self.cleared_completed_ids
@@ -1675,12 +1694,10 @@ impl TasksPane {
     fn listed_completed_subagent(&self, subagents: &HashMap<String, SubagentInfo>) -> bool {
         self.items.iter().any(|entry| match entry {
             TaskEntry::Agent {
-                running: false,
-                child_session_id,
-                ..
+                child_session_id, ..
             } => subagents
                 .get(child_session_id)
-                .is_some_and(SubagentInfo::terminal_status_is_completed),
+                .is_some_and(SubagentInfo::should_hide_on_dock_clear),
             _ => false,
         })
     }
@@ -2156,6 +2173,7 @@ mod tests {
             subagent_type: Arc::from("explore"),
             finished: false,
             status: None,
+            from_occupancy_restore: false,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
@@ -2198,6 +2216,24 @@ mod tests {
             worktree_path: None,
             transcript: Default::default(),
         }
+    }
+    fn make_info_with(child: &str, desc: &str, terminal: Option<&str>) -> SubagentInfo {
+        let mut info = make_info();
+        info.subagent_id = Arc::from(format!("sa-{child}"));
+        info.child_session_id = Arc::from(child);
+        info.description = Arc::from(desc);
+        if let Some(status) = terminal {
+            let status: Arc<str> = Arc::from(status);
+            info.status = Some(status.clone());
+            info.attempt.status = Some(status);
+        }
+        info
+    }
+    fn listed_agent_count(pane: &TasksPane) -> usize {
+        pane.items
+            .iter()
+            .filter(|entry| matches!(entry, TaskEntry::Agent { .. }))
+            .count()
     }
     fn make_bg_task(task_id: &str, command: &str, status: BgTaskStatus) -> BgTaskState {
         BgTaskState {
@@ -2918,6 +2954,65 @@ mod tests {
         };
         assert!(header_text.contains("Subagents"), "got: {header_text}");
         assert!(header_text.contains('1'), "count in header: {header_text}");
+    }
+    /// Operator contract: after dock `[clear]`, leftover finished/ghost
+    /// subagent rows must not keep hundreds of Subagents when the live list is 1.
+    /// Stale `is_running()` must not keep those leftover rows.
+    #[test]
+    fn dock_clear_drops_ghost_running_looking_leftover_rows_so_live_list_is_one() {
+        let mut pane = TasksPane::new();
+        let mut subagents = HashMap::new();
+        for i in 0..330 {
+            let id = format!("ghost-{i}");
+            subagents.insert(
+                id.clone(),
+                make_info_with(&id, &format!("ghost leftover {i}"), Some("completed")),
+            );
+        }
+        subagents.insert(
+            "live-1".into(),
+            make_info_with("live-1", "live nested goal plan writer", None),
+        );
+        pane.sync(
+            &std::collections::BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            &[],
+        );
+        assert_eq!(
+            listed_agent_count(&pane),
+            331,
+            "setup: 330 ghost running-looking leftover rows plus 1 live row"
+        );
+        for i in 0..330 {
+            pane.hide_completed_subagent(&format!("ghost-{i}"));
+        }
+        pane.sync(
+            &std::collections::BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            &[],
+        );
+        assert_eq!(
+            listed_agent_count(&pane),
+            1,
+            "dock [clear] must drop ghost running-looking leftover rows so the live Subagents list is 1, not hundreds"
+        );
+        let header_text: String = match pane_entry(&pane, 0) {
+            TaskEntry::Header { styled, .. } => {
+                styled.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            _ => panic!("expected Subagents header"),
+        };
+        assert!(header_text.contains("Subagents"), "got: {header_text}");
+        assert!(
+            header_text.contains(" 1") || header_text.ends_with('1'),
+            "dock Subagents count must be 1 after [clear], got: {header_text}"
+        );
+        assert!(
+            !header_text.contains("330") && !header_text.contains("331"),
+            "dock must not keep hundreds of leftover rows, got: {header_text}"
+        );
     }
     #[test]
     fn toggle_group_hides_and_shows_items() {

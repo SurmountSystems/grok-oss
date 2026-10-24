@@ -154,9 +154,13 @@ pub struct ScrollbackState {
     /// View mode: all turns or single turn.
     view_mode: ViewMode,
 
-    // Cache. Width change invalidates the entire layout cache and triggers a full recompute of entry heights. Resize
-    // events are debounced at the event-loop level so only the final width triggers a rebuild.
+    // Cache. Width change invalidates the entire layout cache and triggers a full recompute of entry heights.
+    // Live-resize skip keeps the last wrap until settle (GitHub #235). Debounce still coalesces paints.
     last_width: u16,
+
+    /// True while `Event::Resize` is still arriving (event-loop debounce not yet fired).
+    /// Conversation wrap is skipped until [`Self::settle_live_resize`].
+    live_resize: bool,
 
     /// Layout cache for navigation (entry heights, prompt descriptors).
     layout_cache: Option<LayoutCache>,
@@ -214,6 +218,11 @@ pub struct ScrollbackState {
     #[cfg(test)]
     layout_rebuilds: usize,
 
+    /// Test-only count of width-change wrap rebuilds (`invalidate_width_caches` + layout cache).
+    /// Live resize must not bump this on every SIGWINCH.
+    #[cfg(test)]
+    width_wraps: usize,
+
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<std::path::PathBuf>,
 }
@@ -254,6 +263,7 @@ impl ScrollbackState {
             current_turn: None,
             view_mode: ViewMode::AllTurns,
             last_width: 0,
+            live_resize: false,
             layout_cache: None,
             structural_scroll_anchor: None,
             thinking_display_mode: if crate::appearance::cache::load_always_expand_thinking() {
@@ -273,6 +283,8 @@ impl ScrollbackState {
             content_generation: 0,
             #[cfg(test)]
             layout_rebuilds: 0,
+            #[cfg(test)]
+            width_wraps: 0,
             cwd: None,
         }
     }
@@ -1413,6 +1425,28 @@ impl ScrollbackState {
 
     // Widget Helpers (used by ScrollbackPane widget)
 
+    /// SIGWINCH path: skip conversation wrap until the size settles.
+    /// A dragged window fires a stream of widths; re-wrapping every entry on each one hitches.
+    pub fn note_live_resize(&mut self) {
+        self.live_resize = true;
+    }
+
+    /// Debounce fired, or a non-resize input arrived. The next [`Self::prepare_layout`] rebuilds
+    /// at the pending width (one wrap, not one per SIGWINCH).
+    pub fn settle_live_resize(&mut self) {
+        self.live_resize = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_resize_for_test(&self) -> bool {
+        self.live_resize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn width_wraps_for_test(&self) -> usize {
+        self.width_wraps
+    }
+
     /// The one pre-render mutation point: refresh viewport size, rebuild the layout cache if needed, then apply follow-mode scroll.
     /// Callers must not mutate layout elsewhere or heights and scroll position drift from what is painted.
     pub fn prepare_layout(&mut self, width: u16, height: u16) -> bool {
@@ -1436,6 +1470,15 @@ impl ScrollbackState {
         // Only the same-width full rebuild below applies it
         let structural_anchor = self.structural_scroll_anchor.take();
 
+        // Live resize (GitHub #235): keep the last wrapped conversation body.
+        // SIGWINCH streams widths; re-wrapping every entry on each one hitches typing.
+        // First layout still wraps. After settle, Case 1 runs once at the pending width.
+        // Viewport height already follows the new chrome size.
+        if self.live_resize && self.layout_cache.is_some() && width != self.last_width {
+            self.structural_scroll_anchor = structural_anchor;
+            return false;
+        }
+
         // Case 1: Cache missing or width changed, full rebuild
         if self.layout_cache.is_none() || width != self.last_width || self.full_settlement_pending {
             // A width change re-wraps every entry. The absolute wrapped-row scroll_offset would then point at different
@@ -1458,6 +1501,10 @@ impl ScrollbackState {
                     entry.invalidate_width_caches();
                 }
                 self.last_width = width;
+                #[cfg(test)]
+                {
+                    self.width_wraps = self.width_wraps.saturating_add(1);
+                }
             }
             if self.full_settlement_pending {
                 self.layout_cache = None;
@@ -3687,6 +3734,95 @@ mod tests {
         assert!(
             !state.prepare_layout(50, 12),
             "stable width after Case 1 is Case 3"
+        );
+    }
+
+    fn large_conversation_for_resize() -> ScrollbackState {
+        let mut state = ScrollbackState::new();
+        let wrap_line =
+            "This conversation turn wraps across several columns when the window is dragged. "
+                .repeat(8);
+        for i in 0..80 {
+            state.push_block(RenderBlock::user_prompt(format!(
+                "question {i}: {wrap_line}"
+            )));
+            state.push_block(RenderBlock::agent_message(format!(
+                "answer {i}: {wrap_line}"
+            )));
+        }
+        state
+    }
+
+    /// Operator contract (GitHub #235): resizing a large conversation must not hitch
+    /// on every SIGWINCH. Main conversation wrap, not overlay-only. Wrap once after settle.
+    #[test]
+    fn large_conversation_live_resize_does_not_wrap_on_every_sigwinch() {
+        let mut state = large_conversation_for_resize();
+        assert!(
+            state.len() >= 160,
+            "fixture must be a large conversation, got {} entries",
+            state.len()
+        );
+        assert!(
+            state.prepare_layout(80, 24),
+            "first layout must wrap the conversation body"
+        );
+        let wraps = state.width_wraps_for_test();
+        assert!(wraps >= 1, "first layout must count as a width wrap");
+
+        state.note_live_resize();
+        for width in [79u16, 78, 77, 76, 75, 90, 110, 120] {
+            assert!(
+                !state.prepare_layout(width, 24),
+                "live resize must not rebuild conversation wrap on every SIGWINCH width"
+            );
+        }
+        assert_eq!(
+            state.width_wraps_for_test(),
+            wraps,
+            "resizing a large conversation must not hitch on every SIGWINCH"
+        );
+
+        state.settle_live_resize();
+        assert!(
+            state.prepare_layout(120, 24),
+            "exactly one conversation wrap after the drag settles, not one per SIGWINCH"
+        );
+        assert_eq!(
+            state.width_wraps_for_test(),
+            wraps + 1,
+            "settle must wrap the conversation body once at the final width"
+        );
+    }
+
+    /// Repeated prepare_layout at changing widths without settle must not accumulate
+    /// conversation wraps (the spin: CPU pegged on wrap while the window stays up).
+    #[test]
+    fn large_conversation_live_resize_does_not_spin_on_repeated_width_steps() {
+        let mut state = large_conversation_for_resize();
+        assert!(state.prepare_layout(80, 24));
+        let wraps = state.width_wraps_for_test();
+        state.note_live_resize();
+        for step in 0..40u16 {
+            assert!(
+                !state.prepare_layout(80 - (step % 20), 24),
+                "40 mid-drag width steps must not wrap the conversation body"
+            );
+        }
+        assert_eq!(
+            state.width_wraps_for_test(),
+            wraps,
+            "resizing a large conversation must not hitch on every SIGWINCH"
+        );
+        state.settle_live_resize();
+        assert!(
+            state.prepare_layout(70, 24),
+            "typing/settle after the drag still gets one wrap at the new width"
+        );
+        assert_eq!(
+            state.width_wraps_for_test(),
+            wraps + 1,
+            "settle must wrap once, not once per SIGWINCH"
         );
     }
 

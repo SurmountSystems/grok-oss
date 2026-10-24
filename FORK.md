@@ -2037,6 +2037,16 @@ subagents are maximally token efficient.
 
 **Talk.** All layers can talk to the layers above and below.
 
+**A finished nested agent is a same-turn next action (operator 2026-10-23).**
+When an L2 or L3 finishes, L1 reports and starts the next named action
+in that same turn. Read the short report. Tell the Operator what landed.
+Then spawn the leftover, start the one `just check-remote`, close the
+board item, or name the blocker. Silence after a finish looks like a
+stall. Waiting for the next Operator ping is a miss. This does not
+weaken fire-and-return on a live compile. Dual-pin: this heading;
+[`AGENTS.md`](AGENTS.md) § *Agent depth*; host `~/.grok/AGENTS.md`
+§ *Report finished nested work the same turn*.
+
 **Cost.** All tokens in an L3 contribute to the token costs of the L2.
 That is cost, not the L1 context chip. Nested L2 and L3 windows stay
 out of the L1 context chip. Each L2 Subagents-list row is a live atomic
@@ -2686,6 +2696,8 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
 - After auth recovery claims success, a nested turn resumes with the live sampler JWT the parent is talking with. It does not give up after 3 retries while that JWT is available. Named tests: `nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt`, `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token`. Nested POST stamps `InheritedSessionBearerResolver`, not `SamplingConfig.api_key`. A recovered AuthManager token must not win on that wire. The inherited parent JWT wins over `current_wire_valid` in `nested_request_bearer`.
 - Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the parent session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. A parent JWT that actually expired still paints that sentence once.
+
+**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Never tell the Operator to /login. Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
 
 **Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
 

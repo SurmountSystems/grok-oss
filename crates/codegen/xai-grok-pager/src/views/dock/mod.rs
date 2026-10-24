@@ -30,7 +30,7 @@ const MORE_INDENT: &str = "   ";
 /// already insets its own content by two, so the dock adds the last one.
 const QUEUE_BODY_INDENT: u16 = 1;
 const STOP_LABEL: &str = "[stop]";
-/// Subagents header control. Removes completed rows from this list.
+/// Subagents header control. Removes leftover finished and ghost running-looking rows from this list.
 pub const CLEAR_LABEL: &str = "[clear]";
 
 /// Seeded at startup and on `x.ai/settings/update` from Feature::Dock.
@@ -565,13 +565,16 @@ fn paint_row(
 
 fn dock_row_is_completed(row: &DockRow) -> bool {
     !row.spinning
-        && row
-            .activity
-            .as_deref()
-            .is_some_and(|activity| activity.eq_ignore_ascii_case("completed"))
+        && row.activity.as_deref().is_some_and(|activity| {
+            activity.eq_ignore_ascii_case("completed")
+                || activity.eq_ignore_ascii_case("failed")
+                || activity.eq_ignore_ascii_case("cancelled")
+                || activity.eq_ignore_ascii_case("canceled")
+        })
 }
 
-/// Right edge of the Subagents header when that section lists a completed row.
+/// Right edge of the Subagents header when that section lists a leftover
+/// finished or ghost terminal-status row.
 pub fn subagent_clear_rect(area: Rect, data: &DockData) -> Option<Rect> {
     let width = CLEAR_LABEL.width() as u16;
     if area.width < width || area.height == 0 {

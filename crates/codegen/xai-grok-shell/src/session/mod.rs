@@ -532,6 +532,7 @@ pub(crate) mod goal_classifier;
 pub(crate) mod goal_evaluator;
 pub(crate) mod goal_next_step;
 pub(crate) mod goal_orchestrator;
+pub(crate) mod goal_plan;
 pub(crate) mod goal_planner;
 pub(crate) mod goal_role_tools;
 pub(crate) mod goal_stop_detector;

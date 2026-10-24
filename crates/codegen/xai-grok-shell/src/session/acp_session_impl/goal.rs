@@ -784,11 +784,101 @@ impl SessionActor {
         )
     }
 
+    /// Rebuild the actor-held GoalPlan from a persisted orchestration on session restore.
+    /// Does not arm post-plan retry: restore must not re-run the planner.
+    pub(crate) fn goal_plan_from_restored_orchestration(
+        restored: Option<&crate::session::goal_tracker::GoalOrchestration>,
+    ) -> crate::session::goal_plan::GoalPlan {
+        let mut plan = crate::session::goal_plan::GoalPlan::new();
+        let Some(snapshot) = restored else {
+            return plan;
+        };
+        let objective = snapshot.objective.trim();
+        if objective.is_empty() {
+            return plan;
+        }
+        plan.restore(crate::session::goal_plan::GoalPlanSnapshot {
+            goals: vec![objective.to_string()],
+            post_plan_retry_pending: false,
+            post_plan_retry_count: 0,
+            extra: Vec::new(),
+        });
+        plan
+    }
+
+    /// Apply `/goal <objective>` to the actor-held GoalPlan. Not a throwaway `GoalPlan::new()`.
+    pub(crate) fn setup_actor_goal_plan(
+        &self,
+        objective: &str,
+    ) -> crate::session::goal_plan::GoalPlanReply {
+        self.goal_plan
+            .lock()
+            .apply_user_goal_message(&format!("/goal {objective}"))
+    }
+
+    /// GoalClear on the actor-held GoalPlan. Not a throwaway `GoalPlan::new()`.
+    pub(crate) fn clear_actor_goal_plan(&self) -> crate::session::goal_plan::GoalPlanReply {
+        self.goal_plan.lock().give_up()
+    }
+
+    pub(crate) fn snapshot_actor_goal_plan(&self) -> crate::session::goal_plan::GoalPlanSnapshot {
+        self.goal_plan.lock().snapshot()
+    }
+
+    pub(crate) fn restore_actor_goal_plan(
+        &self,
+        snapshot: crate::session::goal_plan::GoalPlanSnapshot,
+    ) {
+        self.goal_plan.lock().restore(snapshot);
+    }
+
+    /// Same `/goal` prompt on an in-flight goal resumes it. Complete and budget-limited still create.
+    fn same_prompt_resumes_existing_goal(&self, objective: &str) -> bool {
+        use crate::session::goal_tracker::GoalStatus;
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return false;
+        }
+        let tracker = self.goal_tracker.lock();
+        let Some(orchestration) = tracker.snapshot() else {
+            return false;
+        };
+        if matches!(
+            orchestration.status,
+            GoalStatus::Complete | GoalStatus::BudgetLimited
+        ) {
+            return false;
+        }
+        orchestration.objective.trim() == objective
+    }
+
+    /// Active goal already has PLAN_FILE. A later `/goal` reminds of that planned
+    /// work instead of `create_goal` over the live goal.
+    fn has_active_planned_goal(&self) -> bool {
+        use crate::session::goal_tracker::GoalStatus;
+        self.goal_tracker
+            .lock()
+            .snapshot()
+            .is_some_and(|o| o.status == GoalStatus::Active && o.plan_file.is_some())
+    }
+
     pub(super) async fn setup_goal(
         &self,
         objective: &str,
         token_budget: Option<i64>,
     ) -> GoalSetupOutcome {
+        if self.same_prompt_resumes_existing_goal(objective) || self.has_active_planned_goal() {
+            return match self.resume_goal().await {
+                GoalResumeOutcome::Inference { reminder, .. } => {
+                    GoalSetupOutcome::Inference { reminder }
+                }
+                GoalResumeOutcome::Message(msg) => GoalSetupOutcome::Message(msg),
+            };
+        }
+        let applied = self.setup_actor_goal_plan(objective);
+        let Some(objective) = self.goal_plan.lock().primary_goal().map(str::to_owned) else {
+            return GoalSetupOutcome::Message("Could not start the goal.".to_string());
+        };
         let goal_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
@@ -797,7 +887,7 @@ impl SessionActor {
                 .await;
         self.goal_tracker.lock().create_goal(
             goal_id,
-            objective.to_owned(),
+            objective.clone(),
             token_budget,
             token_baseline,
             created_at,
@@ -822,10 +912,21 @@ impl SessionActor {
             );
         }
 
-        self.maybe_run_goal_planner(objective).await;
+        if applied.post_plan_retry {
+            self.maybe_run_goal_planner(&objective).await;
+        }
         if let Some(msg) = self.planner_pause_short_circuit_message("Goal paused.") {
             return GoalSetupOutcome::Message(msg);
         }
+
+        // After Planned, GoalPlan / tracker name the written work, not the
+        // original complaint captured before the planner.
+        let reminder_objective = self
+            .goal_plan
+            .lock()
+            .primary_goal()
+            .map(str::to_owned)
+            .unwrap_or(objective);
 
         let names = self.resolve_goal_tool_names().await;
         let planner_enabled = self.goal_planner_enabled;
@@ -838,7 +939,7 @@ impl SessionActor {
                 let scratch = scratch_dir.to_string_lossy();
                 if self.goal_runs_on_workflow_engine() {
                     render_goal_rules(
-                        objective,
+                        &reminder_objective,
                         &names,
                         "",
                         "",
@@ -848,7 +949,7 @@ impl SessionActor {
                     )
                 } else {
                     render_goal_rules_legacy(
-                        objective,
+                        &reminder_objective,
                         &names,
                         "",
                         "",
@@ -1016,6 +1117,7 @@ impl SessionActor {
         };
 
         let planner_enabled = self.goal_planner_enabled;
+        let planned = self.goal_plan.lock().primary_goal().map(str::to_owned);
         let reminder = {
             let mut tracker = self.goal_tracker.lock();
             tracker.account_elapsed();
@@ -1030,9 +1132,13 @@ impl SessionActor {
                 let scratch_dir =
                     crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
                 let scratch = scratch_dir.to_string_lossy();
+                let reminder_objective = planned
+                    .as_deref()
+                    .filter(|goal| !goal.is_empty())
+                    .unwrap_or(o.objective.as_str());
                 let body = if self.goal_runs_on_workflow_engine() {
                     render_goal_rules(
-                        &o.objective,
+                        reminder_objective,
                         &names,
                         &block_recap,
                         &goal_state,
@@ -1042,7 +1148,7 @@ impl SessionActor {
                     )
                 } else {
                     render_goal_rules_legacy(
-                        &o.objective,
+                        reminder_objective,
                         &names,
                         &block_recap,
                         &goal_state,

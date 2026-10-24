@@ -67,9 +67,9 @@ pub(super) fn default_actions(
     let local_mac_vscode = in_vscode_family && !ctx.is_ssh && cfg!(target_os = "macos");
     let ctrl_dot_unreliable = ctrl_dot_unreliable();
     let send_to_background_help = if screen_mode.is_minimal() {
-        "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack background work with /tasks.\nOnly meaningful while a foreground Execute is actually running."
+        "Sends a blocking subagent to the background, or detaches a running foreground Execute, so you can type in the Operator box.\nTrack background work with /tasks.\nGitHub #243: keep this capability; L1 also auto-backgrounds agents that block the Operator box."
     } else {
-        "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack and resume it from the tasks pane (Ctrl+G).\nOnly meaningful while a foreground Execute is actually running."
+        "Sends a blocking subagent to the background, or detaches a running foreground Execute, so you can type in the Operator box.\nTrack and resume it from the tasks pane (Ctrl+G).\nGitHub #243: keep this capability; L1 also auto-backgrounds agents that block the Operator box."
     };
 
     let mut actions = vec![

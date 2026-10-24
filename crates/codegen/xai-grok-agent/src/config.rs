@@ -124,13 +124,15 @@ fn bash_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::BashTool).with_name("run_terminal_command")
 }
 /// Task/subagent tool with clearer model-facing names: `task` becomes `spawn_subagent` and `run_in_background` becomes `background`.
-fn task_tool_config() -> ToolConfig {
+/// GitHub #236: nested L2 injection reuses this so the advertised name stays native `spawn_subagent`.
+pub(crate) fn task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::TaskTool)
         .with_name("spawn_subagent")
         .with_param_rename("run_in_background", "background")
 }
 /// Task output tool renamed for clarity: `get_task_output` becomes `get_command_or_subagent_output`.
-fn task_output_tool_config() -> ToolConfig {
+/// GitHub #236: nested L2 injection reuses this so Task's required sibling is advertised.
+pub(crate) fn task_output_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::TaskOutputTool).with_name("get_command_or_subagent_output")
 }
 /// `wait_tasks` becomes `wait_commands_or_subagents`.
@@ -138,7 +140,8 @@ fn wait_tasks_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::WaitTasksTool).with_name("wait_commands_or_subagents")
 }
 /// `kill_task` becomes `kill_command_or_subagent`.
-fn kill_task_tool_config() -> ToolConfig {
+/// GitHub #236: nested L2 injection reuses this so Task's required sibling is advertised.
+pub(crate) fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
 /// Complete workspace-executable toolset for hub registration.

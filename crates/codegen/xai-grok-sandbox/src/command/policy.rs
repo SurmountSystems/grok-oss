@@ -93,6 +93,41 @@ pub enum DenyEntry {
     },
 }
 
+/// Operator 2026-10-23 / GitHub #245: a session compaction segment
+/// (`$GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction/segment_*.md` or
+/// `INDEX.md`) must stay readable. The sessions tree-except read deny is for
+/// other workspaces' transcripts, not the compaction store the product points
+/// the agent at. `pub` so in-process `read_file` on Linux can skip a FileSystem
+/// adapter that still returns EACCES after `would_allow(FsRead)` already allows
+/// the path. Seatbelt last-match is not that Linux prevent.
+pub fn is_session_compaction_store_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if parent.file_name() != Some(std::ffi::OsStr::new("compaction")) {
+        return false;
+    }
+    if !path
+        .components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new("sessions"))
+    {
+        return false;
+    }
+    if name == "INDEX.md" {
+        return true;
+    }
+    let Some(digits) = name
+        .strip_prefix("segment_")
+        .and_then(|n| n.strip_suffix(".md"))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 impl DenyEntry {
     /// Whether the entry denies `path`, as the floor's [`is_within`] compares (APFS case, Unicode
     /// form and `/private` alias on macOS). A glob that does not parse covers every path, so the
@@ -107,7 +142,9 @@ impl DenyEntry {
                 strip_within(path, root).is_some_and(|below| glob.is_match(&below))
             }
             DenyEntry::TreeExcept { tree, except } => {
-                is_within(path, tree) && !is_within(path, except)
+                is_within(path, tree)
+                    && !is_within(path, except)
+                    && !is_session_compaction_store_path(path)
             }
         }
     }

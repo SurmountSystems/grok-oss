@@ -280,6 +280,22 @@ pub fn admit_spawn(parent_depth: u32, max_depth: u32) -> SpawnAdmission {
     }
 }
 
+/// Native `spawn_subagent` (Task) as the nested L2 list must advertise it.
+/// GitHub #236: injection, not retain-only. Explore and other child toolsets omit Task.
+fn native_spawn_subagent_tool() -> ToolConfig {
+    ToolConfig::from(&xai_grok_tools::implementations::grok_build::TaskTool)
+        .with_name("spawn_subagent")
+        .with_param_rename("run_in_background", "background")
+}
+
+fn toolset_has_native_spawn_subagent(tools: &[ToolConfig]) -> bool {
+    tools.iter().any(|tool| {
+        tool.kind == Some(ToolKind::Task)
+            || tool.name_override.as_deref() == Some("spawn_subagent")
+            || tool.id.rsplit(':').next() == Some("task")
+    })
+}
+
 /// Apply capability filtering and recursion depth to the exact production definition toolset.
 pub fn apply_child_tool_policy(
     definition: &mut AgentDefinition,
@@ -295,22 +311,32 @@ pub fn apply_child_tool_policy(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
-    } else if capability_mode.is_none()
-        && definition.is_builtin_grok_build()
-        && definition
-            .tool_config
-            .tools
-            .iter()
-            .any(|tool| tool.kind == Some(ToolKind::Edit))
-    {
-        // Only the stock Grok Build parent, when it may still spawn, drops
-        // read, search, and edit. general-purpose keeps those tools and only loses workflow.
-        definition.tool_config.tools.retain(|tool| {
-            !matches!(
-                tool.kind,
-                Some(ToolKind::Search | ToolKind::Read | ToolKind::Edit | ToolKind::Write)
-            )
-        });
+    } else {
+        // GitHub #236: an L2 spawned from L1 must have native spawn_subagent.
+        // Retain is not enough when the child toolset never declared Task.
+        if !toolset_has_native_spawn_subagent(&definition.tool_config.tools) {
+            definition
+                .tool_config
+                .tools
+                .push(native_spawn_subagent_tool());
+        }
+        if capability_mode.is_none()
+            && definition.is_builtin_grok_build()
+            && definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit))
+        {
+            // Only the stock Grok Build parent, when it may still spawn, drops
+            // read, search, and edit. general-purpose keeps those tools and only loses workflow.
+            definition.tool_config.tools.retain(|tool| {
+                !matches!(
+                    tool.kind,
+                    Some(ToolKind::Search | ToolKind::Read | ToolKind::Edit | ToolKind::Write)
+                )
+            });
+        }
     }
     definition.tool_config.tools.retain(|tool| {
         !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
@@ -646,6 +672,73 @@ mod tests {
                 .iter()
                 .any(|tool| tool.kind == Some(ToolKind::Task)),
             "L2 must keep spawn_subagent (Task) so it can spawn L3"
+        );
+    }
+
+    /// GitHub #236: retain-only left explore (and any child toolset without Task)
+    /// with todo_write / wait / kill and no native spawn_subagent. The model then
+    /// called search_tool / use_tool spawn_subagent as if spawn were MCP.
+    #[test]
+    fn l2_spawned_from_l1_injects_native_spawn_subagent_when_toolset_omitted_it() {
+        let max_depth = xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+        assert_eq!(max_depth, 2, "MAX_SUBAGENT_DEPTH stays 2");
+        let mut explore = AgentDefinition::explore();
+        assert!(
+            !explore
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "premise: explore omits Task so retain-only cannot advertise spawn_subagent"
+        );
+        apply_child_tool_policy(&mut explore, None, spawned_agent_may_spawn(0, 1, max_depth));
+        assert!(
+            toolset_has_native_spawn_subagent(&explore.tool_config.tools),
+            "an L2 spawned from L1 must have native spawn_subagent; ids={:?}",
+            explore
+                .tool_config
+                .tools
+                .iter()
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            explore
+                .tool_config
+                .tools
+                .iter()
+                .find(|tool| tool.kind == Some(ToolKind::Task))
+                .and_then(|tool| tool.name_override.as_deref()),
+            Some("spawn_subagent"),
+            "injected Task must advertise as native spawn_subagent, not MCP use_tool"
+        );
+    }
+
+    /// GitHub #236: injection is depth-1 only. An L3 still cannot spawn. There is no L4.
+    #[test]
+    fn l3_does_not_get_injected_spawn_subagent() {
+        let max_depth = xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+        let mut explore = AgentDefinition::explore();
+        apply_child_tool_policy(&mut explore, None, spawned_agent_may_spawn(1, 2, max_depth));
+        assert!(
+            !toolset_has_native_spawn_subagent(&explore.tool_config.tools),
+            "an L3 still cannot spawn; ids={:?}",
+            explore
+                .tool_config
+                .tools
+                .iter()
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let mut grok = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut grok, None, spawned_agent_may_spawn(1, 2, max_depth));
+        assert!(
+            !grok
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "L3 grok-build must not keep spawn_subagent"
         );
     }
 

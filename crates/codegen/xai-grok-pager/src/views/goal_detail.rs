@@ -22,6 +22,16 @@ use crate::views::progress_bar::progress_bar_spans;
 /// Maximum todo items displayed in the modal before truncation.
 const MAX_TODO_DISPLAY: usize = 15;
 
+/// Overlay Progress is this Goal's items, not the mill session todo board.
+/// Hide-while-tokens-zero-and-goal_created is not enough: that hide turns off
+/// as soon as tokens leave 0, and leftover mill checkmarks are not this planning turn.
+fn progress_todos_for_goal<'a>(
+    goal: &'a GoalDisplayState,
+    _session_todos: &'a [TodoItem],
+) -> &'a [TodoItem] {
+    &goal.progress_items
+}
+
 /// Maximum per-model token rows displayed before a "+N more" summary row.
 const MAX_MODEL_DISPLAY: usize = 6;
 
@@ -347,6 +357,7 @@ fn humanize_event_timestamp(ts: &str) -> String {
 
 /// Compute the overlay area (centered, sized to content, clamped to screen).
 pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem]) -> Rect {
+    let todos = progress_todos_for_goal(goal, todos);
     let width_pct = 0.90f32;
     let preferred_w = (screen.width as f32 * width_pct) as u16;
     let w = preferred_w
@@ -465,6 +476,7 @@ pub fn render_goal_detail(
     active_subagent_tokens: u64,
     hovers: GoalDetailHovers,
 ) -> GoalDetailHits {
+    let todos = progress_todos_for_goal(goal, todos);
     let theme = Theme::current();
     if area.width < 20 || area.height < 6 {
         return GoalDetailHits::default();
@@ -1095,6 +1107,8 @@ mod tests {
             planning: false,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
+            progress_items: Vec::new(),
+            session_todos_at_goal_create: Vec::new(),
         }
     }
 
@@ -2088,13 +2102,14 @@ mod tests {
     fn render_with_todo_items_does_not_panic() {
         let screen = Rect::new(0, 0, 100, 30);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        let goal = make_goal();
+        let mut goal = make_goal();
         let todos = vec![
             make_todo("Setup project", TodoStatus::Completed),
             make_todo("Implement feature", TodoStatus::InProgress),
             make_todo("Write tests", TodoStatus::Pending),
             make_todo("Cancelled task", TodoStatus::Cancelled),
         ];
+        goal.progress_items = todos.clone();
         let area = goal_detail_area(screen, &goal, &todos);
         render_goal_detail(
             &mut buf,
@@ -2119,13 +2134,14 @@ mod tests {
     fn render_with_todos_shows_status_icons() {
         let screen = Rect::new(0, 0, 100, 30);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        let goal = make_goal();
+        let mut goal = make_goal();
         let todos = vec![
             make_todo("done", TodoStatus::Completed),
             make_todo("wip", TodoStatus::InProgress),
             make_todo("todo", TodoStatus::Pending),
             make_todo("skip", TodoStatus::Cancelled),
         ];
+        goal.progress_items = todos.clone();
         let area = goal_detail_area(screen, &goal, &todos);
         render_goal_detail(
             &mut buf,
@@ -2151,10 +2167,11 @@ mod tests {
     fn render_with_overflow_shows_plus_n_more() {
         let screen = Rect::new(0, 0, 100, 50);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        let goal = make_goal();
+        let mut goal = make_goal();
         let todos: Vec<TodoItem> = (0..20)
             .map(|i| make_todo(&format!("Task {i}"), TodoStatus::Pending))
             .collect();
+        goal.progress_items = todos.clone();
         let area = goal_detail_area(screen, &goal, &todos);
         render_goal_detail(
             &mut buf,
@@ -2174,16 +2191,196 @@ mod tests {
         );
     }
 
+    /// Operator: A just-created goal (`Goal created just now`, 0 tokens) must not
+    /// paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk)
+    /// as if they were this planning turn. Stale tracker history must not masquerade
+    /// as current Progress.
+    #[test]
+    fn just_created_goal_must_not_paint_stale_mill_progress_checkmarks() {
+        let screen = Rect::new(0, 0, 100, 50);
+        let mut buf = ratatui::buffer::Buffer::empty(screen);
+        let mut goal = make_goal();
+        goal.objective = "Plan this planning turn".into();
+        goal.status = GoalDisplayStatus::Active;
+        goal.phase = GoalDisplayPhase::Planning;
+        goal.token_budget = None;
+        goal.tokens_used = 0;
+        goal.elapsed_ms = 16_000;
+        goal.current_subagent_role = None;
+        goal.live_subagent_tokens = None;
+        goal.live_context_pct = None;
+        goal.live_turn_count = None;
+        goal.live_tool_call_count = None;
+        goal.live_tokens_by_model = Vec::new();
+        goal.last_event = Some("goal_created".into());
+        goal.last_event_detail = None;
+        goal.last_event_timestamp = Some(chrono::Utc::now().to_rfc3339());
+        goal.token_baseline = 0;
+        goal.finished_subagent_tokens = 0;
+        goal.planning = true;
+        let mill_todos: Vec<TodoItem> = (0..347)
+            .map(|i| make_todo(&format!("Lean 4.35 mill walk {i}"), TodoStatus::Completed))
+            .collect();
+        let area = goal_detail_area(screen, &goal, &mill_todos);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &mill_todos,
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Goal created"),
+            "Recent History must show Goal created just now, got:\n{text}"
+        );
+        assert!(
+            text.contains("just now"),
+            "Recent History must show Goal created just now, got:\n{text}"
+        );
+        assert!(
+            text.contains("0 tokens"),
+            "A just-created goal (`Goal created just now`, 0 tokens) must paint 0 tokens, got:\n{text}"
+        );
+        assert!(
+            !text.contains("+332 more"),
+            "A just-created goal (`Goal created just now`, 0 tokens) must not paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk) as if they were this planning turn. Stale tracker history must not masquerade as current Progress. got:\n{text}"
+        );
+        assert!(
+            !text.contains("Lean 4.35 mill walk"),
+            "A just-created goal (`Goal created just now`, 0 tokens) must not paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk) as if they were this planning turn. Stale tracker history must not masquerade as current Progress. got:\n{text}"
+        );
+        assert!(
+            text.contains("No progress items yet"),
+            "just-created Progress must be empty, not leftover mill todos, got:\n{text}"
+        );
+        let empty_height = goal_detail_area(screen, &goal, &[]).height;
+        assert_eq!(
+            area.height, empty_height,
+            "leftover mill todos must not grow a just-created overlay"
+        );
+    }
+
+    /// Operator: After a just-created Goal, overlay Progress must not paint
+    /// hundreds of older mill session todos even after the first token. Those
+    /// checkmarks are not this planning turn.
+    #[test]
+    fn just_created_goal_must_not_paint_mill_session_todos_after_the_first_token() {
+        let screen = Rect::new(0, 0, 100, 50);
+        let mut buf = ratatui::buffer::Buffer::empty(screen);
+        let mut goal = make_goal();
+        goal.objective = "Plan this planning turn".into();
+        goal.status = GoalDisplayStatus::Active;
+        goal.phase = GoalDisplayPhase::Planning;
+        goal.token_budget = None;
+        goal.tokens_used = 1;
+        goal.elapsed_ms = 16_000;
+        goal.current_subagent_role = None;
+        goal.live_subagent_tokens = None;
+        goal.live_context_pct = None;
+        goal.live_turn_count = None;
+        goal.live_tool_call_count = None;
+        goal.last_event = Some("goal_created".into());
+        goal.last_event_detail = None;
+        goal.last_event_timestamp = Some(chrono::Utc::now().to_rfc3339());
+        goal.token_baseline = 0;
+        goal.finished_subagent_tokens = 0;
+        goal.planning = true;
+        goal.progress_items.clear();
+        let mill_todos: Vec<TodoItem> = (0..347)
+            .map(|i| make_todo(&format!("Lean 4.35 mill walk {i}"), TodoStatus::Completed))
+            .collect();
+        goal.capture_session_todos_at_goal_create(&mill_todos);
+        goal.adopt_goal_progress_from_session_plan(mill_todos.clone());
+        assert!(
+            goal.progress_items.is_empty(),
+            "After a just-created Goal, overlay Progress must not paint hundreds of older mill session todos even after the first token. Those checkmarks are not this planning turn."
+        );
+        let area = goal_detail_area(screen, &goal, &mill_todos);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &mill_todos,
+            0,
+            Some(1),
+            0,
+            GoalDetailHovers::default(),
+        );
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Goal created"),
+            "Recent History must still show Goal created after the first token, got:\n{text}"
+        );
+        assert!(
+            !text.contains("+332 more"),
+            "After a just-created Goal, overlay Progress must not paint hundreds of older mill session todos even after the first token. Those checkmarks are not this planning turn. got:\n{text}"
+        );
+        assert!(
+            !text.contains("Lean 4.35 mill walk"),
+            "After a just-created Goal, overlay Progress must not paint hundreds of older mill session todos even after the first token. Those checkmarks are not this planning turn. got:\n{text}"
+        );
+        assert!(
+            text.contains("No progress items yet"),
+            "After a just-created Goal, overlay Progress must not paint hundreds of older mill session todos even after the first token. Those checkmarks are not this planning turn. got:\n{text}"
+        );
+        let empty_height = goal_detail_area(screen, &goal, &[]).height;
+        assert_eq!(
+            area.height, empty_height,
+            "mill session todos must not grow overlay Progress after the first token"
+        );
+
+        goal.progress_items = vec![make_todo(
+            "Write the plan for this planning turn",
+            TodoStatus::InProgress,
+        )];
+        let mut buf = ratatui::buffer::Buffer::empty(screen);
+        let area = goal_detail_area(screen, &goal, &mill_todos);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &mill_todos,
+            0,
+            Some(1),
+            0,
+            GoalDetailHovers::default(),
+        );
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Write the plan for this planning turn"),
+            "overlay Progress must still paint this Goal's items after the first token, got:\n{text}"
+        );
+        assert!(
+            !text.contains("Lean 4.35 mill walk"),
+            "this Goal's Progress after the first token must not include mill session todos, got:\n{text}"
+        );
+        assert!(
+            !text.contains("+332 more"),
+            "this Goal's Progress after the first token must not include mill session todos, got:\n{text}"
+        );
+        assert!(
+            text.contains("Progress:"),
+            "overlay Progress must not stay forever empty after goal_created when this Goal has items, got:\n{text}"
+        );
+    }
+
     #[test]
     fn goal_detail_area_height_includes_todo_items() {
         let screen = Rect::new(0, 0, 120, 50);
-        let goal = make_goal();
+        let mut goal = make_goal();
         let baseline = goal_detail_area(screen, &goal, &[]).height;
         let todos = vec![
             make_todo("A", TodoStatus::Pending),
             make_todo("B", TodoStatus::Completed),
             make_todo("C", TodoStatus::InProgress),
         ];
+        goal.progress_items = todos.clone();
         // 3 items + header = 4 lines, vs 1 line for empty ("No progress items yet").
         // Net growth = 3.
         let with_todos = goal_detail_area(screen, &goal, &todos).height;

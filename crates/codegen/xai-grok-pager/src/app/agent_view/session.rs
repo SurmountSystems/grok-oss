@@ -101,6 +101,7 @@ fn nested_info_from_occupancy(
         subagent_type: Arc::from(row.subagent_type.as_str()),
         finished: false,
         status: None,
+        from_occupancy_restore: true,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: running_occupancy_lifecycle(),
             persona: None,
@@ -1056,6 +1057,7 @@ impl AgentView {
             last_turn_summary: None,
             last_turn_summary_gen: 0,
             pending_effects: Vec::new(),
+            l1_auto_background_tool_call_id: None,
             paste_probe_in_flight: 0,
             deferred_send: None,
             pending_turn_end_reconcile: None,
@@ -1270,6 +1272,9 @@ impl AgentView {
             workflow_runs: std::mem::take(&mut self.workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            goal_state: self.goal_state.clone(),
+            last_cleared_goal_id: self.last_cleared_goal_id.clone(),
+            show_goal_detail: self.show_goal_detail,
         }
     }
     /// Put a taken [`ReplayRebuiltState`] back: the counterpart of [`Self::take_replay_rebuilt_state`].
@@ -1287,6 +1292,26 @@ impl AgentView {
         self.workflow_runs = taken.workflow_runs;
         self.workflow_run_revisions = taken.workflow_run_revisions;
         self.cleared_workflow_runs = taken.cleared_workflow_runs;
+        self.restore_goal_plan_from_stash(
+            taken.goal_state,
+            taken.last_cleared_goal_id,
+            taken.show_goal_detail,
+        );
+    }
+
+    fn restore_goal_plan_from_stash(
+        &mut self,
+        stashed_goal: Option<crate::app::agent::GoalDisplayState>,
+        stashed_cleared_id: Option<String>,
+        stashed_show_detail: bool,
+    ) {
+        if self.goal_state.is_none() {
+            self.goal_state = stashed_goal;
+            self.show_goal_detail = stashed_show_detail;
+        }
+        if self.last_cleared_goal_id.is_none() {
+            self.last_cleared_goal_id = stashed_cleared_id;
+        }
     }
     /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
@@ -1587,6 +1612,11 @@ impl AgentView {
             self.scrollback.remove_entry(pid);
         }
         let dropped_heavy = if success && reload.saw_replay {
+            self.restore_goal_plan_from_stash(
+                reload.stash.goal_state.clone(),
+                reload.stash.last_cleared_goal_id.clone(),
+                reload.stash.show_goal_detail,
+            );
             self.scrollback.end_batch();
             true
         } else if success {
@@ -1657,6 +1687,11 @@ impl AgentView {
             if !reload.saw_todo_update {
                 self.todo = stash.todo;
             }
+            self.restore_goal_plan_from_stash(
+                stash.goal_state,
+                stash.last_cleared_goal_id,
+                stash.show_goal_detail,
+            );
             false
         } else {
             self.restore_replay_rebuilt_state(reload.stash);
@@ -1947,7 +1982,7 @@ impl AgentView {
     }
     /// Whether a foreground subagent (`task`/`spawn_subagent`, not `run_in_background`) is currently running.
     /// The parent turn is blocked on it, so the spinner should read as a subagent wait.
-    fn has_running_foreground_subagent(&self) -> bool {
+    pub(crate) fn has_running_foreground_subagent(&self) -> bool {
         self.running_foreground_subagents().next().is_some()
     }
     /// The one predicate shared by the wait gate and its subject.
@@ -3137,6 +3172,7 @@ mod resolve_turn_activity_tests {
                 subagent_type: Arc::from("explore"),
                 finished: false,
                 status: None,
+                from_occupancy_restore: false,
                 attempt: crate::app::subagent::SubagentAttemptInfo {
                     lifecycle:
                         crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
@@ -4252,6 +4288,76 @@ mod resume_restore_occupancy_tests {
             "no live sampler and no nested work: do not leave TurnRunning / Waiting timer, got {:?}",
             agent.session.state
         );
+    }
+
+    /// Screenshot class (GitHub #246): header `grok-build 6/500K 1%`,
+    /// `Waiting for the model` 5m 13s, no first token, no POST after
+    /// rebuild/resume. Cancelled nested runners left `waiting_model` painted
+    /// while `task_wake` held the sample until `queued_user_promotion`
+    /// (311599 ms). Do not restore that chrome when no sample is in flight.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn after_rebuild_resume_cancelled_nested_must_not_paint_waiting_for_the_model_five_minutes_with_no_post()
+     {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-waiting-model-five-minutes";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+
+        let mut app = primed_resume_app(cwd, sid, true);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let mut nested =
+                crate::app::agent_view::test_fixtures::running_subagent_info("cancelled-l2");
+            nested.set_finished_for_test(true);
+            nested.attempt.status = Some(std::sync::Arc::from("cancelled"));
+            agent
+                .subagent_sessions
+                .insert("cancelled-l2".into(), nested);
+            agent.turn_started_at = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(311_599))
+                    .unwrap_or_else(std::time::Instant::now),
+            );
+            agent.last_activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+            agent.session.enqueue_prompt_front(
+                "continue interrupted turn after rebuild at 6/500K".to_string(),
+            );
+        }
+        let effects = session_loaded(
+            &mut app,
+            sid,
+            Some("subagent-completed-cancelled-l2".to_string()),
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let activity = agent.resolve_turn_activity();
+        let posted = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            )
+        });
+        assert!(
+            posted || !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "rebuild/resume with cancelled nested must POST or must not paint Waiting for the model with no sample; activity={activity:?} effects={effects:?}"
+        );
+        if !posted {
+            assert!(
+                !agent.session.state.is_turn_running(),
+                "no POST after rebuild/resume: do not leave TurnRunning / waiting_model for 311599 ms, got {:?}",
+                agent.session.state
+            );
+            assert_eq!(
+                agent.open_turn_wait_kind(),
+                None,
+                "cancelled nested and no in-flight sample must not classify leftover occupancy as a live wait, got {:?}",
+                agent.open_turn_wait_kind()
+            );
+        }
     }
 
     /// Named contract: unsent draft restore and queue restore must not both

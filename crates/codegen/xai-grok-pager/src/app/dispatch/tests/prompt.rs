@@ -1874,9 +1874,12 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
             agent.turn_started_at = Some(std::time::Instant::now());
             if context_overflow {
                 // Mirror the RetryState handler pushing the actionable block.
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::session_event(SessionEvent::ContextTooLarge));
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::ContextTooLarge {
+                        used: None,
+                        live: None,
+                    },
+                ));
             }
         }
         dispatch(

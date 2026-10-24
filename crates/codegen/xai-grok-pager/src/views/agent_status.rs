@@ -448,6 +448,8 @@ mod tests {
             planning: false,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
+            progress_items: Vec::new(),
+            session_todos_at_goal_create: Vec::new(),
         }
     }
 

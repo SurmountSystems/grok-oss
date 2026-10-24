@@ -409,6 +409,23 @@ pub(crate) async fn run_goal_planner(
     let response = match spawner.spawn_planner(&spawn_id, prompt).await {
         Ok(text) => text,
         Err(SpawnError::Transport(detail)) => {
+            // Nested writer can drop the channel after `{PLAN_FILE}` is already
+            // on disk. A written plan is Planned, not "No plan was produced."
+            if non_empty_plan_file(inputs.plan_file).await {
+                tracing::info!(
+                    plan_file = %plan_file_str,
+                    error = %detail,
+                    "goal planner: transport stop after the plan file was written; accepting it",
+                );
+                return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+            }
+            if spawn_error_is_repeating_sentence_stop(&detail) {
+                tracing::info!(
+                    error = %detail,
+                    "goal planner: repeating-sentence transport with no plan; treating as interrupt so the harness can retry",
+                );
+                return GoalPlannerOutcome::Interrupted;
+            }
             tracing::warn!(error = %detail, "goal planner: transport error; failing closed");
             return record_fail_closed(
                 GoalPlannerFailClosedReason::Transport,
@@ -422,16 +439,36 @@ pub(crate) async fn run_goal_planner(
             // when the writer stops sampling. The select can report Interrupted after
             // `{PLAN_FILE}` is already on disk. A non-empty file counts; a missing file
             // is a real interrupt and the caller may replan.
+            return accept_written_plan_or_else(
+                inputs.plan_file,
+                inputs.attempt,
+                started,
+                emit_event,
+                GoalPlannerOutcome::Interrupted,
+            )
+            .await;
+        }
+        Err(SpawnError::Runtime { message, cancelled }) => {
+            // The child's turn error (repeating-sentence stop, sampling-window
+            // death) arrives here as Runtime. `finish_child` can also cancel the
+            // shared token after a successful write so the spawn result wins
+            // this arm instead of Interrupted. A non-empty `{PLAN_FILE}` is the
+            // plan; do not fail-closed and delete it.
             if non_empty_plan_file(inputs.plan_file).await {
                 tracing::info!(
                     plan_file = %plan_file_str,
-                    "goal planner: interrupted after the plan file was written; accepting it",
+                    cancelled,
+                    "goal planner: runtime stop after the plan file was written; accepting it",
                 );
                 return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
             }
-            return GoalPlannerOutcome::Interrupted;
-        }
-        Err(SpawnError::Runtime { message, cancelled }) => {
+            if !cancelled && spawn_error_is_repeating_sentence_stop(&message) {
+                tracing::info!(
+                    error = %message,
+                    "goal planner: repeating-sentence stop with no plan; treating as interrupt so the harness can retry",
+                );
+                return GoalPlannerOutcome::Interrupted;
+            }
             let reason = if cancelled {
                 GoalPlannerFailClosedReason::Aborted
             } else {
@@ -472,6 +509,35 @@ async fn non_empty_plan_file(path: &Path) -> bool {
     }
 }
 
+/// Nested once-run writer turn errors are `Session error: {detail}`. Match the
+/// sampler line and the pager chrome headline (`Stopped: repeating sentence`).
+fn spawn_error_is_repeating_sentence_stop(message: &str) -> bool {
+    let msg = message.to_ascii_lowercase();
+    let sampler = xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    msg.contains(sampler.as_str()) || msg.contains("repeating sentence")
+}
+
+/// `{PLAN_FILE}` already on disk is a finished writer. Otherwise keep `otherwise`.
+async fn accept_written_plan_or_else(
+    plan_file: &Path,
+    attempt: u32,
+    started: std::time::Instant,
+    emit_event: &dyn Fn(Event),
+    otherwise: GoalPlannerOutcome,
+) -> GoalPlannerOutcome {
+    if non_empty_plan_file(plan_file).await {
+        tracing::info!(
+            plan_file = %plan_file.display(),
+            "goal planner: spawn stopped after the plan file was written; accepting it",
+        );
+        planned_outcome(plan_file, attempt, started, emit_event)
+    } else {
+        otherwise
+    }
+}
+
 fn planned_outcome(
     plan_file: &Path,
     attempt: u32,
@@ -487,6 +553,25 @@ fn planned_outcome(
         plan_file: plan_file.to_path_buf(),
         latency_ms,
     }
+}
+
+/// Headline from a planner markdown file (`# Plan: <work>`).
+/// `None` when the heading has no headline (`# Plan`) or is not that contract.
+pub(crate) fn planned_goal_title(markdown: &str) -> Option<&str> {
+    let line = markdown
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let rest = line.strip_prefix('#')?.trim();
+    let title = rest.strip_prefix("Plan:")?.trim();
+    (!title.is_empty()).then_some(title)
+}
+
+/// Read [`planned_goal_title`] from a PLAN_FILE path. `None` if the file is
+/// missing, unreadable, or the heading has no headline.
+pub(crate) fn planned_goal_title_from_path(path: &Path) -> Option<String> {
+    let markdown = std::fs::read_to_string(path).ok()?;
+    planned_goal_title(&markdown).map(str::to_owned)
 }
 
 fn record_fail_closed(
@@ -623,6 +708,18 @@ mod tests {
         assert!(!parse_terminal_response("Done."));
         assert!(!parse_terminal_response("Done!"));
         assert!(!parse_terminal_response(""));
+    }
+
+    #[test]
+    fn planned_goal_title_reads_the_plan_headline() {
+        let markdown = "# Plan: Rewrite tests onto production GoalPlan arms\n\n## Goal kind\n";
+        assert_eq!(
+            planned_goal_title(markdown),
+            Some("Rewrite tests onto production GoalPlan arms"),
+            "Operator: the goal got lost. PLAN_FILE `# Plan: <work>` is the current planned goal"
+        );
+        assert_eq!(planned_goal_title("# Plan\n\n1. do it\n"), None);
+        assert_eq!(planned_goal_title(""), None);
     }
 
     /// Deterministic spawner with knobs for response text, whether to write the plan file, and the file body.
@@ -814,6 +911,277 @@ mod tests {
             "a plan on disk must not fail closed: {log:?}",
         );
         assert_eq!(log.as_slice(), ["fired", "completed"]);
+        let _ = std::fs::remove_file(&plan_file);
+    }
+
+    /// GitHub #234 leftover after #228: the nested once-run writer stop is
+    /// `SpawnError::Runtime`, not Interrupted. A written `{PLAN_FILE}` still counts.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_stops_on_repeating_sentence_and_the_plan_file_is_present_the_goal_does_not_pause_with_no_plan_was_produced()
+     {
+        let plan_file = tmp_plan_file("repeat-stop-written");
+        let message = format!(
+            "Session error: {}",
+            xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE
+        );
+        let spawner = Arc::new(MockSpawner {
+            response: Err(SpawnError::Runtime {
+                message,
+                cancelled: false,
+            }),
+            write_plan: true,
+            plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
+            plan_file_target: plan_file.clone(),
+            last_prompt: Mutex::new(None),
+        });
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "vendor KeyOS dependencies",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "when a goal plan writer stops on a repeating sentence and the plan file is present, the goal does not pause with \"No plan was produced.\" outcome={outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "a plan on disk must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired", "completed"]);
+        let _ = std::fs::remove_file(&plan_file);
+    }
+
+    /// Repeating-sentence stop with no file is the same class as Interrupted:
+    /// the harness retries. It is not a Runtime fail-closed.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_stops_on_repeating_sentence_without_a_plan_the_harness_retries_instead_of_failing_closed()
+     {
+        let plan_file = tmp_plan_file("repeat-stop-missing");
+        let message = format!(
+            "Session error: {}",
+            xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE
+        );
+        let spawner = Arc::new(MockSpawner::fails(
+            SpawnError::Runtime {
+                message,
+                cancelled: false,
+            },
+            &plan_file,
+        ));
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "do X",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Interrupted),
+            "a repeating-sentence stop with no plan must retry, not fail closed: {outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "repeating-sentence with no plan must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired"]);
+    }
+
+    /// Operator 2026-10-21: Goals are still broken. Repeating-sentence stop on
+    /// the plan writer with PLAN_FILE on disk must be Planned, not
+    /// "No plan was produced." Transport after write is the production drop.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_transport_stops_and_the_plan_file_is_present_the_goal_does_not_pause_with_no_plan_was_produced()
+     {
+        let plan_file = tmp_plan_file("transport-written");
+        let spawner = Arc::new(MockSpawner {
+            response: Err(SpawnError::Transport("channel closed".to_string())),
+            write_plan: true,
+            plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
+            plan_file_target: plan_file.clone(),
+            last_prompt: Mutex::new(None),
+        });
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "vendor KeyOS dependencies",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "Goals are still broken: repeating-sentence stop with PLAN_FILE on disk still reports No plan was produced. \
+             transport after write must be Planned, not \"No plan was produced.\" outcome={outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "a plan on disk must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired", "completed"]);
+        let _ = std::fs::remove_file(&plan_file);
+    }
+
+    /// Pager chrome headline is `Stopped: repeating sentence`, not the sampler
+    /// constant. Without a file the harness retries.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_chrome_repeating_sentence_without_a_plan_the_harness_retries_instead_of_failing_closed()
+     {
+        let plan_file = tmp_plan_file("chrome-repeat-missing");
+        let spawner = Arc::new(MockSpawner::fails(
+            SpawnError::Runtime {
+                message: "Session error: Stopped: repeating sentence".into(),
+                cancelled: false,
+            },
+            &plan_file,
+        ));
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "do X",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Interrupted),
+            "Goals are still broken: repeating-sentence stop with PLAN_FILE on disk still reports No plan was produced. \
+             chrome repeating sentence with no plan must retry, not fail closed: {outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "repeating-sentence with no plan must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired"]);
+    }
+
+    /// Chrome repeating-sentence after `{PLAN_FILE}` is written is Planned.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_chrome_repeating_sentence_and_the_plan_file_is_present_the_goal_does_not_pause_with_no_plan_was_produced()
+     {
+        let plan_file = tmp_plan_file("chrome-repeat-written");
+        let spawner = Arc::new(MockSpawner {
+            response: Err(SpawnError::Runtime {
+                message: "Session error: Stopped: repeating sentence".into(),
+                cancelled: false,
+            }),
+            write_plan: true,
+            plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
+            plan_file_target: plan_file.clone(),
+            last_prompt: Mutex::new(None),
+        });
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "vendor KeyOS dependencies",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "Goals are still broken: repeating-sentence stop with PLAN_FILE on disk still reports No plan was produced. \
+             chrome repeating sentence with PLAN_FILE on disk must be Planned, not \"No plan was produced.\" outcome={outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "a plan on disk must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired", "completed"]);
+        let _ = std::fs::remove_file(&plan_file);
+    }
+
+    /// `finish_child` cancel after a successful write can land as Runtime
+    /// `cancelled: true`. The file still counts.
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_runtime_cancels_and_the_plan_file_is_present_the_goal_does_not_pause_with_no_plan_was_produced()
+     {
+        let plan_file = tmp_plan_file("runtime-cancel-written");
+        let spawner = Arc::new(MockSpawner {
+            response: Err(SpawnError::Runtime {
+                message: "Subagent was cancelled".into(),
+                cancelled: true,
+            }),
+            write_plan: true,
+            plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
+            plan_file_target: plan_file.clone(),
+            last_prompt: Mutex::new(None),
+        });
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "vendor KeyOS dependencies",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "when a goal plan writer is cancelled after writing the plan file, the goal does not pause with \"No plan was produced.\" outcome={outcome:?}",
+        );
+        assert_eq!(log.lock().unwrap().as_slice(), ["fired", "completed"]);
         let _ = std::fs::remove_file(&plan_file);
     }
 

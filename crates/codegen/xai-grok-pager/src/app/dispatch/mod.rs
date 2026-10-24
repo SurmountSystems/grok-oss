@@ -81,6 +81,9 @@ pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
 pub(crate) use status::commit_minimal_update_notice;
 #[cfg(test)]
 pub(crate) use turn::{CANCEL_RESEND_GRACE, TURN_END_RECONCILE_GRACE};
-pub(crate) use turn::{reconcile_overdue_cancels, reconcile_overdue_turn_ends};
+pub(crate) use turn::{
+    maybe_auto_background_l1_blocking_execute, reconcile_overdue_cancels,
+    reconcile_overdue_turn_ends,
+};
 #[cfg(test)]
 mod tests;

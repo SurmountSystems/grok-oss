@@ -144,7 +144,7 @@ pub(super) fn scrollback_has_recent_context_too_large(
     trailing_session_events(scrollback).any(|(_, ev)| {
         matches!(
             ev,
-            SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
+            SessionEvent::ContextTooLarge { .. } | SessionEvent::CompactionFailed { .. }
         )
     })
 }
@@ -165,7 +165,7 @@ pub(in crate::app) fn scrollback_has_recent_error_banner(
         matches!(
             ev,
             SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
+                | SessionEvent::ContextTooLarge { .. }
                 | SessionEvent::DiskFull
                 | SessionEvent::RequestFailed { .. }
         )
@@ -225,6 +225,7 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
         agent.scrollback.remove_from(idx);
     }
     strip_reauth_required_blocks(agent);
+    strip_login_advice_system_blocks(agent);
 }
 
 /// Remove every [`SessionEvent::ReAuthRequired`] banner, including those that are no longer trailing because a later nested-run summary was painted after them.
@@ -248,6 +249,29 @@ fn strip_reauth_required_blocks(agent: &mut AgentView) {
     }
 }
 
+/// After the Operator authenticates, never leave "Please run grok-oss /login"
+/// as the only thing that happened. Agents never tell the Operator to /login.
+fn strip_login_advice_system_blocks(agent: &mut AgentView) {
+    let ids: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|idx| {
+            let entry = agent.scrollback.entry(idx)?;
+            match &entry.block {
+                RenderBlock::System(block)
+                    if block.text.contains("grok-oss /login")
+                        || block.text.contains("Please run grok-oss /login")
+                        || block.text.contains("Run /login to re-authenticate") =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for id in ids {
+        agent.scrollback.remove_entry(id);
+    }
+}
+
 fn take_prompt_to_retry_after_auth(
     agent: &mut AgentView,
 ) -> Option<crate::app::agent::InFlightPrompt> {
@@ -257,24 +281,178 @@ fn take_prompt_to_retry_after_auth(
         .or_else(|| agent.session.compact_held_prompt.take())
 }
 
+fn recovered_parent_jwt(agent: &AgentView) -> Option<String> {
+    agent
+        .parent_sampler_jwt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// `/goal resume` is the shell builtin that calls existing `SessionActor::resume_goal`.
+/// AuthComplete must send this instead of the original `/goal <objective>` so login
+/// does not Goal created, drop tracker progress, or leave the interrupted goal paused.
+const GOAL_RESUME_AFTER_LOGIN_AUTH: &str = "/goal resume";
+
+/// In-flight or error-interrupted goals resume after login auth. User pause,
+/// back-off, blocked, complete, budget-limited, and failed stay put.
+fn goal_should_resume_after_login_auth(agent: &AgentView) -> bool {
+    use crate::app::agent::GoalDisplayStatus;
+    agent.goal_state.as_ref().is_some_and(|goal| {
+        matches!(
+            goal.status,
+            GoalDisplayStatus::Active
+                | GoalDisplayStatus::InfraPaused
+                | GoalDisplayStatus::Interrupted
+        )
+    })
+}
+
+fn synthetic_goal_resume_prompt() -> crate::app::agent::InFlightPrompt {
+    crate::app::agent::InFlightPrompt {
+        text: GOAL_RESUME_AFTER_LOGIN_AUTH.to_string(),
+        images: Vec::new(),
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: Vec::new(),
+    }
+}
+
+/// Waiting for the model after login: `maybe_drain_queue` is blocked while
+/// TurnRunning. UnstickResendPrompt POSTs immediately with recoveredBearer.
+/// An interrupted `/goal` POSTs `/goal resume` so the shell calls `resume_goal`.
+fn unstick_waiting_parent_after_auth(
+    agent: &mut AgentView,
+    prompt: crate::app::agent::InFlightPrompt,
+) -> Option<Effect> {
+    let session_id = agent.session.session_id.clone()?;
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    agent.session.current_prompt_id = Some(prompt_id.clone());
+    let text = if goal_should_resume_after_login_auth(agent) {
+        GOAL_RESUME_AFTER_LOGIN_AUTH.to_string()
+    } else {
+        prompt.text
+    };
+    Some(Effect::UnstickResendPrompt {
+        agent_id: agent.session.id,
+        session_id,
+        text,
+        prompt_id,
+        images: Vec::new(),
+        images_dir: None,
+        recovered_bearer: true,
+        recovered_bearer_jwt: recovered_parent_jwt(agent),
+    })
+}
+
+/// Live `{authorized, permission_mode}` for `authorize_ask.sock`. Never tokens.
+fn publish_live_authorize_effect() -> Effect {
+    let permission_mode = xai_grok_shell::util::config::permission_mode_canonical_str(
+        xai_grok_shell::util::config::load_permission_mode(None),
+    )
+    .to_string();
+    Effect::PublishAuthorizeAsk {
+        authorized: true,
+        permission_mode,
+    }
+}
+
+fn any_open_l1_needs_sibling_reauth(app: &AppView) -> bool {
+    app.agents.values().any(|agent| {
+        scrollback_has_reauth_prompt(&agent.scrollback) || agent.reauth_stashed_prompt.is_some()
+    })
+}
+
+/// Already-open L1 applies a sibling login over IPC. Reloads the shared store,
+/// resends the waiting prompt, and must not paint Run /login.
+/// Inherit-on-startup of a new session is not this path.
+pub(super) fn handle_sibling_ipc_authorize(
+    app: &mut AppView,
+    authorized: bool,
+    permission_mode: String,
+) -> Vec<Effect> {
+    let _ = permission_mode;
+    if !authorized {
+        if any_open_l1_needs_sibling_reauth(app) {
+            return vec![Effect::AskSiblingAuthorize { delay_ms: 400 }];
+        }
+        return vec![];
+    }
+    // A later non-auth retry must not drop a live parent JWT or UnstickResend
+    // an in-flight turn just because a sibling already published.
+    if !any_open_l1_needs_sibling_reauth(app) {
+        return vec![];
+    }
+    // Never apply a JWT from IPC. Drop the stale pager bearer so UnstickResend
+    // does not stamp the expired JWT. The shell recoveredBearer path reloads
+    // the shared store (`force_reload_from_disk` / `pick_up_sibling_token`)
+    // and restamps the sampler. Do not POST this process's live_api_key.
+    for agent in app.agents.values_mut() {
+        agent.parent_sampler_jwt = None;
+    }
+    app.auth_state = AuthState::Done;
+    let retry_effects = enqueue_prompts_after_auth(app);
+    let mut effects = dispatch(Action::RequestBundleStatus, app);
+    if app.usage_visible {
+        effects.push(Effect::FetchAppBilling { nonce: 0 });
+    }
+    effects.extend(retry_effects);
+    effects
+}
+
 /// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
 /// the login did not stash a return view (dashboard or another-process login).
+/// Parent already TurnRunning (Waiting for the model) must still POST immediately.
+/// Interrupted `/goal` (Active / InfraPaused / Interrupted) always UnstickResendPrompt
+/// `/goal resume` with the live login JWT so `resume_goal` runs.
 fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     let mut retry_effects = Vec::new();
     let mut page_flips = Vec::new();
     for agent in app.agents.values_mut() {
         agent.nested_auth_resume_retries = 0;
         strip_trailing_auth_error_blocks(agent);
-        if let Some(prompt) = take_prompt_to_retry_after_auth(agent) {
+        let was_idle = agent.session.state.is_idle();
+        let resume_goal = goal_should_resume_after_login_auth(agent);
+        let mut parent_retry = take_prompt_to_retry_after_auth(agent);
+        if resume_goal && parent_retry.is_none() {
+            parent_retry = agent
+                .session
+                .in_flight_prompt
+                .clone()
+                .or_else(|| Some(synthetic_goal_resume_prompt()));
+        }
+        let had_parent_retry = parent_retry.is_some();
+        if let Some(prompt) = parent_retry {
             agent.scrollback.push_block(RenderBlock::system(
                 "Re-authenticated. Retrying\u{2026}".to_string(),
             ));
-            agent.session.enqueue_in_flight_prompt_front(prompt);
-            let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
-            retry_effects.extend(drain.effects);
-            page_flips.push((agent.session.id, drain.page_flip_entry));
+            if resume_goal {
+                if let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt) {
+                    retry_effects.push(effect);
+                }
+            } else if was_idle {
+                agent.session.enqueue_in_flight_prompt_front(prompt);
+                let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
+                retry_effects.extend(drain.effects);
+                page_flips.push((agent.session.id, drain.page_flip_entry));
+            } else if let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt) {
+                retry_effects.push(effect);
+            }
         }
-        retry_effects.extend(enqueue_nested_resume_after_auth(agent));
+        let nested = enqueue_nested_resume_after_auth(agent);
+        // Waiting for the model after login: a nested 401 row must not skip the
+        // already-typed parent in_flight POST. Prior land only unstuck that
+        // prompt when nested resume was empty, so chrome kept ticking while
+        // nested recoveredBearer still sent a stale Bearer.
+        if !had_parent_retry
+            && !was_idle
+            && let Some(prompt) = agent.session.in_flight_prompt.clone()
+            && let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt)
+        {
+            retry_effects.push(effect);
+        }
+        retry_effects.extend(nested);
     }
     for (id, page_flip_entry) in page_flips {
         note_peek_page_flip(app, id, page_flip_entry);
@@ -416,12 +594,7 @@ fn enqueue_nested_resume_after_auth(agent: &mut AgentView) -> Vec<Effect> {
         info.status = None;
         info.attempt.status = None;
     }
-    let recovered_bearer_jwt = agent
-        .parent_sampler_jwt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let recovered_bearer_jwt = recovered_parent_jwt(agent);
     let mut effects = Vec::new();
     for (child_sid, text) in resumes {
         if text.is_empty() {
@@ -576,10 +749,25 @@ pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<
 
 /// Live parent sampler JWTs from AuthenticateResponse `_meta`.
 /// Nested recoveredBearer uses these, not AuthManager.
+/// Login meta always replaces a stale pager JWT. Per-session `parentSamplerJwts`
+/// wins over the generic recoveredBearerJwt / parentSamplerJwt.
 fn apply_recovered_parent_sampler_jwts(app: &mut AppView, meta: Option<&serde_json::Value>) {
     let Some(obj) = meta.and_then(|v| v.as_object()) else {
         return;
     };
+    for key in ["recoveredBearerJwt", "parentSamplerJwt"] {
+        if let Some(jwt) = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for agent in app.agents.values_mut() {
+                agent.parent_sampler_jwt = Some(jwt.to_string());
+            }
+            break;
+        }
+    }
     if let Some(map) = obj.get("parentSamplerJwts").and_then(|v| v.as_object()) {
         for agent in app.agents.values_mut() {
             if let Some(sid) = agent.session.session_id.as_ref()
@@ -591,21 +779,6 @@ fn apply_recovered_parent_sampler_jwts(app: &mut AppView, meta: Option<&serde_js
             {
                 agent.parent_sampler_jwt = Some(jwt.to_string());
             }
-        }
-    }
-    for key in ["recoveredBearerJwt", "parentSamplerJwt"] {
-        if let Some(jwt) = obj
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            for agent in app.agents.values_mut() {
-                if agent.parent_sampler_jwt.is_none() {
-                    agent.parent_sampler_jwt = Some(jwt.to_string());
-                }
-            }
-            break;
         }
     }
 }
@@ -643,7 +816,8 @@ pub(super) fn handle_auth_complete(
             // One example: an incidental `Ctrl+N` pressed during /login that the chokepoint deferred
             clear_startup_actions(app);
             let retry_effects = enqueue_prompts_after_auth(app);
-            let mut effects = dispatch(Action::RequestBundleStatus, app);
+            let mut effects = vec![publish_live_authorize_effect()];
+            effects.extend(dispatch(Action::RequestBundleStatus, app));
             if app.usage_visible {
                 effects.push(Effect::FetchAppBilling { nonce: 0 });
             }
@@ -653,7 +827,8 @@ pub(super) fn handle_auth_complete(
 
         let retry_effects = enqueue_prompts_after_auth(app);
         // Request bundle status only; the shell auto-syncs after auth
-        let mut effects = dispatch(Action::RequestBundleStatus, app);
+        let mut effects = vec![publish_live_authorize_effect()];
+        effects.extend(dispatch(Action::RequestBundleStatus, app));
         effects.extend(retry_effects);
 
         // Start auto-checking subscription if gated.
@@ -682,6 +857,27 @@ pub(super) fn handle_auth_complete(
         if app.session_startup_allowed() {
             effects.extend(drain_startup_actions(app));
         }
+        return effects;
+    }
+    // AuthComplete while already authenticated (`AuthState::Done`): IPC / sibling
+    // window / login that already flipped Done. Dropping this left the credentials
+    // toast plus Waiting for the model as the only thing that happened.
+    // Do not drain startup: this is a mid-session recovered login, not welcome.
+    if matches!(app.auth_state, AuthState::Done) {
+        if let Some(meta_val) = meta.as_ref()
+            && let Ok(auth_meta) =
+                serde_json::from_value::<xai_grok_login::AuthMeta>(meta_val.clone())
+        {
+            app.apply_auth_meta(&auth_meta);
+        }
+        apply_recovered_parent_sampler_jwts(app, meta.as_ref());
+        let retry_effects = enqueue_prompts_after_auth(app);
+        let mut effects = vec![publish_live_authorize_effect()];
+        effects.extend(dispatch(Action::RequestBundleStatus, app));
+        if app.usage_visible {
+            effects.push(Effect::FetchAppBilling { nonce: 0 });
+        }
+        effects.extend(retry_effects);
         return effects;
     }
     vec![]

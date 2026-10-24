@@ -419,11 +419,16 @@ impl SubagentSpawnContext {
     }
 
     /// Live parent sampler JWT first, then the spawn-snapshot fallback.
+    /// Prefer `live_api_key()` so nested spawn / recoveredBearer does not wait
+    /// on a busy sampler mailbox after login.
     async fn live_parent_sampler_jwt(&self) -> Option<String> {
-        if let Some(handle) = &self.parent_sampler_handle
-            && let Some(key) = handle.current_api_key().await
-        {
-            return Some(key);
+        if let Some(handle) = &self.parent_sampler_handle {
+            if let Some(key) = handle.live_api_key() {
+                return Some(key);
+            }
+            if let Some(key) = handle.current_api_key().await {
+                return Some(key);
+            }
         }
         self.inherited_fallback_key()
     }

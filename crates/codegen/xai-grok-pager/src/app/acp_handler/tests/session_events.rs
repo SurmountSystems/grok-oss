@@ -1051,6 +1051,43 @@
         );
     }
 
+    /// Single expiry does not paint Authentication required / Run /login twice.
+    #[test]
+    fn single_expiry_does_not_paint_authentication_required_login_nag_twice() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            1,
+            "one expiry must paint Authentication required once, not twice"
+        );
+        let painted = (0..scrollback.len())
+            .filter_map(|i| {
+                let block = &scrollback.get(i)?.block;
+                match block {
+                    RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                    RenderBlock::System(sys) => Some(sys.text.clone()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            painted.matches("Authentication required:").count(),
+            1,
+            "single expiry must not paint Authentication required twice. painted={painted}"
+        );
+        assert_eq!(
+            painted
+                .matches("Run /login to re-authenticate, then resend your message.")
+                .count(),
+            1,
+            "single expiry must not paint Run /login twice. painted={painted}"
+        );
+    }
+
     /// Login strips the stale banner. A later real expiry in that session must still paint once.
     #[test]
     fn apply_retry_state_auth_expiry_shows_again_after_the_banner_is_stripped() {
@@ -1237,10 +1274,40 @@
         assert!(
             matches!(
                 last_session_event(&scrollback),
-                Some(SessionEvent::ContextTooLarge)
+                Some(SessionEvent::ContextTooLarge { .. })
             ),
             "context overflow must surface the actionable ContextTooLarge prompt"
         );
+    }
+
+    /// GitHub #233. Nested death chrome must name used/live token counts from
+    /// the shell over-window line (47689/12800), not a generic too-large banner.
+    #[test]
+    fn apply_retry_state_context_length_death_chrome_names_used_and_live_counts() {
+        use xai_grok_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
+                message: "Context is over this session's sampling window (47689/12800 tokens). \
+                          Not retrying the same oversized model request. Compact once or start a new session."
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback, false);
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::ContextTooLarge { used, live }) => {
+                assert_eq!(used, Some(47_689), "death chrome must name used tokens");
+                assert_eq!(live, Some(12_800), "death chrome must name the live sampling window");
+                let msg = SessionEvent::ContextTooLarge { used, live }.message();
+                assert!(
+                    msg.contains("47689/12800"),
+                    "Operator-visible chrome must paint used/live: {msg}"
+                );
+            }
+            other => panic!("expected ContextTooLarge with used/live counts, got {other:?}"),
+        }
     }
 
     /// A message worded like an overflow but without `error_type=context_length` must not take the ContextTooLarge path.

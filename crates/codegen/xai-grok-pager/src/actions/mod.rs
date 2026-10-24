@@ -757,6 +757,10 @@ mod tests {
             .and_then(|def| def.long_help)
             .expect("fullscreen background help");
         assert!(fullscreen.contains("tasks pane (Ctrl+G)"));
+        assert!(
+            fullscreen.contains("blocking subagent"),
+            "GitHub #243: send-to-background must still name blocking subagents, got {fullscreen:?}"
+        );
         assert!(!fullscreen.contains("/tasks"));
 
         let minimal = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal)

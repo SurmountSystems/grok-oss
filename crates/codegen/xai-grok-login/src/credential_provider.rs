@@ -176,6 +176,19 @@ pub fn recovered_bearer_inherit_jwt(parent_sampler_jwt: Option<String>) -> Optio
     parent_sampler_jwt.filter(|key| !key.trim().is_empty())
 }
 
+/// Already-open parent L1 after sibling IPC `{authorized, permission_mode}` (never tokens).
+/// Reloads the shared store and returns that bearer. Falls back to `live_api_key` only when
+/// the store has no wire-valid token (same-process login already restamped the sampler).
+/// Nested inherit still uses [`recovered_bearer_inherit_jwt`].
+pub fn parent_recovered_bearer_from_shared_store(
+    auth_manager: &AuthManager,
+    live_api_key: Option<String>,
+) -> Option<String> {
+    auth_manager
+        .reload_shared_store_bearer()
+        .or_else(|| live_api_key.filter(|key| !key.trim().is_empty()))
+}
+
 /// Resolves a snapshot's `deployment_id` from an enterprise deployment key.
 /// Injected at construction so the provider stays off shell config; callers with a
 /// deployment key pass the managed-config deployment-id resolver.
@@ -908,6 +921,41 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("xai-grok-cli"),
             "Token-Auth stays when Authorization is the live parent JWT"
+        );
+    }
+
+    /// Already-open L1 recoveredBearer must POST the sibling-written store bearer, not this process's expired live_api_key.
+    #[test]
+    fn already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = GrokComConfig::default();
+        let scope = cfg.auth_scope();
+        let mgr = AuthManager::new(dir.path(), cfg);
+        mgr.hot_swap(make_auth("expired-stale-jwt", ChronoDuration::hours(-1)));
+        let auth_path = dir.path().join("auth.json");
+        let mut store = crate::read_auth_json(&auth_path).unwrap_or_default();
+        store.insert(
+            scope,
+            make_auth("sibling-login-jwt", ChronoDuration::hours(1)),
+        );
+        crate::storage::write_auth_json(&auth_path, &store).unwrap();
+        let recovered =
+            parent_recovered_bearer_from_shared_store(&mgr, Some("expired-stale-jwt".into()));
+        assert_eq!(
+            recovered.as_deref(),
+            Some("sibling-login-jwt"),
+            "already-open L1 must reload the shared store after sibling login, not POST expired live_api_key"
+        );
+        assert_ne!(
+            recovered.as_deref(),
+            Some("expired-stale-jwt"),
+            "resend bearer must not be the pre-IPC expired JWT"
+        );
+        assert_eq!(
+            mgr.reload_shared_store_bearer().as_deref(),
+            Some("sibling-login-jwt"),
+            "force_reload_from_disk / pick_up_sibling_token must be the named store reload"
         );
     }
 

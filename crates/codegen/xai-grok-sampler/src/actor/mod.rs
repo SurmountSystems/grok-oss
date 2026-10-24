@@ -37,6 +37,8 @@ impl SamplerActor {
     ) -> SamplerHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let live_api_key = config.api_key.clone();
+        let bearer_resolver = config.bearer_resolver.clone();
+        let session_bearer_resolver = config.session_bearer_resolver.clone();
         let actor = Self {
             cmd_rx,
             event_tx,
@@ -45,6 +47,7 @@ impl SamplerActor {
         };
         tokio::spawn(actor.run());
         SamplerHandle::new(cmd_tx, live_api_key)
+            .with_resolvers(bearer_resolver, session_bearer_resolver)
     }
 
     async fn run(mut self) {

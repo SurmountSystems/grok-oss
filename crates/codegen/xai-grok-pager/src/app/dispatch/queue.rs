@@ -620,6 +620,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             // The command owns the pane; a leftover wake marker must not shadow stop.
             agent.running_wake_turn = None;
             agent.turn_started_at = Some(Instant::now());
+            let auto_bg = agent.take_l1_blocking_auto_background();
             // Invocation marker: each run visibly owns its outcome line (completed/cancelled/failed)
             // For `/compact` this matches the auto path's "Context N% full. Compacting…".
             // Local block only: like the outcome lines it is not persisted, so resume replays neither
@@ -627,8 +628,12 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                 .scrollback
                 .push_block(RenderBlock::session_event(started));
 
+            let mut effects = vec![effect];
+            if let Some(bg) = auto_bg {
+                effects.push(bg);
+            }
             QueueDrain {
-                effects: vec![effect],
+                effects,
                 page_flip_entry: None,
             }
         }

@@ -752,21 +752,20 @@ impl SessionActor {
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // inherit stamp. Do not seed an expired AuthManager token: the resolver would
         // send it, and a fail-closed 401 would look authenticated.
-        // Nested turns keep the JWT the live sampler is already talking with.
-        // AuthManager recovery can mint a different token that cli-chat-proxy still rejects.
-        let nested_live = if self.startup_hints.is_subagent {
-            match self.sampler_handle.live_api_key() {
-                Some(key) => Some(key),
-                None => self
-                    .sampler_handle
-                    .current_api_key()
-                    .await
-                    .filter(|key| !key.trim().is_empty()),
-            }
-        } else {
-            None
+        // Nested turns, and the waiting parent after login restamp, keep the JWT the
+        // live sampler is already talking with. AuthManager recovery can mint a
+        // different token that cli-chat-proxy still rejects.
+        // A noop sampler (no live JWT) still falls through to AuthManager so
+        // limits-mode ranked hop can seed the session JWT.
+        let live_sampler_jwt = match self.sampler_handle.live_api_key() {
+            Some(key) => Some(key),
+            None => self
+                .sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty()),
         };
-        let mut api_key = if let Some(live) = nested_live {
+        let mut api_key = if let Some(live) = live_sampler_jwt {
             Some(live)
         } else {
             // Session gate still prefers a wire-valid AT when `[inference]` is
@@ -1290,11 +1289,18 @@ impl SessionActor {
     /// can mint a different token that cli-chat-proxy still rejects.
     async fn stampable_nested_parent_bearer(&self) -> Option<String> {
         if self.startup_hints.is_subagent {
-            // Nested `sampler_handle.current_api_key()` is this child's last
-            // send, the spawn-time JWT that just 401'd. Stamping it again
-            // resubmits the same Bearer. Live parent JWT is restamped via
-            // recoveredBearer (`parent_sampler_handle.current_api_key()`).
-            return None;
+            // After login restamp, `live_api_key()` is the login JWT the waiting
+            // parent conversation POSTs with. Returning None left nested
+            // `reason=no auth context` without a retry, so chrome stayed on
+            // Waiting for the model and nested still 401'd xai-grok-cli.
+            if let Some(key) = self.sampler_handle.live_api_key() {
+                return Some(key);
+            }
+            return self
+                .sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty());
         }
         if let Some(am) = self.auth_manager.as_ref()
             && let Some(key) = am
@@ -1379,18 +1385,19 @@ impl SessionActor {
         })
     }
 
-    /// Nested 401 after recovery: resume with the JWT the live sampler is talking with.
+    /// Nested 401 after recovery, and the waiting **parent** 401 after login restamp:
+    /// resume with the JWT the live sampler is talking with. That includes parent
+    /// 401s that lack `reason=no auth context` (screenshot toast: Invalid or expired
+    /// credentials. Please run grok-oss /login to re-authenticate).
     /// Called from `handle_sampling_failure` before compact / EndChildWithoutCompact.
     /// Nested skips AuthManager `try_recover_unauthorized` (Unlock/Prompt) and auth_transient.
+    /// Parent same-key (no login restamp) still returns None so WebLogin / OIDC stay.
     /// `current_api_key()` mailbox can be empty on current_thread before the actor
     /// runs; stamp the spawn / last-restamp JWT in that case.
     async fn try_resume_nested_401_with_live_sampler_jwt(
         &self,
-        credential: xai_grok_sampling_types::SentCredential,
+        _credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
-        if !self.startup_hints.is_subagent {
-            return None;
-        }
         let key = if let Some(key) = self.sampler_handle.live_api_key() {
             key
         } else {
@@ -1399,6 +1406,13 @@ impl SessionActor {
                 .await
                 .filter(|key| !key.trim().is_empty())?
         };
+        if !self.startup_hints.is_subagent {
+            let already = self.chat_state_handle.get_credentials().await.api_key;
+            if already.as_deref() == Some(key.as_str()) {
+                // Parent same-key: login did not restamp a new JWT. Keep WebLogin / OIDC.
+                return None;
+            }
+        }
         tracing::info!(
             session_id = %self.session_info.id.0,
             "auth recovery: nested 401, stamping live sampler JWT, retrying"
@@ -1409,9 +1423,14 @@ impl SessionActor {
             None,
         );
         self.set_chat_api_key(key).await;
-        self.prepare_sampler_for_turn().await;
+        if self.startup_hints.is_subagent {
+            self.prepare_sampler_for_turn().await;
+        }
+        // Parent prepare's refresh_token_if_expired overwrites chat credentials
+        // with AuthManager recovered token. Reconstruct copies live_api_key.
+        // The resubmit sends that live JWT, so provenance is Sent.
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
-            credential,
+            credential: xai_grok_sampling_types::SentCredential::Sent,
             store: RecoveredStore::SessionToken,
         })
     }
@@ -1526,14 +1545,14 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        // Nested 401 after recovery (plain Unauthorized): resume with the live
-        // sampler JWT BEFORE compact / EndChildWithoutCompact. Nested sampling
-        // is 40% of catalog, so a 401 on a full nested window used to compact
-        // (or end the child) and never reach this arm. Nested skips Unlock.
-        // Missing-auth-context is not this arm (pager recoveredBearer).
-        if self.startup_hints.is_subagent
-            && !crate::extensions::notification::is_nested_missing_auth_context(&error.message)
-            && (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+        // Nested 401 after recovery, waiting parent `reason=no auth context`,
+        // and waiting parent 401s that lack that reason (screenshot toast:
+        // Invalid or expired credentials. Please run grok-oss /login). Resume
+        // with the live sampler JWT BEFORE compact / EndChildWithoutCompact.
+        // Nested skips Unlock. After login restamp, that JWT is the login JWT
+        // the waiting parent conversation POSTs with, not spawn-time xai-grok-cli.
+        // Parent same-key still returns None inside the helper so Unlock / OIDC stay.
+        if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && let Some(recovery) = self
                 .try_resume_nested_401_with_live_sampler_jwt(error.credential)
                 .await

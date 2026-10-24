@@ -2122,6 +2122,16 @@ impl AppView {
         self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
     }
+    /// Overlay wrap and main conversation wrap run once after a resize drag settles (or a key/mouse arrives).
+    /// SIGWINCH itself only arms live-resize skip via [`crate::app::agent_view::AgentView::note_terminal_resize`].
+    pub(crate) fn settle_live_resize_overlays(&mut self) {
+        for agent in self.agents.values_mut() {
+            agent.settle_live_resize_overlay();
+            for child in agent.subagent_views.values_mut() {
+                child.settle_live_resize_overlay();
+            }
+        }
+    }
     /// Recompute the render-value compact flag from the user setting and terminal height (`views::agent::effective_compact`).
     /// Propagate it to the appearance fan-out and every agent's prompt widget when it changed.
     /// In-memory only: never touches the user setting (`current_ui.compact_mode`), the render cache, or disk.
@@ -5944,7 +5954,7 @@ impl AppView {
     /// Stores any resulting escape sequences in `pending_notification_escapes`.
     /// Also clears the permission notification flag when no permissions remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
+        let (session_name, model, activity, has_perms, turn_elapsed, is_busy, spawn_description) =
             if let ActiveView::Agent(id) = self.active_view
                 && let Some(agent) = self.agents.get(&id)
             {
@@ -5962,9 +5972,21 @@ impl AppView {
                 let has_perms = !agent.permission_queue.is_empty();
                 let elapsed = if parked { None } else { agent.turn_elapsed() };
                 let is_busy = agent.session.state.is_busy() && !parked;
-                (name, model, activity, has_perms, elapsed, is_busy)
+                let spawn_description = agent
+                    .running_live_specialists()
+                    .map(|info| info.description.as_ref())
+                    .find(|d| !d.trim().is_empty());
+                (
+                    name,
+                    model,
+                    activity,
+                    has_perms,
+                    elapsed,
+                    is_busy,
+                    spawn_description,
+                )
             } else {
-                (None, None, None, false, None, false)
+                (None, None, None, false, None, false, None)
             };
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
@@ -5980,6 +6002,7 @@ impl AppView {
             turn_elapsed,
             is_busy,
             focused: self.notification_service.focus_tracker.is_focused(),
+            spawn_description,
         };
         if let Some(esc) = self.notification_service.on_tick(&title_state) {
             self.pending_notification_escapes

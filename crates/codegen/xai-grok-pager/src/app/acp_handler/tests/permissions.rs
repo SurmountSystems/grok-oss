@@ -495,7 +495,10 @@
         );
         failed.scrollback.push_block(
             crate::scrollback::block::RenderBlock::session_event(
-                crate::scrollback::blocks::SessionEvent::ContextTooLarge,
+                crate::scrollback::blocks::SessionEvent::ContextTooLarge {
+                    used: None,
+                    live: None,
+                },
             ),
         );
         assert!(

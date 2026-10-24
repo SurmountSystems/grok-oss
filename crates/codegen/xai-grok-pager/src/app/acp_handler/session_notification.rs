@@ -488,6 +488,7 @@ pub(super) fn handle_session_notification_with_origin(
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let mut queue_wake_turn_complete = false;
     let mut pending_finish_for_spawn = None;
+    let mut ask_sibling_authorize = false;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
         ref update @ (XaiSessionUpdate::AutoCompactStarted { .. }
@@ -553,6 +554,14 @@ pub(super) fn handle_session_notification_with_origin(
                         info.attempt.error = Some(std::sync::Arc::from(message));
                     }
                 }
+            }
+            // Idle L1s that already painted ReAuthRequired must keep polling so
+            // a later sibling publish still applies. Do not ask on every
+            // rate-limit RetryState just because a sibling already published.
+            if crate::app::dispatch::scrollback_has_reauth_prompt(&agent.scrollback)
+                || agent.reauth_stashed_prompt.is_some()
+            {
+                ask_sibling_authorize = true;
             }
             true
         }
@@ -1611,6 +1620,22 @@ pub(super) fn handle_session_notification_with_origin(
                 let last_classifier_details_exists = last_classifier_details_path
                     .as_deref()
                     .is_some_and(|p| std::path::Path::new(p).exists());
+                let (progress_items, session_todos_at_goal_create) = match agent.goal_state.as_ref()
+                {
+                    Some(prev) if prev.goal_id == goal_id => (
+                        prev.progress_items.clone(),
+                        prev.session_todos_at_goal_create.clone(),
+                    ),
+                    _ => (
+                        Vec::new(),
+                        agent
+                            .todo
+                            .todos()
+                            .iter()
+                            .map(|item| item.content.clone())
+                            .collect(),
+                    ),
+                };
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
@@ -1647,6 +1672,8 @@ pub(super) fn handle_session_notification_with_origin(
                     planning: planning.unwrap_or(false),
                     received_at: std::time::Instant::now(),
                     elapsed_floor_ms,
+                    progress_items,
+                    session_todos_at_goal_create,
                 });
                 true
             }
@@ -1764,6 +1791,10 @@ pub(super) fn handle_session_notification_with_origin(
         let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
         app.pending_effects.extend(effects);
     }
+    if ask_sibling_authorize {
+        app.pending_effects
+            .push(crate::app::actions::Effect::AskSiblingAuthorize { delay_ms: 0 });
+    }
     if let Some(outcome) = terminal_outcome {
         return super::super::turn_completion::apply_terminal_outcome(
             outcome, app, parent_id, is_active,
@@ -1799,6 +1830,7 @@ fn queue_wake_turn_complete_notification(app: &mut AppView, agent_id: AgentId) {
         turn_elapsed: None,
         is_busy: false,
         focused: true,
+        spawn_description: None,
     };
     app.pending_notification_escapes = app.notification_service.build_idle_escapes(&idle_title);
     app.deferred_notification = Some((
@@ -2595,8 +2627,14 @@ pub(super) fn apply_sampling_identity_from_retry(
 }
 
 /// One `/login` sentence per expiry. A later failed nested run in the same expired session must not stack the same yellow paragraph.
+/// A live sibling that already authorized must not paint Run /login at all.
 fn push_reauth_required_once(scrollback: &mut crate::scrollback::state::ScrollbackState) {
     if crate::app::dispatch::scrollback_has_reauth_prompt(scrollback) {
+        return;
+    }
+    if xai_grok_shell::util::config::ask_live_authorized_session(xai_grok_config::grok_home())
+        .is_some_and(|doc| doc.authorized)
+    {
         return;
     }
     scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
@@ -2757,8 +2795,9 @@ pub(super) fn apply_retry_state_with_nested(
                 }
             } else if wire == crate::app::error_display::WireErrorType::ContextLength {
                 if !scrollback_has_recent_compaction_failed(scrollback) {
-                    scrollback
-                        .push_block(RenderBlock::session_event(SessionEvent::ContextTooLarge));
+                    scrollback.push_block(RenderBlock::session_event(
+                        SessionEvent::context_too_large_from_message(message),
+                    ));
                 }
             } else if wire == crate::app::error_display::WireErrorType::EncryptedContentMismatch
                 || wire == crate::app::error_display::WireErrorType::LegacyAuth

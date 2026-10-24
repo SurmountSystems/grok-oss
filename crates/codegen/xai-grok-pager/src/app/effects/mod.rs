@@ -229,6 +229,45 @@ pub(crate) fn execute(
                     TaskResult::PaywallCheckTick
                 });
         }
+        Effect::PublishAuthorizeAsk {
+            authorized,
+            permission_mode,
+        } => {
+            let grok_home = xai_grok_config::grok_home();
+            tasks.spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::util::config::publish_authorize_ask_socket(
+                        grok_home,
+                        &xai_grok_shell::util::config::AuthorizeAskDocument {
+                            authorized,
+                            permission_mode,
+                        },
+                    )
+                })
+                .await;
+                TaskResult::AuthorizeAskPublished
+            });
+        }
+        Effect::AskSiblingAuthorize { delay_ms } => {
+            let grok_home = xai_grok_config::grok_home();
+            tasks.spawn(async move {
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                let doc = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::util::config::ask_live_authorized_session(grok_home)
+                })
+                .await
+                .ok()
+                .flatten();
+                TaskResult::SiblingIpcAuthorize {
+                    authorized: doc.as_ref().is_some_and(|d| d.authorized),
+                    permission_mode: doc
+                        .map(|d| d.permission_mode)
+                        .unwrap_or_default(),
+                }
+            });
+        }
         Effect::ScheduleGateVerifyTimeout { generation } => {
             tasks
                 .spawn(async move {

@@ -103,6 +103,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         subagent_type: Arc::from("general-purpose"),
         finished: false,
         status: None,
+        from_occupancy_restore: false,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,

@@ -507,6 +507,677 @@ fn auth_complete_retries_stashed_prompt_without_a_return_view() {
     );
 }
 
+/// Operator 2026-10-21: "Hello??? I just logged in and it just says Waiting for the model... it's been a minute."
+/// AuthComplete after login must POST the interrupted turn immediately with recoveredBearer / live parent JWT.
+/// Parent already TurnRunning (Waiting for the model) must not block that POST.
+#[test]
+fn auth_complete_after_login_posts_immediately_while_waiting_for_the_model() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-after-login"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: "interrupted parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 41,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 41,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-after-login"
+                && text == "interrupted parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        ) || matches!(
+            e,
+            Effect::SendPrompt { session_id, text, .. }
+                if session_id.0.as_ref() == "sess-wait-after-login"
+                    && text == "interrupted parent turn"
+        )),
+        "AuthComplete after login must POST immediately with recoveredBearer / live parent JWT while chrome is Waiting for the model, got: {effects:?}"
+    );
+}
+
+/// Operator 2026-10-21: login while the parent turn is still in flight (no reauth stash).
+/// AuthComplete must POST that interrupted in_flight prompt immediately. Do not sit on Waiting for the model with no POST.
+#[test]
+fn auth_complete_after_login_posts_in_flight_prompt_while_waiting_for_the_model() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-in-flight"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "still waiting parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(2),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 42,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 42,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-in-flight"
+                && text == "still waiting parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "AuthComplete after login must POST the in-flight parent turn immediately with recoveredBearer / live parent JWT, got: {effects:?}"
+    );
+}
+
+/// Operator 2026-10-21 after the claimed AuthComplete / UnstickResendPrompt / recoveredBearer install:
+/// "After logging in, nothing really happens still."
+/// "Waiting for the model with a counter that ticks toward hours."
+/// "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)."
+///
+/// Prior named tests missed this combination: parent already TurnRunning (Waiting for the model)
+/// with an in_flight already-typed prompt, a nested 401 row, and a stale pager JWT from before
+/// login. `enqueue_prompts_after_auth` skipped the parent POST when nested resume was non-empty,
+/// and `apply_recovered_parent_sampler_jwts` left the expired JWT in place when login meta had
+/// recoveredBearerJwt. Nested then POSTed that expired Bearer with xai-grok-cli Token-Auth.
+/// Do not tell the Operator to /login. They already logged in.
+#[test]
+fn auth_complete_after_login_posts_waiting_parent_and_nested_401_with_login_jwt_not_stale() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-wait-after-login"));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "already typed parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(3),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        agent.subagent_sessions.insert(
+            "cs-nested-401".into(),
+            nested_l2_that_401d("sess-wait-after-login"),
+        );
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 43,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 43,
+            meta: Some(serde_json::json!({
+                "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+            })),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some(PARENT_SAMPLER_CURRENT_API_KEY),
+        "AuthComplete after login must replace the stale pager JWT with recoveredBearerJwt from login meta, not keep expired-stale-jwt"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-wait-after-login"
+                && text == "already typed parent turn"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "After logging in, nothing really happens still. Waiting for the model with a counter that ticks toward hours. AuthComplete must POST the already-typed parent prompt immediately with the login JWT, not skip it because a nested 401 row exists. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context). Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "cs-nested-401"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "nested 401 resume after login must POST recoveredBearer with the login JWT, not expired-stale-jwt. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context). Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if jwt == "expired-stale-jwt"
+        )),
+        "stale pager JWT must not ride recoveredBearer after login, got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.session.state.is_turn_running(),
+        "after login the parent must not sit idle; the waiting parent POST is in flight"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "nested 401 with no auth context must not tell the Operator to /login while L1 still talks"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for banned in [
+        "/login",
+        "Logging in...",
+        "Authentication temporarily unavailable",
+    ] {
+        assert!(
+            !scrollback_text.contains(banned),
+            "must not paint {banned:?} on nested no-auth-context while L1 still talks, scrollback={scrollback_text}"
+        );
+    }
+}
+
+/// Operator 2026-10-21: "also the errors always interrupt the goals. that's an annoying bug.
+/// goals should always resume after login auth."
+///
+/// An in-flight `/goal` (Active, planner or implementer running) that hits
+/// Invalid or expired credentials / no auth context / Waiting for the model
+/// must resume that SAME goal after AuthComplete with the live login JWT.
+/// `UnstickResendPrompt` text must be `/goal resume` so the shell calls
+/// existing `resume_goal`. Do not Goal created. Do not drop tracker progress.
+/// Do not leave the goal paused for `/goal resume`.
+#[test]
+fn goals_should_always_resume_after_login_auth() {
+    use crate::app::agent::{
+        GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus, InFlightPrompt,
+    };
+    use crate::scrollback::EntryId;
+
+    let original_goal = "/goal ship the compiler";
+    let cases = [
+        (
+            GoalDisplayStatus::Active,
+            true,
+            GoalDisplayPhase::Planning,
+            "planner running",
+        ),
+        (
+            GoalDisplayStatus::Active,
+            false,
+            GoalDisplayPhase::Executing,
+            "implementer running",
+        ),
+        (
+            GoalDisplayStatus::InfraPaused,
+            false,
+            GoalDisplayPhase::Executing,
+            "the errors always interrupt the goals",
+        ),
+        (
+            GoalDisplayStatus::Interrupted,
+            false,
+            GoalDisplayPhase::Executing,
+            "errors interrupt the goals",
+        ),
+    ];
+    for (status, planning, phase, label) in cases {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = crate::app::agent::AgentState::TurnRunning;
+            agent.turn_started_at = Some(std::time::Instant::now());
+            agent.session.session_id = Some(acp::SessionId::new("sess-goal-resume-after-login"));
+            agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+            agent.reauth_stashed_prompt = None;
+            agent.session.in_flight_prompt = Some(InFlightPrompt {
+                text: original_goal.into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(7),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            let mut goal = GoalDisplayState::test_stub();
+            goal.goal_id = "g-in-flight".into();
+            goal.objective = "ship the compiler".into();
+            goal.status = status;
+            goal.phase = phase;
+            goal.planning = planning;
+            goal.tokens_used = 42;
+            goal.total_worker_rounds = 3;
+            agent.goal_state = Some(goal);
+        }
+        app.auth_return_view = None;
+        app.auth_state = AuthState::Authenticating {
+            request_seq: 44,
+            handle: None,
+            auth_url: None,
+            mode: AuthMode::Pending,
+        };
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::AuthComplete {
+                request_seq: 44,
+                meta: Some(serde_json::json!({
+                    "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                    "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+                })),
+            }),
+            &mut app,
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::UnstickResendPrompt {
+                    session_id,
+                    text,
+                    recovered_bearer: true,
+                    recovered_bearer_jwt: Some(jwt),
+                    ..
+                } if session_id.0.as_ref() == "sess-goal-resume-after-login"
+                    && text == "/goal resume"
+                    && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+            )),
+            "Operator 2026-10-21: also the errors always interrupt the goals. that's an annoying bug. goals should always resume after login auth. AuthComplete must UnstickResendPrompt `/goal resume` with the live login JWT so resume_goal runs for {label} ({status:?}). Do not Goal created. Do not leave the goal paused for /goal resume. Invalid or expired credentials (auth_kind=bearer, reason=no auth context) / Waiting for the model. Got: {effects:?}"
+        );
+        assert!(
+            effects.iter().all(|e| !matches!(
+                e,
+                Effect::UnstickResendPrompt { text, .. } if text == original_goal
+            ) && !matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == original_goal
+            )),
+            "resending the original `/goal ship the compiler` would Goal created and drop tracker progress. Glue must call existing resume_goal via `/goal resume`. {label} ({status:?}) got: {effects:?}"
+        );
+        let agent = test_agent(&app, id);
+        let goal = agent
+            .goal_state
+            .as_ref()
+            .expect("AuthComplete must keep the same in-flight goal; do not drop tracker progress");
+        assert_eq!(
+            goal.goal_id, "g-in-flight",
+            "must resume that SAME goal after login auth, not Goal created"
+        );
+        assert_eq!(
+            goal.objective, "ship the compiler",
+            "must not drop tracker progress on AuthComplete"
+        );
+        assert_eq!(
+            goal.tokens_used, 42,
+            "must not drop tracker progress on AuthComplete"
+        );
+        assert_eq!(
+            goal.total_worker_rounds, 3,
+            "must not drop tracker progress on AuthComplete"
+        );
+        let scrollback_text = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !scrollback_text.contains("/login"),
+            "must not paint /login after AuthComplete; the Operator already logged in. scrollback={scrollback_text}"
+        );
+        assert!(
+            !scrollback_text
+                .to_ascii_lowercase()
+                .contains("goal created"),
+            "do not Goal created after login auth. scrollback={scrollback_text}"
+        );
+    }
+}
+
+/// Operator 2026-10-23 screenshot, GitHub #215 after prior lands claimed PASS:
+/// `Invalid or expired credentials. Please run grok-oss /login to re-authenticate.`
+/// `Waiting for the model`
+/// Goal is Active. The session is already authenticated (`AuthState::Done`), not
+/// sitting on the welcome Authenticating flow. Dropping AuthComplete in that
+/// state left the credentials toast as the only thing that happened.
+/// After the Operator authenticates, UnstickResendPrompt `/goal resume` with
+/// the recovered login JWT must POST. Do not tell the Operator to /login.
+#[test]
+fn credentials_toast_and_waiting_for_the_model_after_auth_resumes_the_waiting_turn() {
+    use crate::app::agent::{
+        GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus, InFlightPrompt,
+    };
+    use crate::scrollback::EntryId;
+    use crate::scrollback::block::RenderBlock;
+
+    const SCREENSHOT_TOAST: &str =
+        "Invalid or expired credentials. Please run grok-oss /login to re-authenticate.";
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-screenshot-wait-after-auth"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "waiting parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(8),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        let mut goal = GoalDisplayState::test_stub();
+        goal.goal_id = "g-screenshot-active".into();
+        goal.objective = "ship the compiler".into();
+        goal.status = GoalDisplayStatus::Active;
+        goal.phase = GoalDisplayPhase::Executing;
+        goal.planning = false;
+        goal.tokens_used = 42;
+        goal.total_worker_rounds = 3;
+        agent.goal_state = Some(goal);
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(SCREENSHOT_TOAST));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 99,
+            meta: Some(serde_json::json!({
+                "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+            })),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.is_empty(),
+        "Operator 2026-10-23: This is still happening. AuthComplete while AuthState::Done and chrome is Waiting for the model must not drop. Screenshot: {SCREENSHOT_TOAST} plus Waiting for the model. Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-screenshot-wait-after-auth"
+                && text == "/goal resume"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "After the Operator authenticates, the waiting turn continues. Goal is Active so AuthComplete UnstickResendPrompts `/goal resume` with the recovered login JWT. Do not sit on Waiting for the model. Screenshot: {SCREENSHOT_TOAST}. Got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.session.state.is_turn_running(),
+        "after auth the parent must not sit idle; the waiting turn POST is in flight"
+    );
+    let goal = agent
+        .goal_state
+        .as_ref()
+        .expect("AuthComplete must keep the same in-flight goal");
+    assert_eq!(
+        goal.goal_id, "g-screenshot-active",
+        "must resume that SAME Active goal after auth, not Goal created"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "the credentials toast must not remain the only thing that happened after auth"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !scrollback_text.contains(SCREENSHOT_TOAST),
+        "never print Please run grok-oss /login as the fix. Agents never tell the Operator to /login. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("grok-oss /login"),
+        "never print grok-oss /login as the fix after auth. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("/login"),
+        "must not tell the Operator to /login after they authenticated. scrollback={scrollback_text}"
+    );
+}
+
+const RUN_LOGIN_NAG: &str = "Run /login to re-authenticate, then resend your message.";
+
+/// Already-open L1 / running pager with expired credentials receives sibling IPC authorize,
+/// reloads the shared store, resends, and does not paint Run /login.
+/// Inherit-on-startup of a new session is not this path. Never tokens on IPC.
+#[test]
+fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login()
+ {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+    use crate::scrollback::block::RenderBlock;
+
+    let mut sibling = test_app_with_agent();
+    sibling.auth_state = AuthState::Authenticating {
+        request_seq: 7,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let publish = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 7,
+            meta: None,
+        }),
+        &mut sibling,
+    );
+    assert!(
+        publish.iter().any(|e| matches!(
+            e,
+            Effect::PublishAuthorizeAsk {
+                authorized: true,
+                permission_mode,
+            } if !permission_mode.is_empty()
+                && !permission_mode.contains("eyJ")
+                && !permission_mode.contains("Bearer")
+        )),
+        "login success in one process must live-publish IPC {{authorized, permission_mode}} and never tokens. got: {publish:?}"
+    );
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-open-l1-sibling-ipc"));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: "waiting prompt after sibling login".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(11),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent.scrollback.push_block(RenderBlock::system(
+            "Invalid or expired credentials. Please run grok-oss /login to re-authenticate."
+                .to_string(),
+        ));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt,
+                ..
+            } if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
+                && text == "waiting prompt after sibling login"
+                && recovered_bearer_jwt.as_deref() != Some("expired-stale-jwt")
+        ) || matches!(
+            e,
+            Effect::SendPrompt { session_id, text, .. }
+                if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
+                    && text == "waiting prompt after sibling login"
+        )),
+        "already-open L1 must reload the shared store and resend the waiting prompt after sibling IPC authorize. got: {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if jwt == "expired-stale-jwt"
+        )),
+        "resend bearer must not be the pre-IPC expired JWT. Store reload, not JWT-drop proxy. got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.parent_sampler_jwt.is_none(),
+        "IPC never carries tokens; already-open L1 drops the stale pager JWT so the shell recoveredBearer path reloads the shared store"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "already-open L1 must not keep Authentication required after sibling login"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !scrollback_text.contains(RUN_LOGIN_NAG),
+        "already-open L1 must not paint Run /login to re-authenticate, then resend your message. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("/login"),
+        "never tell the Operator to /login after a sibling session logged in. scrollback={scrollback_text}"
+    );
+}
+
+/// Authorized sibling IPC must not drop a live parent JWT or UnstickResend an
+/// in-flight turn when this L1 does not need reauth.
+#[test]
+fn sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-live-no-reauth"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "in-flight turn still talking".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(3),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some(PARENT_SAMPLER_CURRENT_API_KEY),
+        "authorized apply must not drop a live parent JWT when this L1 does not need reauth"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt { .. } | Effect::SendPrompt { .. }
+        )),
+        "authorized apply must not UnstickResend an in-flight turn when this L1 does not need reauth. got: {effects:?}"
+    );
+}
+
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer
 /// puts this on `_meta.recoveredBearerJwt`.
 const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";
@@ -592,6 +1263,7 @@ fn nested_l2_that_401d(parent_sid: &str) -> crate::app::subagent::SubagentInfo {
         subagent_type: "general-purpose".into(),
         finished: true,
         status: Some("failed".into()),
+        from_occupancy_restore: false,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,

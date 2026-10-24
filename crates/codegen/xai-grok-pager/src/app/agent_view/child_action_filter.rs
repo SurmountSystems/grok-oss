@@ -57,6 +57,8 @@ pub(crate) fn gate_child_action(action: &Action) -> ChildActionGate {
         | Action::ToggleMouseCapture
         | Action::AcceptWordSelectTip
         | Action::ShowWordSelectTip
+        // GitHub #243: send a blocking nested agent to the background (Ctrl+B).
+        | Action::DemoteToBackground
         // Dashboard navigation resolves no agent at all; the takeover header paints these controls for the parent
         | Action::OpenDashboard
         | Action::DashboardOverlayExit
@@ -103,7 +105,6 @@ impl ViewSurface {
                     | ActionId::OpenSettings
                     | ActionId::OpenExtensions
                     | ActionId::ToggleYolo
-                    | ActionId::SendToBackground
                     | ActionId::EditPromptExternal
                     | ActionId::CycleMode
             )

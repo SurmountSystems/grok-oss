@@ -326,48 +326,56 @@ impl AgentView {
                     if let Some(outcome) = self.try_apply_unique_model_slash_row() {
                         return outcome;
                     }
-                    // A current menu sends the highlight when it is a different
-                    // command (`/log` highlighted `/login`). A finished
-                    // command sends as typed when the highlight is that
-                    // command, or when the snapshot is stale (query still
-                    // empty, highlight `/quit`, typed `/view-plan`). Unknown
-                    // prefixes still accept the highlight.
+                    // Mention is not invoke. A sentence that contains `/plan`
+                    // (or another skill slash) submits as ordinary Operator
+                    // text. Do not accept completion. Do not run the skill.
                     let typed_owned = self.prompt.text().trim().to_string();
-                    let typed_complete = {
-                        let registry = self.prompt.slash_controller.registry();
-                        crate::slash::parse_invocation(&typed_owned).is_some_and(|invocation| {
-                            invocation.args.is_empty()
-                                && registry.get_for_dispatch(invocation.token).is_some()
-                                && crate::slash::is_command_complete(&typed_owned, registry)
-                        })
-                    };
-                    let snap = self.prompt.slash_snapshot();
-                    let menu_matches_typed = crate::slash::parse_invocation(&typed_owned)
-                        .is_some_and(|invocation| {
-                            snap.query.eq_ignore_ascii_case(invocation.token)
-                        });
-                    let highlight_is_typed = crate::slash::is_typed_slash_selected(
-                        &snap,
-                        self.prompt.text(),
-                        self.prompt.slash_controller.registry(),
-                    );
-                    let exact_command =
-                        highlight_is_typed || (typed_complete && !menu_matches_typed);
-                    if exact_command {
-                        self.prompt.slash_commit_preview();
+                    if crate::slash::mid_text_hoist::typed_text_is_slash_mention(&typed_owned) {
                         self.prompt.slash_close();
                         slash_accepted_send = true;
                     } else {
-                        let chains = snap
-                            .selection()
-                            .is_some_and(|row| row.insert_text.ends_with(' '));
-                        self.prompt.slash_commit_preview();
-                        self.prompt.accept_slash_completion(&self.session.models);
-                        if chains {
-                            return InputOutcome::Changed;
+                        // A current menu sends the highlight when it is a different
+                        // command (`/log` highlighted `/login`). A finished
+                        // command sends as typed when the highlight is that
+                        // command, or when the snapshot is stale (query still
+                        // empty, highlight `/quit`, typed `/view-plan`). Unknown
+                        // prefixes still accept the highlight.
+                        let typed_complete = {
+                            let registry = self.prompt.slash_controller.registry();
+                            crate::slash::parse_invocation(&typed_owned).is_some_and(|invocation| {
+                                invocation.args.is_empty()
+                                    && registry.get_for_dispatch(invocation.token).is_some()
+                                    && crate::slash::is_command_complete(&typed_owned, registry)
+                            })
+                        };
+                        let snap = self.prompt.slash_snapshot();
+                        let menu_matches_typed = crate::slash::parse_invocation(&typed_owned)
+                            .is_some_and(|invocation| {
+                                snap.query.eq_ignore_ascii_case(invocation.token)
+                            });
+                        let highlight_is_typed = crate::slash::is_typed_slash_selected(
+                            &snap,
+                            self.prompt.text(),
+                            self.prompt.slash_controller.registry(),
+                        );
+                        let exact_command =
+                            highlight_is_typed || (typed_complete && !menu_matches_typed);
+                        if exact_command {
+                            self.prompt.slash_commit_preview();
+                            self.prompt.slash_close();
+                            slash_accepted_send = true;
+                        } else {
+                            let chains = snap
+                                .selection()
+                                .is_some_and(|row| row.insert_text.ends_with(' '));
+                            self.prompt.slash_commit_preview();
+                            self.prompt.accept_slash_completion(&self.session.models);
+                            if chains {
+                                return InputOutcome::Changed;
+                            }
+                            self.prompt.slash_close();
+                            slash_accepted_send = true;
                         }
-                        self.prompt.slash_close();
-                        slash_accepted_send = true;
                     }
                 }
                 // Everything else: fall through to normal text editing (which calls refresh_slash via PromptEvent::Edited)
@@ -1852,6 +1860,7 @@ mod shift_tab_cycle_mode_tests {
 mod slash_menu_enter_tests {
     use super::*;
     use crate::app::app_view::InputOutcome;
+    use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn enter() -> KeyEvent {
@@ -2116,6 +2125,106 @@ mod slash_menu_enter_tests {
         assert!(
             agent.prompt.text().starts_with("/model"),
             "composer must stay a slash completion; before={before:?} after={:?}",
+            agent.prompt.text()
+        );
+    }
+
+    fn agent_with_cursor_on_token(text: &str, token: &str) -> crate::app::agent_view::AgentView {
+        let mut agent = super::test_fixtures::make_agent();
+        let start = text
+            .find(token)
+            .unwrap_or_else(|| panic!("{token} in {text:?}"));
+        let cursor = start + token.len();
+        agent.prompt.set_text(text);
+        agent.prompt.set_cursor(cursor);
+        agent.prompt.refresh_slash(&agent.session.models);
+        assert!(
+            agent.prompt.slash_open(),
+            "precondition: slash dropdown open on {token} in {text:?}"
+        );
+        agent
+    }
+
+    /// Operator 2026-10-21: "sentences where you type things like this: /plan
+    /// like if you type a skill in the prompt, that just throws a toast and
+    /// blocks submitting the prompt. we should be able to override that
+    /// behavior by submitting anyway. that does not mean to use the skill,
+    /// it just means the skill is mentioned."
+    /// Mention is not invoke. Enter submits the sentence as ordinary text.
+    #[test]
+    fn mid_text_plan_mention_enter_submits_as_ordinary_text_not_plan_mode() {
+        const TYPED: &str = "sentences where you type things like this: /plan like if you type a skill in the prompt";
+        let mut agent = agent_with_cursor_on_token(TYPED, "/plan");
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(ref text)) if text == TYPED
+            ),
+            "mention is not invoke: Enter must submit the sentence, not run /plan, got {outcome:?}; composer={:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.slash_open(),
+            "slash dropdown must not trap submit"
+        );
+        assert!(
+            agent.toast.is_none(),
+            "a /plan mention must not toast and block submit, got {:?}",
+            agent.toast
+        );
+    }
+
+    /// Leading `/plan` with no surrounding sentence still sends as the command.
+    #[test]
+    fn leading_plan_enter_still_sends_the_command() {
+        let mut agent = agent_with_slash("/plan");
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/plan"
+            ),
+            "lone /plan must still invoke, got {outcome:?}; composer={:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// A skill slash in a sentence is a mention. Enter submits the prompt.
+    #[test]
+    fn mid_text_skill_mention_enter_submits_as_ordinary_text() {
+        const TYPED: &str = "please /pr-workflow now";
+        let mut agent = super::test_fixtures::make_agent();
+        let models = agent.session.models.clone();
+        agent.prompt.sync_acp_commands(
+            &[
+                acp::AvailableCommand::new("pr-workflow", "PR workflow skill").meta(
+                    serde_json::json!({
+                        "path": "/tmp/skills/pr-workflow/SKILL.md",
+                        "scope": "local",
+                    })
+                    .as_object()
+                    .cloned(),
+                ),
+            ],
+            None,
+            &models,
+        );
+        let start = TYPED.find("/pr-workflow").expect("/pr-workflow in typed");
+        agent.prompt.set_text(TYPED);
+        agent.prompt.set_cursor(start + "/pr-workflow".len());
+        agent.prompt.refresh_slash(&agent.session.models);
+        assert!(
+            agent.prompt.slash_open(),
+            "precondition: slash dropdown open on the skill mention"
+        );
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(ref text)) if text == TYPED
+            ),
+            "skill mention is not invoke: Enter must submit the sentence, got {outcome:?}; composer={:?}",
             agent.prompt.text()
         );
     }

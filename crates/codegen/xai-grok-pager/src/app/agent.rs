@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use xai_acp_lib::AcpAgentTx;
 use xai_grok_shell::extensions::notification::GoalClassifierVerdict;
 use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::tools::TodoItem;
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub usize);
@@ -592,6 +593,11 @@ pub struct GoalDisplayState {
     /// Without it the timer ticks backward when a notification's authoritative base is below the value the pager already extrapolated to.
     /// See [`Self::live_elapsed_ms`].
     pub elapsed_floor_ms: u64,
+    /// This Goal's overlay Progress. Not the session mill todo board.
+    pub progress_items: Vec<TodoItem>,
+    /// Session todo contents already on the board when this Goal was created.
+    /// A later Plan that still contains all of these is leftover mill history, not this planning turn.
+    pub session_todos_at_goal_create: Vec<String>,
 }
 impl GoalDisplayState {
     /// Minimal state for tests that only need a present goal (e.g. occluder gating); field values are representative, nothing depends on them.
@@ -633,7 +639,32 @@ impl GoalDisplayState {
             planning: false,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
+            progress_items: Vec::new(),
+            session_todos_at_goal_create: Vec::new(),
         }
+    }
+    /// Snapshot the session todo board at Goal create. Those items are not this Goal's Progress.
+    pub fn capture_session_todos_at_goal_create(&mut self, session_todos: &[TodoItem]) {
+        self.session_todos_at_goal_create = session_todos
+            .iter()
+            .map(|item| item.content.clone())
+            .collect();
+        self.progress_items.clear();
+    }
+    /// Adopt a session Plan as this Goal's overlay Progress.
+    /// A Plan that still contains every session todo from Goal create is leftover mill history.
+    pub fn adopt_goal_progress_from_session_plan(&mut self, items: Vec<TodoItem>) {
+        if self.session_plan_is_unrelated_leftover(&items) {
+            return;
+        }
+        self.progress_items = items;
+    }
+    fn session_plan_is_unrelated_leftover(&self, new: &[TodoItem]) -> bool {
+        !self.session_todos_at_goal_create.is_empty()
+            && self
+                .session_todos_at_goal_create
+                .iter()
+                .all(|content| new.iter().any(|item| item.content == *content))
     }
     pub fn live_tokens_used(&self, context_used: Option<u64>, live_subagent_tokens: u64) -> i64 {
         if self.status == GoalDisplayStatus::Active {
@@ -667,6 +698,54 @@ impl GoalDisplayState {
         live.max(self.elapsed_floor_ms)
     }
 }
+
+#[cfg(test)]
+mod goal_progress_tests {
+    use super::*;
+    use xai_grok_shell::tools::{TodoItem, TodoStatus};
+
+    fn mill_todo(i: usize) -> TodoItem {
+        TodoItem {
+            content: format!("Lean 4.35 mill walk {i}"),
+            priority: Default::default(),
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }
+    }
+
+    #[test]
+    fn adopt_goal_progress_ignores_session_todos_already_on_the_board_at_create() {
+        let mut goal = GoalDisplayState::test_stub();
+        let mill: Vec<TodoItem> = (0..347).map(mill_todo).collect();
+        goal.capture_session_todos_at_goal_create(&mill);
+        goal.adopt_goal_progress_from_session_plan(mill);
+        assert!(
+            goal.progress_items.is_empty(),
+            "After a just-created Goal, overlay Progress must not paint hundreds of older mill session todos even after the first token. Those checkmarks are not this planning turn."
+        );
+
+        goal.tokens_used = 1;
+        let this_goal = vec![TodoItem {
+            content: "Write the plan for this planning turn".into(),
+            priority: Default::default(),
+            status: TodoStatus::InProgress,
+            meta: None,
+            size: None,
+        }];
+        goal.adopt_goal_progress_from_session_plan(this_goal);
+        assert_eq!(
+            goal.progress_items.len(),
+            1,
+            "this Goal's Progress must still paint after the first token"
+        );
+        assert_eq!(
+            goal.progress_items[0].content,
+            "Write the plan for this planning turn"
+        );
+    }
+}
+
 /// What the agent is currently doing.
 ///
 /// Enforces mutual exclusivity: the agent is either idle, running a turn, or running a command, never two at once.

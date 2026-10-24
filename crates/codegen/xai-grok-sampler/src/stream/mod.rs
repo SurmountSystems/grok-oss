@@ -131,7 +131,10 @@ const WINDOW_CHARS: usize = 768;
 /// Shortest phrase that can count as a loop unit.
 const MIN_PHRASE_CHARS: usize = 24;
 /// Consecutive copies of a short sentence that mean a loop.
-const MIN_SHORT_REPEATS: usize = 5;
+/// GitHub #223: 4 then 5 was still a hair trigger on a nested L3 reviewer
+/// restating a short PASS/FAIL verdict a few times. Eight still stops a
+/// tight loop. Do not delete this breaker.
+const MIN_SHORT_REPEATS: usize = 8;
 /// Consecutive copies of a longer phrase (a two-sentence cycle).
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
@@ -581,13 +584,13 @@ mod dest_encoder_skip_repetition_tests {
     }
 
     #[test]
-    fn dest_encoder_skip_single_sentence_five_times_is_repetitive() {
+    fn dest_encoder_skip_single_sentence_at_min_short_repeats_is_repetitive() {
         let (first, _) = DEST_ENCODER_SKIP_LOOP
             .split_once(". ")
             .expect("fixture is two sentences");
         let sentence = format!("{first}. ");
         assert!(!is_repetitive(&sentence.repeat(4)));
-        assert!(is_repetitive(&sentence.repeat(5)));
+        assert!(is_repetitive(&sentence.repeat(MIN_SHORT_REPEATS)));
     }
 
     #[test]
@@ -931,9 +934,10 @@ mod dest_encoder_skip_repetition_tests {
 | Red compile | 32 minutes | 80.0k | not started | no sample was printed | still open |
 | White frame paint | 15 minutes | 80.0k | not started | no sample was printed | still open |
 ";
-        assert!(
-            table.matches(cell).count() >= MIN_SHORT_REPEATS,
-            "the screenshot cell must repeat at least {MIN_SHORT_REPEATS} times"
+        assert_eq!(
+            table.matches(cell).count(),
+            6,
+            "the screenshot has six status rows repeating `{cell}`"
         );
         assert!(
             table.matches(shared).count() >= MIN_LONG_REPEATS,
@@ -950,9 +954,8 @@ mod dest_encoder_skip_repetition_tests {
             "the prose sentence must use the short-phrase threshold"
         );
         assert!(
-            !is_repetitive(&sentence.repeat(MIN_SHORT_REPEATS - 1)),
-            "{} copies of one prose sentence must not stop",
-            MIN_SHORT_REPEATS - 1
+            !is_repetitive(&sentence.repeat(5)),
+            "five copies of one prose sentence must not stop"
         );
         assert!(
             is_repetitive(&sentence.repeat(MIN_SHORT_REPEATS)),
@@ -962,9 +965,11 @@ mod dest_encoder_skip_repetition_tests {
     }
 
     /// GitHub #223. Four copies of a short phrase is ordinary restatement
-    /// and must not stop the turn. A true runaway still must: five copies
-    /// of that same short phrase, and three copies of the dest-encoder-skip
-    /// pair from GitHub #133. Do not delete this breaker.
+    /// and must not stop the turn. A true runaway still must:
+    /// [`MIN_SHORT_REPEATS`] copies of that same short phrase, and three
+    /// copies of the dest-encoder-skip pair from GitHub #133. Do not
+    /// delete this breaker. Five copies is not the trip; see
+    /// `nested_reviewer_short_verdict_repeated_a_few_times_does_not_stop_the_turn`.
     #[test]
     fn short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does() {
         let short = "Let me try that once more. ";
@@ -985,17 +990,92 @@ mod dest_encoder_skip_repetition_tests {
             "four copies of a short phrase must not count as a loop"
         );
 
-        let mut five = StreamRepetitionGuard::default();
-        five.append(SamplingChannel::Text, &short.repeat(5));
+        let mut runaway = StreamRepetitionGuard::default();
+        runaway.append(SamplingChannel::Text, &short.repeat(MIN_SHORT_REPEATS));
         assert!(
-            five.is_looping(SamplingChannel::Text),
-            "five copies of a short phrase must still stop"
+            runaway.is_looping(SamplingChannel::Text),
+            "{MIN_SHORT_REPEATS} copies of a short phrase must still stop"
         );
         assert!(
-            is_repetitive(&short.repeat(5)),
-            "five copies of a short phrase must still count as a loop"
+            is_repetitive(&short.repeat(MIN_SHORT_REPEATS)),
+            "{MIN_SHORT_REPEATS} copies of a short phrase must still count as a loop"
         );
-        match five.error(SamplingChannel::Text, 1) {
+        match runaway.error(SamplingChannel::Text, 1) {
+            SamplingError::RepetitiveGeneration {
+                channel,
+                aborted_at_chunk,
+            } => {
+                assert_eq!(channel, SamplingChannel::Text.as_str());
+                assert_eq!(aborted_at_chunk, Some(1));
+                assert!(
+                    REPETITIVE_GENERATION_USER_MESSAGE.contains("repeating the same sentence"),
+                    "user-facing stop must name repeating sentence, got {REPETITIVE_GENERATION_USER_MESSAGE}"
+                );
+            }
+            other => panic!("expected RepetitiveGeneration, got {other:?}"),
+        }
+
+        let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
+        assert!(
+            !is_repetitive(&one.repeat(2)),
+            "two copies of the dest-encoder-skip pair must still not stop"
+        );
+        assert!(
+            is_repetitive(&one.repeat(3)),
+            "three copies of `{DEST_ENCODER_SKIP_LOOP}` must still stop"
+        );
+    }
+
+    /// GitHub #223 follow-up. Operator 2026-10-21: "The first reviewer
+    /// stopped on a repeating sentence. This is concerning to see in one
+    /// of your L2s." Prior land raised MIN_SHORT_REPEATS from 4 to 5.
+    /// That is not done. A nested L3 reviewer finishing a report that
+    /// restates a short PASS/FAIL verdict a few times must not hit
+    /// Stopped: repeating sentence. A real tight loop still must.
+    #[test]
+    fn nested_reviewer_short_verdict_repeated_a_few_times_does_not_stop_the_turn() {
+        let operator = "The first reviewer stopped on a repeating sentence. This is concerning to see in one of your L2s.";
+        assert_eq!(
+            operator,
+            "The first reviewer stopped on a repeating sentence. This is concerning to see in one of your L2s.",
+            "quote the Operator outcome; this death is a product miss, not a normal review path"
+        );
+
+        let pass = "L3 reviewer PASS the contract. ";
+        let fail = "L3 reviewer FAIL the contract. ";
+        for verdict in [pass, fail] {
+            assert!(
+                verdict.len() >= MIN_PHRASE_CHARS && verdict.len() < LONG_PHRASE_CHARS,
+                "fixture must use the short-phrase threshold, got {} for {verdict}",
+                verdict.len()
+            );
+            // A few times: five copies is the prior land's trip; seven is
+            // still a finishing restatement, not a tight loop.
+            for copies in [5usize, 7] {
+                let mut guard = StreamRepetitionGuard::default();
+                guard.append(SamplingChannel::Text, &verdict.repeat(copies));
+                assert!(
+                    !guard.is_looping(SamplingChannel::Text),
+                    "{copies} copies of a nested reviewer short verdict must not stop the turn"
+                );
+                assert!(
+                    !is_repetitive(&verdict.repeat(copies)),
+                    "{copies} copies of a nested reviewer short verdict must not count as a loop"
+                );
+            }
+        }
+
+        let mut loop_guard = StreamRepetitionGuard::default();
+        loop_guard.append(SamplingChannel::Text, &pass.repeat(MIN_SHORT_REPEATS));
+        assert!(
+            loop_guard.is_looping(SamplingChannel::Text),
+            "{MIN_SHORT_REPEATS} copies of that short verdict is a tight loop and must still stop"
+        );
+        assert!(
+            is_repetitive(&pass.repeat(MIN_SHORT_REPEATS)),
+            "{MIN_SHORT_REPEATS} copies of that short verdict must still count as a loop"
+        );
+        match loop_guard.error(SamplingChannel::Text, 1) {
             SamplingError::RepetitiveGeneration {
                 channel,
                 aborted_at_chunk,

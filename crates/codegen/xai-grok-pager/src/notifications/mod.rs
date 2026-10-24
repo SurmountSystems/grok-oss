@@ -536,6 +536,7 @@ mod tests {
             turn_elapsed: None,
             is_busy,
             focused: true,
+            spawn_description: None,
         }
     }
 

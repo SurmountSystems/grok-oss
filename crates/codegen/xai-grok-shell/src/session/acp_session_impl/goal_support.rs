@@ -1301,7 +1301,12 @@ impl SessionActor {
                     // Turn the "planning…" badge off NOW, before the plan/baseline I/O below, instead of only at the very end.
                     // That way the UI never advertises "planning" while it can no longer replan.
                     self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
-                    if attempt_file.persist(&plan_file).is_err() {
+                    // Snapshot the actor-held GoalPlan across attempt-file persist so a
+                    // PLAN_FILE stop stays Planned and restore still has the goals.
+                    let goal_plan_snapshot = self.snapshot_actor_goal_plan();
+                    let persist_err = attempt_file.persist(&plan_file).is_err();
+                    self.restore_actor_goal_plan(goal_plan_snapshot);
+                    if persist_err {
                         let still_same_goal =
                             self.goal_tracker.lock().snapshot().is_some_and(|goal| {
                                 same_active_goal(goal) && goal.plan_file.is_none()
@@ -1317,6 +1322,14 @@ impl SessionActor {
                         }
                         break;
                     }
+                    // After Planned, the current goal is the plan headline, not
+                    // the original complaint. Restore already kept the GoalPlan;
+                    // adopt the written work so a later `/goal` reminder names it.
+                    let planned_title =
+                        crate::session::goal_planner::planned_goal_title_from_path(&plan_file);
+                    if let Some(title) = planned_title.as_deref() {
+                        self.goal_plan.lock().adopt_planned_goal(title);
+                    }
                     // Record `plan_file`, then snapshot the planner's ORIGINAL plan as the immutable baseline the verifier diffs later edits against
                     // Capture once: this runs only when no plan exists yet, and the `is_none()` guard keeps a restart / re-entry from overwriting it
                     let baseline_target = {
@@ -1331,8 +1344,20 @@ impl SessionActor {
                         };
                         let need_baseline = goal.plan_baseline_file.is_none();
                         goal.plan_file = Some(plan_file);
+                        if let Some(title) = planned_title.as_deref() {
+                            goal.objective = title.to_string();
+                        }
                         need_baseline.then_some((src, dst))
                     };
+                    if planned_title.is_some() {
+                        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                        self.goal_notify_sender().emit_goal_updated(
+                            &mut self.goal_tracker.lock(),
+                            tokens_used,
+                            finished_marginal,
+                        );
+                    }
                     if let Some((src, dst)) = baseline_target {
                         let tmp = dst
                             .with_file_name(format!("plan-baseline-{}.md", uuid::Uuid::now_v7()));

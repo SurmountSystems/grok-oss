@@ -177,12 +177,14 @@ pub(crate) struct CompactionConfig {
 
     /// Economic-mode Cell (implement-effort / Token Economy). Nested L2/L3
     /// catalog is capped at 200k via [`crate::util::config::session_catalog_window`];
-    /// nested live sampling is 40% of that catalog via
-    /// [`crate::util::config::session_sampling_window`]. L1 uses the catalog
-    /// window. Soft-cap effective context at 200K for pricing (see
-    /// [`crate::util::config::ECONOMIC_CONTEXT_CAP`]). Seeded from
-    /// `[ui].economic_mode` at session spawn; toggled per conversation with
-    /// `/economic-mode`. `Cell` so slash handlers can flip without `&mut self`.
+    /// nested live sampling is that catalog cap (`NESTED_SESSION_CONTEXT_CAP`,
+    /// 200k) via [`crate::util::config::session_sampling_window`]. 40% of
+    /// catalog is keep-near attention only (`session_attention_target_tokens`).
+    /// L1 uses the catalog window (500k). Soft-cap effective context at 200K
+    /// for pricing (see [`crate::util::config::ECONOMIC_CONTEXT_CAP`]). Seeded
+    /// from `[ui].economic_mode` at session spawn; toggled per conversation
+    /// with `/economic-mode`. `Cell` so slash handlers can flip without
+    /// `&mut self`.
     pub economic_mode: Cell<bool>,
     /// Uncapped catalog context window for the active model (before economic
     /// cap). Updated on model switch / metadata refresh so disabling economic

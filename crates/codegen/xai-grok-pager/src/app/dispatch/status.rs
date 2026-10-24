@@ -568,6 +568,18 @@ pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Session `/clear` hides leftover/ghost Subagents rows on this conversation.
+/// The live nested writer stays. This is not `/new`.
+pub(super) fn dispatch_clear_leftover_subagent_rows(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.clear_session_leftover_subagent_rows();
+    }
+    vec![]
+}
+
 /// `/clear-completed-todos` asks the shell to archive finished board rows.
 pub(super) fn dispatch_clear_completed_todos(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
