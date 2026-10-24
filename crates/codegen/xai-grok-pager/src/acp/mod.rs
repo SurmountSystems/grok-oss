@@ -247,6 +247,9 @@ pub(in crate::acp) async fn initialize_connection(
     let agent = initialize(&tx, flags).await?;
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&agent.auth_methods);
+    // A live authorized grok-oss on this machine already published authorize_ask.sock.
+    // Do not require a fresh authorize. Do not paint /login.
+    let needs_login = needs_login && xai_grok_shell::util::config::fresh_authorize_required();
     startup::enter(StartupPhase::EagerAuth);
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
         bounded_eager_auth(
@@ -667,6 +670,9 @@ async fn eager_auth_or_login_fallback(
                 .iter()
                 .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
             if has_api_key {
+                return (false, login_label, login_method_id, auth_start_mode, None);
+            }
+            if !xai_grok_shell::util::config::fresh_authorize_required() {
                 return (false, login_label, login_method_id, auth_start_mode, None);
             }
             let (label, method_id, mode) = find_interactive_login_method(auth_methods);

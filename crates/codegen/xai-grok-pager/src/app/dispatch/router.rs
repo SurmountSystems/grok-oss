@@ -1134,6 +1134,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowSpend => super::status::dispatch_show_spend(app),
         Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
         Action::ClearCompletedTodos => super::status::dispatch_clear_completed_todos(app),
+        Action::ClearLeftoverSubagentRows => {
+            super::status::dispatch_clear_leftover_subagent_rows(app)
+        }
         Action::AddSessionNote { text, tags } => {
             super::notes::dispatch_add_session_note(app, text, tags)
         }

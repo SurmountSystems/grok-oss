@@ -110,6 +110,7 @@ fn l1_command_running_execute_auto_backgrounds_and_does_not_paint_send_to_bg() {
             is_bash_turn: false,
             is_pending_user_input: false,
             goal_verifying: false,
+            goal_paused: false,
             watchers: Watchers::default(),
             parked: false,
             flat_background: false,
@@ -190,6 +191,274 @@ fn l1_command_running_live_execute_update_auto_backgrounds() {
         )),
         "live L1 execute during CommandRunning must auto-background, got {:?}",
         app.pending_effects
+    );
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: Ctrl+B / DemoteToBackground still sends a blocking nested
+/// agent to the background. Deleting that path is the bug.
+#[test]
+fn send_blocking_subagent_to_background_capability_was_not_removed() {
+    use crate::app::agent_view::test_fixtures::{running_subagent_info, simulate_subagent_wait};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        simulate_subagent_wait(agent);
+        agent
+            .subagent_sessions
+            .insert("child-sid".into(), running_subagent_info("child-sid"));
+        assert!(
+            agent.has_running_foreground_subagent(),
+            "setup: the nested agent must still be a blocking foreground subagent"
+        );
+    }
+
+    let effects = dispatch(Action::DemoteToBackground, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            }] if session_id.0.as_ref() == "test-session"
+                && (tool_call_id == "task-tc-1" || tool_call_id == "sa-child-sid")
+        ),
+        "send-to-background for a blocking subagent must still exist, got {effects:?}"
+    );
+    let agent = get_agent(&app, id);
+    assert!(
+        !agent.has_running_foreground_subagent(),
+        "Ctrl+B must send the blocking subagent to the background"
+    );
+}
+
+/// Operator 2026-10-23: send-to-background on a blocking nested takeover
+/// must still close that overlay so L1 is not stuck looking at the child.
+#[test]
+fn send_blocking_subagent_to_background_closes_takeover() {
+    use crate::app::agent_view::test_fixtures::{make_agent, running_subagent_info};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.insert_test_child("child-sid".into(), Box::new(make_agent()));
+        agent
+            .subagent_sessions
+            .insert("child-sid".into(), running_subagent_info("child-sid"));
+        agent.open_subagent_fullscreen("child-sid".into());
+        assert_eq!(agent.active_subagent.as_deref(), Some("child-sid"));
+    }
+
+    let effects = dispatch(Action::DemoteToBackground, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground { session_id, .. }]
+                if session_id.0.as_ref() == "test-session"
+        ),
+        "send-to-background for a blocking takeover must still exist, got {effects:?}"
+    );
+    let agent = get_agent(&app, id);
+    assert!(
+        agent.active_subagent.is_none(),
+        "send-to-background must close the blocking nested overlay so L1 can type"
+    );
+    assert!(
+        !agent.has_running_foreground_subagent(),
+        "the nested agent must be in the background after send-to-background"
+    );
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: auto-background the nested agent that is blocking L1. Do not
+/// "fix" that by deleting send-to-background.
+#[test]
+fn l1_blocking_subagent_auto_backgrounds_instead_of_deleting_send_to_background() {
+    use crate::actions::ActionRegistry;
+    use crate::app::agent_view::{ActivePane, test_fixtures::simulate_subagent_wait};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        simulate_subagent_wait(agent);
+        assert!(agent.set_active_pane(ActivePane::Prompt, true));
+        assert!(
+            agent
+                .session
+                .tracker
+                .blocking_subagent_tool_call_id()
+                .is_some(),
+            "setup: L1 must still be blocked on the nested subagent wait"
+        );
+    }
+
+    let effects = crate::app::dispatch::maybe_auto_background_l1_blocking_execute(&mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            }] if session_id.0.as_ref() == "test-session" && tool_call_id == "task-tc-1"
+        ),
+        "L1 must auto-background a blocking nested agent so the Operator can type, got {effects:?}"
+    );
+    {
+        let agent = get_agent(&app, id);
+        assert!(
+            agent
+                .session
+                .tracker
+                .blocking_subagent_tool_call_id()
+                .is_none(),
+            "auto-background must clear the blocking nested wait"
+        );
+    }
+
+    let registry = ActionRegistry::defaults();
+    let agent = app.agents.get_mut(&id).unwrap();
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        &registry,
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "the Operator box must accept typing after L1 auto-backgrounds a blocking subagent"
+    );
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: a blocking `get_command_or_subagent_output` wait is an agent
+/// blocking L1. Auto-background it. Do not delete send-to-background.
+#[test]
+fn l1_blocking_get_command_or_subagent_output_wait_auto_backgrounds_instead_of_deleting_send_to_background()
+ {
+    use crate::actions::ActionRegistry;
+    use crate::app::agent_view::{ActivePane, test_fixtures::simulate_task_output_wait};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        simulate_task_output_wait(agent, "sa-child-sid");
+        assert!(agent.set_active_pane(ActivePane::Prompt, true));
+        assert!(
+            agent
+                .session
+                .tracker
+                .blocking_subagent_tool_call_id()
+                .is_some(),
+            "setup: L1 must still be blocked on get_command_or_subagent_output"
+        );
+        assert!(
+            agent.can_send_to_background(),
+            "send-to-background for that blocking wait must still exist"
+        );
+    }
+
+    let effects = crate::app::dispatch::maybe_auto_background_l1_blocking_execute(&mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            }] if session_id.0.as_ref() == "test-session" && tool_call_id == "wait-1"
+        ),
+        "L1 must auto-background a blocking get_command_or_subagent_output wait, got {effects:?}"
+    );
+    {
+        let agent = get_agent(&app, id);
+        assert!(
+            agent
+                .session
+                .tracker
+                .blocking_subagent_tool_call_id()
+                .is_none(),
+            "auto-background must clear the blocking nested wait"
+        );
+    }
+
+    let registry = ActionRegistry::defaults();
+    assert!(
+        registry
+            .find(crate::actions::ActionId::SendToBackground)
+            .is_some(),
+        "auto-background must not delete the send-to-background capability"
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        &registry,
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "the Operator box must accept typing after L1 auto-backgrounds a blocking wait"
+    );
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: Ctrl+B still sends a blocking `get_command_or_subagent_output`
+/// wait to the background. Deleting that path is the bug.
+#[test]
+fn send_blocking_get_command_or_subagent_output_wait_to_background_capability_was_not_removed() {
+    use crate::app::agent_view::test_fixtures::simulate_task_output_wait;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        simulate_task_output_wait(agent, "sa-child-sid");
+        assert!(
+            agent.can_send_to_background(),
+            "setup: send-to-background must still exist for a blocking nested wait"
+        );
+    }
+
+    let effects = dispatch(Action::DemoteToBackground, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DemoteToBackground {
+                session_id,
+                tool_call_id,
+            }] if session_id.0.as_ref() == "test-session" && tool_call_id == "wait-1"
+        ),
+        "send-to-background for a blocking get_command_or_subagent_output wait must still exist, got {effects:?}"
+    );
+    let agent = get_agent(&app, id);
+    assert!(
+        agent
+            .session
+            .tracker
+            .blocking_subagent_tool_call_id()
+            .is_none(),
+        "Ctrl+B must send the blocking nested wait to the background"
     );
 }
 

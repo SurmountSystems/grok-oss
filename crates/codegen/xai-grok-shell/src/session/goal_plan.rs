@@ -14,6 +14,8 @@ pub(crate) struct GoalPlan {
     post_plan_retry_pending: bool,
     post_plan_retry_count: u32,
     extra: Vec<(String, String)>,
+    /// Mill/todo tracker history for this goal's Progress. A new goal starts empty.
+    progress_items: Vec<String>,
 }
 
 /// Result of applying a user message, giving up, or replacing.
@@ -47,11 +49,22 @@ impl GoalPlan {
         &self.extra
     }
 
+    pub(crate) fn progress_items(&self) -> &[String] {
+        &self.progress_items
+    }
+
+    /// Record mill/todo tracker history for this in-flight goal's Progress.
+    /// Creating a different new goal clears this list; same-prompt resume keeps it.
+    pub(crate) fn record_progress_items(&mut self, items: Vec<String>) {
+        self.progress_items = items;
+    }
+
     pub(crate) fn post_plan_retry_count(&self) -> u32 {
         self.post_plan_retry_count
     }
 
     /// Replace the goal list. Arms the one-shot post-plan retry.
+    /// A new goal must not carry prior mill/todo tracker history into Progress.
     pub(crate) fn set_goals(&mut self, goals: Vec<String>) {
         self.goals = goals
             .into_iter()
@@ -59,6 +72,7 @@ impl GoalPlan {
             .filter(|goal| !goal.is_empty())
             .collect();
         self.post_plan_retry_pending = true;
+        self.progress_items.clear();
     }
 
     /// After the planner writes PLAN_FILE, the current goal is the planned work.
@@ -102,6 +116,7 @@ impl GoalPlan {
     pub(crate) fn give_up(&mut self) -> GoalPlanReply {
         self.goals.clear();
         self.post_plan_retry_pending = false;
+        self.progress_items.clear();
         empty_host_reply()
     }
 
@@ -406,6 +421,43 @@ mod tests {
             "same-prompt resume must not reply {NO_CURRENT_GOALS:?}, got {:?}",
             second.text
         );
+    }
+
+    /// Operator: A just-created goal (`Goal created just now`, 0 tokens) must not
+    /// paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk)
+    /// as if they were this planning turn. Stale tracker history must not masquerade
+    /// as current Progress.
+    #[test]
+    fn test_goal_plan_new_goal_does_not_carry_prior_mill_progress() {
+        let mut plan = GoalPlan::new();
+        let mill = "/goal We need to update to Lean 4.35, in parallel, using our seven team mates and Hunter as a watcher.";
+        let first = plan.apply_user_goal_message(mill);
+        assert!(first.goals_set);
+        let mill_progress: Vec<String> = (0..347)
+            .map(|i| format!("Lean 4.35 mill walk {i}"))
+            .collect();
+        plan.record_progress_items(mill_progress.clone());
+        assert_eq!(plan.progress_items().len(), 347);
+
+        let same = plan.apply_user_goal_message(mill);
+        assert!(
+            !same.goals_set,
+            "same-prompt resume must not reset an in-flight matching goal"
+        );
+        assert_eq!(
+            plan.progress_items(),
+            mill_progress.as_slice(),
+            "same-prompt resume must keep tracker progress"
+        );
+
+        let created = plan.apply_user_goal_message("/goal Plan this planning turn");
+        assert!(created.goals_set);
+        assert!(
+            plan.progress_items().is_empty(),
+            "A just-created goal (`Goal created just now`, 0 tokens) must not paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk) as if they were this planning turn. Stale tracker history must not masquerade as current Progress. got {:?}",
+            plan.progress_items()
+        );
+        assert_eq!(plan.primary_goal(), Some("Plan this planning turn"));
     }
 
     #[test]

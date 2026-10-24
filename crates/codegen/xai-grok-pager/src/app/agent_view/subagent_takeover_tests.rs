@@ -153,19 +153,22 @@ fn double_click_opens_the_linked_child_or_folds_the_message_row() {
         );
     }
 }
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: Ctrl+B on a blocking nested takeover still sends that
+/// subagent to the background. It is a real product action, not a hover
+/// hint the Operator must click before they can type.
 #[test]
-fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
+fn blocking_subagent_takeover_ctrl_b_sends_to_background() {
     let registry = ActionRegistry::defaults();
     let child_sid = "child-sid".to_string();
     let mut parent = make_agent();
-    add_running_execute(&mut parent);
-    assert!(
-        parent
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .is_some()
-    );
+    parent.session.state = crate::app::agent::AgentState::TurnRunning;
+    parent
+        .subagent_sessions
+        .insert(child_sid.clone(), running_subagent_info(&child_sid));
     let mut child = make_agent();
     add_running_execute(&mut child);
     assert!(
@@ -187,30 +190,16 @@ fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
     );
     parent.open_subagent_fullscreen(child_sid.clone());
     let outcome = parent.handle_input(&ctrl('b'), &registry);
-    assert!(matches!(outcome, InputOutcome::Changed));
-    assert!(!matches!(
-        outcome,
-        InputOutcome::Action(Action::DemoteToBackground)
-    ));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
+        "Ctrl+B must still send a blocking subagent to the background, got {outcome:?}"
+    );
     assert_eq!(parent.active_subagent.as_deref(), Some(child_sid.as_str()));
     assert!(
-        parent
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .is_some()
+        parent.has_running_foreground_subagent(),
+        "AgentView Ctrl+B emits DemoteToBackground; dispatch applies the background"
     );
-    assert!(
-        parent
-            .subagent_views
-            .get(&child_sid)
-            .unwrap_or_else(|| panic!("missing map entry"))
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .is_some()
-    );
-    let child = &parent
+    let child = parent
         .subagent_views
         .get(&child_sid)
         .unwrap_or_else(|| panic!("missing map entry"));
@@ -219,7 +208,8 @@ fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
         !child
             .current_shortcut_hints(&registry)
             .iter()
-            .any(|hint| hint.label == "send to bg")
+            .any(|hint| hint.label == "send to bg"),
+        "GitHub #232: send to bg is not a required hover hint; Ctrl+B is the action"
     );
     assert!(child.hit_bg_button.rect.is_none());
 }

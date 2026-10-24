@@ -14,7 +14,7 @@ Named tests are contracts. Do not fit tests to code. Observe red, then change th
 
 L0 is the dashboard, one level above L1. L1 is where the agent talks to the Operator. L2 is a coordinator (the Operator can prompt an L2 they are watching). L3 implements and reviews. An L3 does not spawn. There is no L4. Default: L1 spawns an L2; that L2 spawns and manages L3s. Do not keep implement work on L1. Deep home: [`FORK.md`](FORK.md) § *Hierarchical subagents*.
 
-The Hierarchical fast path on L1 is one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path. Nested sampling death is not a stop: document remaining on disk, resume or spawn, keep the named product work moving. Remaining pointer: `/home/hunter/.agents/reports/remaining-2026-10-21-all-open-bugs.md`.
+The Hierarchical fast path on L1 is one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path. Nested sampling death is not a stop: document remaining on disk, resume or spawn, keep the named product work moving. Remaining pointer: `/home/hunter/.agents/reports/remaining-2026-10-21-all-open-bugs.md`. A finished nested agent is a same-turn next action. Silence after a finish looks like a stall. Detail: host `~/.grok/AGENTS.md` § *Report finished nested work the same turn* and [`FORK.md`](FORK.md) § *Hierarchical subagents*.
 
 Speaker labels are Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2.
 

@@ -744,6 +744,273 @@ fn auth_complete_after_login_posts_waiting_parent_and_nested_401_with_login_jwt_
     }
 }
 
+/// Operator 2026-10-21: "also the errors always interrupt the goals. that's an annoying bug.
+/// goals should always resume after login auth."
+///
+/// An in-flight `/goal` (Active, planner or implementer running) that hits
+/// Invalid or expired credentials / no auth context / Waiting for the model
+/// must resume that SAME goal after AuthComplete with the live login JWT.
+/// `UnstickResendPrompt` text must be `/goal resume` so the shell calls
+/// existing `resume_goal`. Do not Goal created. Do not drop tracker progress.
+/// Do not leave the goal paused for `/goal resume`.
+#[test]
+fn goals_should_always_resume_after_login_auth() {
+    use crate::app::agent::{
+        GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus, InFlightPrompt,
+    };
+    use crate::scrollback::EntryId;
+
+    let original_goal = "/goal ship the compiler";
+    let cases = [
+        (
+            GoalDisplayStatus::Active,
+            true,
+            GoalDisplayPhase::Planning,
+            "planner running",
+        ),
+        (
+            GoalDisplayStatus::Active,
+            false,
+            GoalDisplayPhase::Executing,
+            "implementer running",
+        ),
+        (
+            GoalDisplayStatus::InfraPaused,
+            false,
+            GoalDisplayPhase::Executing,
+            "the errors always interrupt the goals",
+        ),
+        (
+            GoalDisplayStatus::Interrupted,
+            false,
+            GoalDisplayPhase::Executing,
+            "errors interrupt the goals",
+        ),
+    ];
+    for (status, planning, phase, label) in cases {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = crate::app::agent::AgentState::TurnRunning;
+            agent.turn_started_at = Some(std::time::Instant::now());
+            agent.session.session_id = Some(acp::SessionId::new("sess-goal-resume-after-login"));
+            agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+            agent.reauth_stashed_prompt = None;
+            agent.session.in_flight_prompt = Some(InFlightPrompt {
+                text: original_goal.into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(7),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            let mut goal = GoalDisplayState::test_stub();
+            goal.goal_id = "g-in-flight".into();
+            goal.objective = "ship the compiler".into();
+            goal.status = status;
+            goal.phase = phase;
+            goal.planning = planning;
+            goal.tokens_used = 42;
+            goal.total_worker_rounds = 3;
+            agent.goal_state = Some(goal);
+        }
+        app.auth_return_view = None;
+        app.auth_state = AuthState::Authenticating {
+            request_seq: 44,
+            handle: None,
+            auth_url: None,
+            mode: AuthMode::Pending,
+        };
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::AuthComplete {
+                request_seq: 44,
+                meta: Some(serde_json::json!({
+                    "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                    "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+                })),
+            }),
+            &mut app,
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::UnstickResendPrompt {
+                    session_id,
+                    text,
+                    recovered_bearer: true,
+                    recovered_bearer_jwt: Some(jwt),
+                    ..
+                } if session_id.0.as_ref() == "sess-goal-resume-after-login"
+                    && text == "/goal resume"
+                    && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+            )),
+            "Operator 2026-10-21: also the errors always interrupt the goals. that's an annoying bug. goals should always resume after login auth. AuthComplete must UnstickResendPrompt `/goal resume` with the live login JWT so resume_goal runs for {label} ({status:?}). Do not Goal created. Do not leave the goal paused for /goal resume. Invalid or expired credentials (auth_kind=bearer, reason=no auth context) / Waiting for the model. Got: {effects:?}"
+        );
+        assert!(
+            effects.iter().all(|e| !matches!(
+                e,
+                Effect::UnstickResendPrompt { text, .. } if text == original_goal
+            ) && !matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == original_goal
+            )),
+            "resending the original `/goal ship the compiler` would Goal created and drop tracker progress. Glue must call existing resume_goal via `/goal resume`. {label} ({status:?}) got: {effects:?}"
+        );
+        let agent = test_agent(&app, id);
+        let goal = agent
+            .goal_state
+            .as_ref()
+            .expect("AuthComplete must keep the same in-flight goal; do not drop tracker progress");
+        assert_eq!(
+            goal.goal_id, "g-in-flight",
+            "must resume that SAME goal after login auth, not Goal created"
+        );
+        assert_eq!(
+            goal.objective, "ship the compiler",
+            "must not drop tracker progress on AuthComplete"
+        );
+        assert_eq!(
+            goal.tokens_used, 42,
+            "must not drop tracker progress on AuthComplete"
+        );
+        assert_eq!(
+            goal.total_worker_rounds, 3,
+            "must not drop tracker progress on AuthComplete"
+        );
+        let scrollback_text = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !scrollback_text.contains("/login"),
+            "must not paint /login after AuthComplete; the Operator already logged in. scrollback={scrollback_text}"
+        );
+        assert!(
+            !scrollback_text
+                .to_ascii_lowercase()
+                .contains("goal created"),
+            "do not Goal created after login auth. scrollback={scrollback_text}"
+        );
+    }
+}
+
+/// Operator 2026-10-23 screenshot, GitHub #215 after prior lands claimed PASS:
+/// `Invalid or expired credentials. Please run grok-oss /login to re-authenticate.`
+/// `Waiting for the model`
+/// Goal is Active. The session is already authenticated (`AuthState::Done`), not
+/// sitting on the welcome Authenticating flow. Dropping AuthComplete in that
+/// state left the credentials toast as the only thing that happened.
+/// After the Operator authenticates, UnstickResendPrompt `/goal resume` with
+/// the recovered login JWT must POST. Do not tell the Operator to /login.
+#[test]
+fn credentials_toast_and_waiting_for_the_model_after_auth_resumes_the_waiting_turn() {
+    use crate::app::agent::{
+        GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus, InFlightPrompt,
+    };
+    use crate::scrollback::EntryId;
+    use crate::scrollback::block::RenderBlock;
+
+    const SCREENSHOT_TOAST: &str =
+        "Invalid or expired credentials. Please run grok-oss /login to re-authenticate.";
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-screenshot-wait-after-auth"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "waiting parent turn".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(8),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        let mut goal = GoalDisplayState::test_stub();
+        goal.goal_id = "g-screenshot-active".into();
+        goal.objective = "ship the compiler".into();
+        goal.status = GoalDisplayStatus::Active;
+        goal.phase = GoalDisplayPhase::Executing;
+        goal.planning = false;
+        goal.tokens_used = 42;
+        goal.total_worker_rounds = 3;
+        agent.goal_state = Some(goal);
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(SCREENSHOT_TOAST));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 99,
+            meta: Some(serde_json::json!({
+                "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+            })),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.is_empty(),
+        "Operator 2026-10-23: This is still happening. AuthComplete while AuthState::Done and chrome is Waiting for the model must not drop. Screenshot: {SCREENSHOT_TOAST} plus Waiting for the model. Got: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-screenshot-wait-after-auth"
+                && text == "/goal resume"
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "After the Operator authenticates, the waiting turn continues. Goal is Active so AuthComplete UnstickResendPrompts `/goal resume` with the recovered login JWT. Do not sit on Waiting for the model. Screenshot: {SCREENSHOT_TOAST}. Got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.session.state.is_turn_running(),
+        "after auth the parent must not sit idle; the waiting turn POST is in flight"
+    );
+    let goal = agent
+        .goal_state
+        .as_ref()
+        .expect("AuthComplete must keep the same in-flight goal");
+    assert_eq!(
+        goal.goal_id, "g-screenshot-active",
+        "must resume that SAME Active goal after auth, not Goal created"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "the credentials toast must not remain the only thing that happened after auth"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !scrollback_text.contains(SCREENSHOT_TOAST),
+        "never print Please run grok-oss /login as the fix. Agents never tell the Operator to /login. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("grok-oss /login"),
+        "never print grok-oss /login as the fix after auth. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("/login"),
+        "must not tell the Operator to /login after they authenticated. scrollback={scrollback_text}"
+    );
+}
+
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer
 /// puts this on `_meta.recoveredBearerJwt`.
 const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";
@@ -829,6 +1096,7 @@ fn nested_l2_that_401d(parent_sid: &str) -> crate::app::subagent::SubagentInfo {
         subagent_type: "general-purpose".into(),
         finished: true,
         status: Some("failed".into()),
+        from_occupancy_restore: false,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,

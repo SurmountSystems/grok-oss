@@ -772,6 +772,9 @@ pub enum Action {
     ShowLimitsJson,
     /// Clear completed/cancelled todos from the live board.
     ClearCompletedTodos,
+    /// Session `/clear`: hide leftover/ghost Subagents rows on this conversation.
+    /// Not `/new`.
+    ClearLeftoverSubagentRows,
     /// Store an operator mid-session note (`/note <text>`).
     AddSessionNote {
         text: String,

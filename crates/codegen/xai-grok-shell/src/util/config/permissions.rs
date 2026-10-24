@@ -1,6 +1,166 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
 use toml::Value as TomlValue;
 
 pub use xai_grok_telemetry::enums::PermissionMode;
+
+/// `$GROK_HOME/authorize_ask.sock`. Not `leader.sock`. Never carries JWTs or API keys.
+pub const AUTHORIZE_ASK_SOCK_NAME: &str = "authorize_ask.sock";
+
+/// Live-session authorization status published for a second grok-oss process.
+///
+/// Same pattern as `limits_billing_ask.sock`. The document is a boolean plus the
+/// canonical permission mode. It is not a token and not a second permission system.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuthorizeAskDocument {
+    /// The live session has already completed authorization.
+    pub authorized: bool,
+    /// Canonical `[ui] permission_mode` (`always-approve`, `ask`, `auto`, `context-only`).
+    pub permission_mode: String,
+}
+
+struct LiveAuthorizeAskSocket {
+    path: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    doc: std::sync::Arc<std::sync::Mutex<AuthorizeAskDocument>>,
+}
+
+fn live_authorize_ask_socket() -> &'static std::sync::Mutex<Option<LiveAuthorizeAskSocket>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<LiveAuthorizeAskSocket>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Socket path under `grok_home`. Refuses to name `leader.sock`.
+pub fn authorize_ask_socket_path(grok_home: impl AsRef<Path>) -> PathBuf {
+    grok_home.as_ref().join(AUTHORIZE_ASK_SOCK_NAME)
+}
+
+/// Publish live authorization on `$GROK_HOME/authorize_ask.sock` so a second session can ask.
+pub fn publish_authorize_ask_socket(
+    grok_home: impl AsRef<Path>,
+    doc: &AuthorizeAskDocument,
+) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::Ordering;
+
+    let path = authorize_ask_socket_path(grok_home);
+    if path.file_name().and_then(|name| name.to_str()) == Some("leader.sock") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "authorize ask socket is not leader.sock",
+        ));
+    }
+    let mut slot = live_authorize_ask_socket()
+        .lock()
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    if let Some(live) = slot.as_ref() {
+        if live.path == path {
+            *live
+                .doc
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))? = doc.clone();
+            return Ok(());
+        }
+        live.stop.store(true, Ordering::SeqCst);
+        let _ = UnixStream::connect(&live.path);
+    }
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(bind_err) => {
+            if UnixStream::connect(&path).is_ok() {
+                return Err(bind_err);
+            }
+            let _ = std::fs::remove_file(&path);
+            UnixListener::bind(&path)?
+        }
+    };
+    listener.set_nonblocking(true)?;
+    let doc_slot = std::sync::Arc::new(std::sync::Mutex::new(doc.clone()));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let doc_thread = std::sync::Arc::clone(&doc_slot);
+    let stop_thread = std::sync::Arc::clone(&stop);
+    let thread_path = path.clone();
+    std::thread::spawn(move || {
+        loop {
+            if stop_thread.load(Ordering::SeqCst) {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    if let Ok(current) = doc_thread.lock() {
+                        if let Ok(bytes) = serde_json::to_vec(&*current) {
+                            let _ = stream.write_all(&bytes);
+                        }
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = std::fs::remove_file(&thread_path);
+    });
+    *slot = Some(LiveAuthorizeAskSocket {
+        path,
+        stop,
+        doc: doc_slot,
+    });
+    Ok(())
+}
+
+/// Ask a live authorized session over IPC. `None` if no socket or the payload does not parse.
+pub fn ask_live_authorized_session(grok_home: impl AsRef<Path>) -> Option<AuthorizeAskDocument> {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    let path = authorize_ask_socket_path(grok_home);
+    if path.file_name().and_then(|name| name.to_str()) == Some("leader.sock") {
+        return None;
+    }
+    let mut stream = UnixStream::connect(&path).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
+}
+
+/// A second grok-oss session still needs a fresh authorize when IPC has no live authorized session.
+pub fn fresh_authorize_required_in(grok_home: impl AsRef<Path>) -> bool {
+    !ask_live_authorized_session(grok_home).is_some_and(|doc| doc.authorized)
+}
+
+/// [`fresh_authorize_required_in`] for this process `$GROK_HOME`.
+pub fn fresh_authorize_required() -> bool {
+    fresh_authorize_required_in(crate::util::grok_home::grok_home())
+}
+
+/// Whether a live sibling already enabled always-approve.
+pub fn inherit_always_approve_from_ipc_in(grok_home: impl AsRef<Path>) -> bool {
+    ask_live_authorized_session(grok_home).is_some_and(|doc| {
+        doc.authorized && parse_permission_mode_canonical(&doc.permission_mode).is_always_approve()
+    })
+}
+
+/// [`inherit_always_approve_from_ipc_in`] for this process `$GROK_HOME`.
+pub fn inherit_always_approve_from_ipc() -> bool {
+    inherit_always_approve_from_ipc_in(crate::util::grok_home::grok_home())
+}
+
+/// Interactive authorize is required only when the first advertised method needs it **and** IPC has no live authorized session.
+pub fn startup_auth_needs_interactive_login(
+    first_method_needs_interactive: bool,
+    grok_home: impl AsRef<Path>,
+) -> bool {
+    first_method_needs_interactive && fresh_authorize_required_in(grok_home)
+}
 
 /// Unknown strings fall back to `Ask` (safe direction: no YOLO on garbage).
 /// The `"ask"` and `"default"` arms are explicit so a future `Default` variant is a one-line change without touching the catch-all.
@@ -176,7 +336,8 @@ pub fn effective_yolo_for_launch(
     cli_permission_mode: Option<&str>,
     remote_permission_mode: Option<&str>,
 ) -> EffectiveYolo {
-    let config_yolo = load_permission_mode(remote_permission_mode).is_always_approve();
+    let config_yolo = load_permission_mode(remote_permission_mode).is_always_approve()
+        || inherit_always_approve_from_ipc();
     resolve_launch_yolo(
         resolve_effective_yolo(cli_always_approve, cli_permission_mode, config_yolo),
         yolo_disabled_by_policy(),
@@ -883,5 +1044,61 @@ mod tests {
             permission_mode_from_layers(&requirements_clamp, None),
             PermissionMode::Ask,
         );
+    }
+
+    /// Operator 2026-10-21: "having to authorize each open session is exhausting and obnoxious. i thought we had ipc."
+    ///
+    /// RED before this land: there was no `authorize_ask.sock`. A second grok-oss process could
+    /// not ask a live authorized session. `fresh_authorize_required_in` would stay true.
+    #[test]
+    fn second_grok_oss_session_must_not_require_fresh_authorize_when_ipc_has_a_live_authorized_session()
+     {
+        let tmp = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let home = tmp.path();
+        assert_eq!(
+            authorize_ask_socket_path(home)
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some(AUTHORIZE_ASK_SOCK_NAME),
+            "ask socket is a new path under GROK_HOME, not leader.sock",
+        );
+        assert_ne!(AUTHORIZE_ASK_SOCK_NAME, "leader.sock");
+        assert!(
+            fresh_authorize_required_in(home),
+            "without a live authorized session on IPC, a second session still requires authorize",
+        );
+        publish_authorize_ask_socket(
+            home,
+            &AuthorizeAskDocument {
+                authorized: true,
+                permission_mode: "always-approve".into(),
+            },
+        )
+        .expect("first session publishes authorization on authorize_ask.sock");
+        // Listener thread is nonblocking; give accept a moment if the first connect races bind.
+        let mut inherited = false;
+        for _ in 0..50 {
+            if !fresh_authorize_required_in(home) {
+                inherited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            inherited,
+            "having to authorize each open session is exhausting and obnoxious. i thought we had ipc."
+        );
+        assert!(
+            inherit_always_approve_from_ipc_in(home),
+            "second session inherits always-approve from the live authorized session via IPC",
+        );
+        assert!(
+            !startup_auth_needs_interactive_login(true, home),
+            "having to authorize each open session is exhausting and obnoxious. i thought we had ipc."
+        );
+        let asked = ask_live_authorized_session(home)
+            .expect("second session asks the first over authorize_ask.sock");
+        assert!(asked.authorized);
+        assert_eq!(asked.permission_mode, "always-approve");
     }
 }

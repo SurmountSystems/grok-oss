@@ -2314,6 +2314,17 @@ pub(crate) async fn run(
                     break;
                 }
 
+                // GitHub #243: auto-background any agent that is blocking the
+                // L1 context so the Operator can type. send-to-background
+                // (Ctrl+B) stays; this is the automatic path.
+                let auto_bg = dispatch::maybe_auto_background_l1_blocking_execute(&mut app);
+                if !auto_bg.is_empty() {
+                    if process_effects(auto_bg, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                }
+
                 // Unacknowledged-prompt recovery
                 if let Some(effs) =
                     dispatch::reconcile_overdue_prompt_acks(&mut app, &ack_deadlines)

@@ -1386,18 +1386,19 @@ impl SessionActor {
         })
     }
 
-    /// Nested 401 after recovery: resume with the JWT the live sampler is talking with.
+    /// Nested 401 after recovery, and the waiting **parent** 401 after login restamp:
+    /// resume with the JWT the live sampler is talking with. That includes parent
+    /// 401s that lack `reason=no auth context` (screenshot toast: Invalid or expired
+    /// credentials. Please run grok-oss /login to re-authenticate).
     /// Called from `handle_sampling_failure` before compact / EndChildWithoutCompact.
     /// Nested skips AuthManager `try_recover_unauthorized` (Unlock/Prompt) and auth_transient.
+    /// Parent same-key (no login restamp) still returns None so WebLogin / OIDC stay.
     /// `current_api_key()` mailbox can be empty on current_thread before the actor
     /// runs; stamp the spawn / last-restamp JWT in that case.
     async fn try_resume_nested_401_with_live_sampler_jwt(
         &self,
         credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
-        if !self.startup_hints.is_subagent {
-            return None;
-        }
         let key = if let Some(key) = self.sampler_handle.live_api_key() {
             key
         } else {
@@ -1406,6 +1407,13 @@ impl SessionActor {
                 .await
                 .filter(|key| !key.trim().is_empty())?
         };
+        if !self.startup_hints.is_subagent {
+            let already = self.chat_state_handle.get_credentials().await.api_key;
+            if already.as_deref() == Some(key.as_str()) {
+                // Parent same-key: login did not restamp a new JWT. Keep WebLogin / OIDC.
+                return None;
+            }
+        }
         tracing::info!(
             session_id = %self.session_info.id.0,
             "auth recovery: nested 401, stamping live sampler JWT, retrying"
@@ -1533,14 +1541,14 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        // Nested 401 after recovery, including `reason=no auth context`: resume
+        // Nested 401 after recovery, waiting parent `reason=no auth context`,
+        // and waiting parent 401s that lack that reason (screenshot toast:
+        // Invalid or expired credentials. Please run grok-oss /login). Resume
         // with the live sampler JWT BEFORE compact / EndChildWithoutCompact.
-        // Nested sampling is 40% of catalog, so a 401 on a full nested window
-        // used to compact (or end the child) and never reach the stamp arm.
         // Nested skips Unlock. After login restamp, that JWT is the login JWT
         // the waiting parent conversation POSTs with, not spawn-time xai-grok-cli.
-        if self.startup_hints.is_subagent
-            && (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+        // Parent same-key still returns None inside the helper so Unlock / OIDC stay.
+        if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && let Some(recovery) = self
                 .try_resume_nested_401_with_live_sampler_jwt(error.credential)
                 .await

@@ -1378,7 +1378,15 @@ pub(super) fn dispatch_send_prompt_submission(
             &slash_input,
             agent.prompt.slash_controller.registry(),
         )
+        && !agent
+            .prompt
+            .slash_controller
+            .mention_submit_anyway_matches(&slash_input)
     {
+        agent
+            .prompt
+            .slash_controller
+            .arm_mention_submit_anyway(slash_input.clone());
         if screen_mode_is_minimal {
             agent.scrollback.push_block(RenderBlock::system(
                 crate::slash::mid_text_hoist::MID_TEXT_GOAL_NOTICE.to_owned(),
@@ -1388,6 +1396,15 @@ pub(super) fn dispatch_send_prompt_submission(
         }
         return prelude;
     }
+    if agent
+        .prompt
+        .slash_controller
+        .mention_submit_anyway_matches(&slash_input)
+    {
+        // Live Enter already cleared toast in handle_prompt_key; dispatch-only send must match.
+        agent.toast = None;
+    }
+    agent.prompt.slash_controller.clear_mention_submit_anyway();
     let hoisted = if is_plain_submission {
         crate::slash::mid_text_hoist::hoist_mid_text_command(
             &slash_input,
@@ -2799,6 +2816,7 @@ pub(super) fn handle_prompt_response(
                     turn_elapsed: None,
                     is_busy: false,
                     focused: true,
+                    spawn_description: None,
                 };
                 app.pending_notification_escapes =
                     app.notification_service.build_idle_escapes(&idle_title);

@@ -674,6 +674,31 @@ impl AcpUpdateTracker {
             .find(|(_, tool)| tool.base.kind == acp::ToolKind::Execute && tool.entry_id.is_some())
             .map(|(id, _)| id.as_str())
     }
+    /// Tool-call id of a nested wait that is blocking this turn: a foreground
+    /// `task` / `spawn_subagent`, or a blocking `get_command_or_subagent_output`
+    /// (`timeout_ms > 0`). GitHub #243: send-to-background for blocking
+    /// subagents, and L1 auto-background. Do not delete that capability.
+    pub fn blocking_subagent_tool_call_id(&self) -> Option<&str> {
+        self.blocking_waits
+            .iter()
+            .find(|(_, wait)| Self::is_blocking_nested_agent_wait(&wait.reason))
+            .map(|(id, _)| id.as_str())
+    }
+    /// Keys of every blocking nested-agent wait, for send-to-background and
+    /// L1 auto-background. GitHub #243.
+    pub fn blocking_subagent_wait_keys(&self) -> Vec<String> {
+        self.blocking_waits
+            .iter()
+            .filter(|(_, wait)| Self::is_blocking_nested_agent_wait(&wait.reason))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+    fn is_blocking_nested_agent_wait(reason: &WaitingReason) -> bool {
+        matches!(
+            reason,
+            WaitingReason::Subagent { .. } | WaitingReason::TaskOutput { waits: true, .. }
+        )
+    }
     /// Set a compaction-related activity override.
     /// Called by the ACP handler when `ExtNotification` compaction events arrive.
     /// Cleared automatically by `finish_turn()`.

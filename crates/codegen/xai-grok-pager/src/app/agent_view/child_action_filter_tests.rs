@@ -46,6 +46,7 @@ const ALLOWED: &[&str] = &[
     "ToggleMouseCapture",
     "AcceptWordSelectTip",
     "ShowWordSelectTip",
+    "DemoteToBackground",
     "OpenDashboard",
     "DashboardOverlayExit",
     "DashboardOverlayPrev",
@@ -212,6 +213,8 @@ fn child_navigation_and_link_actions_pass_filter() {
         Action::OpenBlockViewer,
         Action::OpenScrollbackSearch(None),
         Action::Quit,
+        // GitHub #243: send a blocking nested agent to the background.
+        Action::DemoteToBackground,
         // The takeover header's `[Dashboard]` and `‹`/`›` act for the parent
         Action::OpenDashboard,
         Action::DashboardOverlayExit,
@@ -258,6 +261,7 @@ fn child_funnel_blocks_hidden_chords_and_root_runs_them() {
         ActionId::ShortcutsHelp,
         ActionId::CancelTurn,
         ActionId::ToggleTasks,
+        ActionId::SendToBackground,
     ] {
         assert!(!ViewSurface::ChildTakeover.hides_chord(id), "{id:?}");
     }
@@ -270,4 +274,28 @@ fn child_funnel_blocks_hidden_chords_and_root_runs_them() {
             "{id:?} must still open on the root"
         );
     }
+}
+
+/// Operator 2026-10-23: "also it looks like you just got rid of the capability
+/// to send blocking subagents to the background instead of automatically
+/// backgrounding agents that are blocking the L1 context"
+///
+/// GitHub #243: a nested takeover still allows Ctrl+B / send-to-background.
+/// Auto-background of L1 waits is a separate path and must not hide this chord.
+#[test]
+fn child_takeover_keeps_send_blocking_subagent_to_background() {
+    assert_eq!(
+        ChildActionGate::Allow,
+        gate_child_action(&Action::DemoteToBackground),
+        "send-to-background for a blocking nested agent must still exist"
+    );
+    assert!(
+        !ViewSurface::ChildTakeover.hides_chord(ActionId::SendToBackground),
+        "Ctrl+B must still send a blocking subagent to the background from the takeover"
+    );
+    let outcome = filter_child_outcome(InputOutcome::Action(Action::DemoteToBackground));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
+        "the child filter must not delete send-to-background, got {outcome:?}"
+    );
 }

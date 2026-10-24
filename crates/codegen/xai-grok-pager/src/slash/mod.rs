@@ -376,6 +376,9 @@ pub struct SlashController {
     /// Owned by `AppView` and injected via [`Self::set_command_tags`] so agent prompts and the dashboard share one map.
     /// Defaults to empty for tests and any surface that has not been wired up.
     command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
+    /// Text of a mid-text slash mention that already toasted and refused submit.
+    /// A second submit of this same text sends anyway as ordinary Operator text.
+    mention_submit_anyway: Option<String>,
 }
 
 impl SlashController {
@@ -409,7 +412,22 @@ impl SlashController {
             command_tags: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
+            mention_submit_anyway: None,
         }
+    }
+
+    /// True when this exact mention already toasted and the Operator is submitting anyway.
+    #[must_use]
+    pub(crate) fn mention_submit_anyway_matches(&self, text: &str) -> bool {
+        self.mention_submit_anyway.as_deref() == Some(text)
+    }
+
+    pub(crate) fn arm_mention_submit_anyway(&mut self, text: String) {
+        self.mention_submit_anyway = Some(text);
+    }
+
+    pub(crate) fn clear_mention_submit_anyway(&mut self) {
+        self.mention_submit_anyway = None;
     }
 
     /// Replace the MRU store with a shared one.

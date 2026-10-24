@@ -382,6 +382,127 @@ async fn setup_goal_same_prompt_resumes_earlier_goal_instead_of_resetting() {
         .await;
 }
 
+/// Operator: A just-created goal (`Goal created just now`, 0 tokens) must not
+/// paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk)
+/// as if they were this planning turn. Stale tracker history must not masquerade
+/// as current Progress.
+/// This is not the `/goal` same-prompt resume miss: a different new objective
+/// must not inherit mill tracker history. Same-prompt resume stays in
+/// [`setup_goal_same_prompt_resumes_earlier_goal_instead_of_resetting`].
+#[tokio::test(flavor = "current_thread")]
+async fn setup_goal_new_objective_does_not_carry_prior_mill_progress() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let tmp = TempDir::new().expect("tempdir");
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            spawn_delete_goal_mode_ack(persistence_rx);
+            let (mut actor, event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.events = crate::session::events::EventTracker::new(tmp.path());
+            actor.goal_enabled = true;
+            set_goal_harness_for_tests(&actor);
+            actor.goal_planner_enabled = false;
+            actor.goal_tracker = StdArc::new(parking_lot::Mutex::new(
+                crate::session::goal_tracker::GoalTracker::new(tmp.path().to_path_buf()),
+            ));
+            let _host_lines = spawn_host_line_drain(event_rx);
+
+            const MILL: &str = "We need to update to Lean 4.35, in parallel, using our seven team mates and Hunter as a watcher.";
+            const NEW_OBJECTIVE: &str = "Plan this planning turn";
+            let first = actor.setup_goal(MILL, None).await;
+            match &first {
+                GoalSetupOutcome::Inference { reminder } => {
+                    assert!(
+                        !reply_has_no_current_goals(reminder),
+                        "first mill setup_goal must not reply {NO_CURRENT_GOALS:?}, got {reminder:?}"
+                    );
+                }
+                GoalSetupOutcome::Message(msg) => {
+                    panic!("first mill setup_goal must start inference, got {msg:?}")
+                }
+            }
+
+            let mill_progress: Vec<String> = (0..347)
+                .map(|i| format!("Lean 4.35 mill walk {i}"))
+                .collect();
+            {
+                let mut tracker = actor.goal_tracker.lock();
+                {
+                    let o = tracker.snapshot_mut().expect("active mill goal after setup");
+                    o.total_worker_rounds = 3;
+                    o.tokens_used_high_water = 1200;
+                }
+                tracker.append_history(GoalHistoryEntry {
+                    timestamp: "2026-10-21T00:00:00Z".into(),
+                    event: GoalEvent::WorkerCompleted,
+                    detail: Some("prior Lean 4.35 walk".into()),
+                    round: Some(3),
+                    tokens_used: Some(1200),
+                    unmet: mill_progress.clone(),
+                });
+            }
+            actor
+                .goal_plan
+                .lock()
+                .record_progress_items(mill_progress.clone());
+            assert_eq!(actor.goal_plan.lock().progress_items().len(), 347);
+
+            let created = actor.setup_goal(NEW_OBJECTIVE, None).await;
+            match &created {
+                GoalSetupOutcome::Inference { reminder } => {
+                    assert!(
+                        !reply_has_no_current_goals(reminder),
+                        "new just-created setup_goal must not reply {NO_CURRENT_GOALS:?}, got {reminder:?}"
+                    );
+                }
+                GoalSetupOutcome::Message(msg) => {
+                    panic!("new just-created setup_goal must start inference, got {msg:?}")
+                }
+            }
+
+            assert_eq!(
+                actor.goal_plan.lock().primary_goal(),
+                Some(NEW_OBJECTIVE),
+                "a different new objective must replace the mill GoalPlan"
+            );
+            assert!(
+                actor.goal_plan.lock().progress_items().is_empty(),
+                "A just-created goal (`Goal created just now`, 0 tokens) must not paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk) as if they were this planning turn. Stale tracker history must not masquerade as current Progress. got {:?}",
+                actor.goal_plan.lock().progress_items()
+            );
+
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snap.objective, NEW_OBJECTIVE);
+            assert_eq!(snap.tokens_used_high_water, 0);
+            assert_eq!(snap.total_worker_rounds, 0);
+            let created_count = snap
+                .history
+                .iter()
+                .filter(|e| matches!(e.event, GoalEvent::GoalCreated))
+                .count();
+            assert_eq!(created_count, 1, "just-created goal records Goal created");
+            let mill_leftover = snap.history.iter().any(|e| {
+                e.unmet.iter().any(|item| item.contains("Lean 4.35 mill walk"))
+                    || e.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("prior Lean 4.35 walk"))
+            });
+            assert!(
+                !mill_leftover,
+                "A just-created goal (`Goal created just now`, 0 tokens) must not paint old mill Progress checkmarks (`+332 more` from a prior Lean 4.35 walk) as if they were this planning turn. Stale tracker history must not masquerade as current Progress. got {:?}",
+                snap.history
+                    .iter()
+                    .map(|e| (format!("{:?}", e.event), e.detail.clone(), e.unmet.clone()))
+                    .collect::<Vec<_>>()
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn restored_orchestration_stores_goal_plan_on_the_actor() {
     let local = tokio::task::LocalSet::new();

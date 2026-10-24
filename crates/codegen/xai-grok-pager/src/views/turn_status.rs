@@ -218,6 +218,9 @@ pub struct TurnStatusArgs<'a> {
     pub is_bash_turn: bool,
     pub is_pending_user_input: bool,
     pub goal_verifying: bool,
+    /// Goal overlay is paused (`Paused (error)` and the other paused labels).
+    /// Composer must not keep `Responding...` with pause/stop as if that Goal turn were still live.
+    pub goal_paused: bool,
     pub watchers: Watchers,
     /// Parked on a sendable wait (`AgentView::renders_parked`).
     pub parked: bool,
@@ -251,6 +254,7 @@ pub fn render_turn_status(
         is_bash_turn,
         is_pending_user_input,
         goal_verifying,
+        goal_paused,
         watchers,
         parked,
         flat_background,
@@ -258,6 +262,16 @@ pub fn render_turn_status(
         held_queue_top_sendable,
         global_paused,
     } = args;
+    let idle_for_paused_goal = AgentState::Idle;
+    let state = if goal_paused
+        && matches!(
+            state,
+            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+        ) {
+        &idle_for_paused_goal
+    } else {
+        state
+    };
     let show_buttons = buttons.is_some();
     let cancel_hovered = buttons.is_some_and(|b| b.cancel_hovered);
     let pause_hovered = buttons.is_some_and(|b| b.pause_hovered);
@@ -979,6 +993,49 @@ mod tests {
         );
         assert_eq!(label, "Responding…");
     }
+    /// Operator contract: Goal header `Paused (error)` must not sit next to
+    /// composer `Responding...` with pause/stop as if the turn were still the live Goal.
+    #[test]
+    fn goal_paused_error_must_not_paint_composer_responding_with_pause_stop() {
+        let state = AgentState::TurnRunning;
+        let activity = Some(TurnActivity::Responding);
+        let args = TurnStatusArgs {
+            state: &state,
+            activity: &activity,
+            turn_elapsed: Some(Duration::from_secs(232)),
+            activity_started_at: None,
+            tick: 0,
+            drain_blocked: false,
+            buttons: Some(MouseButtons::default()),
+            has_running_execute: false,
+            total_tokens: None,
+            session_starting_since: None,
+            is_bash_turn: false,
+            is_pending_user_input: false,
+            goal_verifying: false,
+            goal_paused: true,
+            watchers: Watchers::default(),
+            parked: false,
+            flat_background: false,
+            held_queue: 0,
+            held_queue_top_sendable: false,
+            global_paused: false,
+        };
+        let (output, buf) = render_row(args, 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            !text.contains("Responding"),
+            "Goal Paused (error) must not keep composer Responding as if the Goal turn were still live, got {text:?}"
+        );
+        assert!(
+            !(text.contains("[pause]") && text.contains("[stop]")),
+            "Goal Paused (error) must not keep pause/stop as if the Goal turn were still live, got {text:?}"
+        );
+        assert!(
+            output.cancel_button.is_none(),
+            "paused Goal must not keep a live-turn [stop] hit target"
+        );
+    }
     #[test]
     fn retrying_chrome_names_the_model_request() {
         let theme = Theme::current();
@@ -1457,6 +1514,7 @@ mod tests {
                 is_bash_turn: false,
                 is_pending_user_input: false,
                 goal_verifying: false,
+                goal_paused: false,
                 watchers: Watchers::default(),
                 parked: false,
                 flat_background: false,
@@ -1565,6 +1623,7 @@ mod tests {
             is_bash_turn: false,
             is_pending_user_input: false,
             goal_verifying: false,
+            goal_paused: false,
             watchers,
             parked: false,
             flat_background: false,

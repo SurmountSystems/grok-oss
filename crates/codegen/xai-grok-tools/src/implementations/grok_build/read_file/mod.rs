@@ -390,6 +390,23 @@ pub fn extract_file_content_lines(
         extracted_images,
     }
 }
+/// Operator 2026-10-23 / GitHub #245: session compaction segment.
+/// `$GROK_HOME/sessions/<id>/compaction/segment_*.md` and `INDEX.md` must be
+/// readable even when a FileSystem adapter denies the rest of `sessions/`.
+pub(crate) fn is_session_compaction_store_path(path: &std::path::Path) -> bool {
+    xai_grok_sandbox::command::policy::is_session_compaction_store_path(path)
+}
+
+async fn read_bytes_for_path(
+    fs: &dyn crate::computer::types::AsyncFileSystem,
+    path: &std::path::Path,
+) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+    if is_session_compaction_store_path(path) {
+        return tokio::fs::read(path).await.map_err(Into::into);
+    }
+    fs.read_file(path).await
+}
+
 /// Core read-file logic shared by `ReadFileTool` and `ReadFileConciseTool`. Always uses the padded
 /// `content` field. Concise post-processing (swapping in `content_concise`) is done by
 /// `ReadFileConciseTool` after this returns.
@@ -454,7 +471,7 @@ pub(crate) async fn run_read_file(
         observed.note_source_bytes(snapshot.len());
         snapshot.to_vec()
     } else {
-        match fs.read_file(&path).await {
+        match read_bytes_for_path(fs.as_ref(), &path).await {
             Ok(bytes) => {
                 observed.note_source_bytes(bytes.len());
                 bytes

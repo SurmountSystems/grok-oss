@@ -1104,31 +1104,36 @@ fn take_l1_blocking_execute_auto_background(
     app: &mut AppView,
     agent_id: AgentId,
 ) -> Option<Effect> {
-    let effect = app
-        .agents
-        .get(&agent_id)
-        .and_then(AgentView::l1_blocking_execute_auto_background_effect)?;
-    let tool_call_id = match &effect {
-        Effect::DemoteToBackground { tool_call_id, .. } => tool_call_id.clone(),
-        _ => return None,
-    };
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.l1_auto_background_tool_call_id = Some(tool_call_id);
-    }
-    Some(effect)
+    app.agents
+        .get_mut(&agent_id)
+        .and_then(AgentView::take_l1_blocking_auto_background)
 }
 
 pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    take_l1_blocking_execute_auto_background(app, id)
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    // GitHub #243: Ctrl+B still sends a blocking nested agent to the
+    // background. Auto-background of L1 execute / nested wait is separate
+    // and must not delete this capability.
+    if agent.active_subagent.is_some() {
+        return agent
+            .take_send_blocking_subagent_to_background()
+            .into_iter()
+            .collect();
+    }
+    agent
+        .take_l1_blocking_auto_background()
         .into_iter()
         .collect()
 }
 
 /// GitHub #232: an L1 execute / CommandRunning that can block the Operator
-/// box auto-backgrounds. send to bg is not an Operator control.
+/// box auto-backgrounds. GitHub #243: a nested agent that is blocking L1
+/// also auto-backgrounds. send-to-background for blocking subagents stays.
 pub(crate) fn maybe_auto_background_l1_blocking_execute(app: &mut AppView) -> Vec<Effect> {
     let ids: Vec<_> = app.agents.keys().copied().collect();
     ids.into_iter()

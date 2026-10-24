@@ -224,7 +224,13 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .map(todo_item_from_plan_entry)
                             .collect();
                         agent.stamp_todos_with_live_prompt_task(&mut items);
-                        agent.todo.update_todos(items);
+                        agent.todo.update_todos(items.clone());
+                        if !meta.is_replay
+                            && !agent.session.loading_replay
+                            && let Some(goal) = agent.goal_state.as_mut()
+                        {
+                            goal.adopt_goal_progress_from_session_plan(items);
+                        }
                         agent.mark_reload_todo_update();
                         advance_reconnect_cursor(agent, &mut meta);
                         !meta.is_replay && !agent.session.loading_replay

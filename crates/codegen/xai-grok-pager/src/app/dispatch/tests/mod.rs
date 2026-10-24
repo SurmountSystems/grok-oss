@@ -7,6 +7,7 @@ mod global_pause;
 mod jump;
 mod mid_text_btw;
 mod mid_text_goal;
+mod mid_text_plan;
 mod modes;
 mod notes;
 mod permissions;
@@ -461,6 +462,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         subagent_type: Arc::from("general-purpose"),
         finished: false,
         status: None,
+        from_occupancy_restore: false,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,

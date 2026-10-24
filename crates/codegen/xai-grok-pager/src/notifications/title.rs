@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crossterm::terminal::SetTitle;
 
 use super::config::{TitleConfig, TitleItem};
-use crate::acp::tracker::TurnActivity;
+use crate::acp::tracker::{TurnActivity, WaitingReason};
 use crate::client_identity::PRODUCT_CLI_NAME;
 
 const TITLE_SPINNER: &[char] = &[
@@ -33,6 +33,71 @@ pub struct TitleState<'a> {
     /// Whether the terminal pane/window is currently focused (from FocusTracker).
     /// Suppresses title blinking/oscillation while the user is actively interacting.
     pub focused: bool,
+    /// Nested spawn `description` (task tool argument). Must not become the OSC window/tab title.
+    pub spawn_description: Option<&'a str>,
+}
+
+/// Last path component of `cwd` for OSC identity when no session name exists.
+pub(crate) fn workspace_name_from_cwd(cwd: Option<&str>) -> Option<&str> {
+    let cwd = cwd.map(str::trim).filter(|s| !s.is_empty())?;
+    let base = cwd.rsplit('/').next().unwrap_or(cwd).trim();
+    if base.is_empty() || base == "." || base == "/" {
+        None
+    } else {
+        Some(base)
+    }
+}
+
+/// OSC 0/2 / Alacritty tab identity: the actual session name or workspace name.
+///
+/// Operator 2026-10-23: "window titles don't show the actual name". Never stay
+/// on generic `grok-oss` when a session or workspace name exists. Never use the
+/// nested spawn `description` field (the screenshot leak was
+/// `Fix pager E0282 and clippy`).
+pub(crate) fn osc_identity_name<'a>(
+    session_name: Option<&'a str>,
+    cwd: Option<&'a str>,
+    spawn_description: Option<&str>,
+) -> Option<&'a str> {
+    let spawn = spawn_description.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(name) = session_name.map(str::trim).filter(|s| !s.is_empty()) {
+        let leaked = spawn.is_some_and(|d| name == d);
+        if !leaked {
+            return Some(name);
+        }
+    }
+    workspace_name_from_cwd(cwd)
+}
+
+fn is_generic_subagent_wait_subject(label: &str) -> bool {
+    let s = label.trim();
+    s == "Waiting for subagent" || (s.starts_with("Waiting for ") && s.ends_with(" subagents"))
+}
+
+fn activity_leaks_spawn_description(
+    activity: Option<&TurnActivity>,
+    spawn_description: Option<&str>,
+) -> bool {
+    let spawn = spawn_description.map(str::trim).filter(|s| !s.is_empty());
+    match activity {
+        Some(TurnActivity::ToolRunning { title, description }) => {
+            xai_grok_tools::is_task_tool_id(title)
+                || spawn.is_some_and(|d| title.trim() == d)
+                || description
+                    .as_deref()
+                    .is_some_and(|desc| spawn.is_some_and(|d| desc.trim() == d))
+        }
+        Some(TurnActivity::Waiting(WaitingReason::Subagent { display })) => !display
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none_or(is_generic_subagent_wait_subject),
+        Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+            subject: Some(subject),
+            ..
+        })) => spawn.is_some_and(|d| subject.trim() == d || subject.trim().starts_with(d)),
+        _ => false,
+    }
 }
 
 pub struct TitleManager {
@@ -133,6 +198,9 @@ fn write_item(
             buf.push(ch);
         }
         TitleItem::Activity => {
+            if activity_leaks_spawn_description(state.activity, state.spawn_description) {
+                return false;
+            }
             if let Some(activity) = state.activity {
                 push_separator(buf, has_parts);
                 write_activity(buf, activity);
@@ -144,7 +212,9 @@ fn write_item(
             }
         }
         TitleItem::SessionName => {
-            let Some(name) = state.session_name.filter(|s| !s.is_empty()) else {
+            let Some(name) =
+                osc_identity_name(state.session_name, state.cwd, state.spawn_description)
+            else {
                 return false;
             };
             push_separator(buf, has_parts);
@@ -291,6 +361,7 @@ mod tests {
             turn_elapsed: None,
             is_busy: false,
             focused: true,
+            spawn_description: None,
         }
     }
 
@@ -873,5 +944,147 @@ mod tests {
             "title payload must be control-free: {inner:?}"
         );
         assert_eq!(inner, "evil]0;pwnedtitle");
+    }
+
+    /// Operator 2026-10-23: "window titles don't show the actual name".
+    /// Alacritty tabs stayed generic `grok-oss` even when a session or workspace
+    /// name existed.
+    #[test]
+    fn window_title_shows_actual_session_or_workspace_name_not_generic_grok_oss() {
+        assert_eq!(
+            osc_identity_name(
+                Some("Grok Build"),
+                Some("/home/hunter/Projects/surmount/grok-build"),
+                None
+            ),
+            Some("Grok Build"),
+            "window titles don't show the actual name: session name must win"
+        );
+        assert_eq!(
+            osc_identity_name(
+                None,
+                Some("/home/hunter/Projects/surmount/grok-build"),
+                None
+            ),
+            Some("grok-build"),
+            "window titles don't show the actual name: workspace name when session is unset"
+        );
+        assert_ne!(
+            osc_identity_name(
+                None,
+                Some("/home/hunter/Projects/surmount/grok-build"),
+                None
+            ),
+            Some(PRODUCT_CLI_NAME),
+            "must not stay stuck on generic grok-oss when a workspace name exists"
+        );
+
+        let cfg = default_config();
+        let mut mgr = TitleManager::new(&cfg);
+        let state = TitleState {
+            cwd: Some("/home/hunter/Projects/surmount/grok-build"),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert!(
+            mgr.last_title.contains("grok-build"),
+            "window titles don't show the actual name; got {}",
+            mgr.last_title
+        );
+        assert_ne!(
+            mgr.last_title, PRODUCT_CLI_NAME,
+            "Alacritty tab must not stay generic grok-oss when workspace grok-build exists"
+        );
+        assert!(
+            mgr.last_title.contains(PRODUCT_CLI_NAME),
+            "brand suffix stays; got {}",
+            mgr.last_title
+        );
+    }
+
+    /// Operator 2026-10-23 screenshot: one Alacritty tab titled
+    /// `Fix pager E0282 and clippy`, the L2 spawn `description` from this session.
+    #[test]
+    fn window_title_does_not_leak_spawn_description_fix_pager_e0282_and_clippy() {
+        const LEAK: &str = "Fix pager E0282 and clippy";
+        assert_eq!(
+            osc_identity_name(
+                Some(LEAK),
+                Some("/home/hunter/Projects/surmount/grok-build"),
+                Some(LEAK),
+            ),
+            Some("grok-build"),
+            "nested grok-oss must not use spawn description {LEAK} as the window title"
+        );
+        assert_ne!(
+            osc_identity_name(
+                Some(LEAK),
+                Some("/home/hunter/Projects/surmount/grok-build"),
+                Some(LEAK)
+            ),
+            Some(LEAK),
+            "spawn description must not be the OSC identity"
+        );
+
+        let cfg = default_config();
+        let mut mgr = TitleManager::new(&cfg);
+        let activity = TurnActivity::ToolRunning {
+            title: "spawn_subagent".to_owned(),
+            description: Some(LEAK.to_owned()),
+        };
+        let state = TitleState {
+            session_name: Some("Grok Build"),
+            cwd: Some("/home/hunter/Projects/surmount/grok-build"),
+            activity: Some(&activity),
+            is_busy: true,
+            spawn_description: Some(LEAK),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert!(
+            !mgr.last_title.contains(LEAK),
+            "window title leaked spawn description {LEAK}: {}",
+            mgr.last_title
+        );
+        assert!(
+            mgr.last_title.contains("Grok Build"),
+            "window titles don't show the actual name; got {}",
+            mgr.last_title
+        );
+        assert_ne!(mgr.last_title, PRODUCT_CLI_NAME);
+        assert_ne!(mgr.last_title, LEAK);
+    }
+
+    /// Nested grok-oss process: session_name was filled from the spawn
+    /// `description` field. OSC identity must be the workspace name instead.
+    #[test]
+    fn nested_grok_oss_window_title_uses_workspace_not_spawn_description() {
+        const LEAK: &str = "Fix pager E0282 and clippy";
+        let cfg = default_config();
+        let mut mgr = TitleManager::new(&cfg);
+        let activity = TurnActivity::Waiting(WaitingReason::Subagent {
+            display: Some(LEAK.to_owned()),
+        });
+        let state = TitleState {
+            session_name: Some(LEAK),
+            cwd: Some("/home/hunter/Projects/surmount/grok-build"),
+            activity: Some(&activity),
+            is_busy: true,
+            spawn_description: Some(LEAK),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert!(
+            !mgr.last_title.contains(LEAK),
+            "nested grok-oss used spawn description as title: {}",
+            mgr.last_title
+        );
+        assert!(
+            mgr.last_title.contains("grok-build"),
+            "window titles don't show the actual name; nested process should show workspace; got {}",
+            mgr.last_title
+        );
+        assert_ne!(mgr.last_title, PRODUCT_CLI_NAME);
+        assert_ne!(mgr.last_title, LEAK);
     }
 }

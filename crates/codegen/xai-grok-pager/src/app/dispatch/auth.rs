@@ -225,6 +225,7 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
         agent.scrollback.remove_from(idx);
     }
     strip_reauth_required_blocks(agent);
+    strip_login_advice_system_blocks(agent);
 }
 
 /// Remove every [`SessionEvent::ReAuthRequired`] banner, including those that are no longer trailing because a later nested-run summary was painted after them.
@@ -236,6 +237,29 @@ fn strip_reauth_required_blocks(agent: &mut AgentView) {
             match &entry.block {
                 RenderBlock::SessionEvent(ev)
                     if matches!(ev.event, SessionEvent::ReAuthRequired) =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for id in ids {
+        agent.scrollback.remove_entry(id);
+    }
+}
+
+/// After the Operator authenticates, never leave "Please run grok-oss /login"
+/// as the only thing that happened. Agents never tell the Operator to /login.
+fn strip_login_advice_system_blocks(agent: &mut AgentView) {
+    let ids: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|idx| {
+            let entry = agent.scrollback.entry(idx)?;
+            match &entry.block {
+                RenderBlock::System(block)
+                    if block.text.contains("grok-oss /login")
+                        || block.text.contains("Please run grok-oss /login")
+                        || block.text.contains("Run /login to re-authenticate") =>
                 {
                     Some(entry.id)
                 }
@@ -266,8 +290,38 @@ fn recovered_parent_jwt(agent: &AgentView) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `/goal resume` is the shell builtin that calls existing `SessionActor::resume_goal`.
+/// AuthComplete must send this instead of the original `/goal <objective>` so login
+/// does not Goal created, drop tracker progress, or leave the interrupted goal paused.
+const GOAL_RESUME_AFTER_LOGIN_AUTH: &str = "/goal resume";
+
+/// In-flight or error-interrupted goals resume after login auth. User pause,
+/// back-off, blocked, complete, budget-limited, and failed stay put.
+fn goal_should_resume_after_login_auth(agent: &AgentView) -> bool {
+    use crate::app::agent::GoalDisplayStatus;
+    agent.goal_state.as_ref().is_some_and(|goal| {
+        matches!(
+            goal.status,
+            GoalDisplayStatus::Active
+                | GoalDisplayStatus::InfraPaused
+                | GoalDisplayStatus::Interrupted
+        )
+    })
+}
+
+fn synthetic_goal_resume_prompt() -> crate::app::agent::InFlightPrompt {
+    crate::app::agent::InFlightPrompt {
+        text: GOAL_RESUME_AFTER_LOGIN_AUTH.to_string(),
+        images: Vec::new(),
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: Vec::new(),
+    }
+}
+
 /// Waiting for the model after login: `maybe_drain_queue` is blocked while
 /// TurnRunning. UnstickResendPrompt POSTs immediately with recoveredBearer.
+/// An interrupted `/goal` POSTs `/goal resume` so the shell calls `resume_goal`.
 fn unstick_waiting_parent_after_auth(
     agent: &mut AgentView,
     prompt: crate::app::agent::InFlightPrompt,
@@ -275,10 +329,15 @@ fn unstick_waiting_parent_after_auth(
     let session_id = agent.session.session_id.clone()?;
     let prompt_id = uuid::Uuid::new_v4().to_string();
     agent.session.current_prompt_id = Some(prompt_id.clone());
+    let text = if goal_should_resume_after_login_auth(agent) {
+        GOAL_RESUME_AFTER_LOGIN_AUTH.to_string()
+    } else {
+        prompt.text
+    };
     Some(Effect::UnstickResendPrompt {
         agent_id: agent.session.id,
         session_id,
-        text: prompt.text,
+        text,
         prompt_id,
         images: Vec::new(),
         images_dir: None,
@@ -290,6 +349,8 @@ fn unstick_waiting_parent_after_auth(
 /// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
 /// the login did not stash a return view (dashboard or another-process login).
 /// Parent already TurnRunning (Waiting for the model) must still POST immediately.
+/// Interrupted `/goal` (Active / InfraPaused / Interrupted) always UnstickResendPrompt
+/// `/goal resume` with the live login JWT so `resume_goal` runs.
 fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     let mut retry_effects = Vec::new();
     let mut page_flips = Vec::new();
@@ -297,13 +358,25 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
         agent.nested_auth_resume_retries = 0;
         strip_trailing_auth_error_blocks(agent);
         let was_idle = agent.session.state.is_idle();
-        let parent_retry = take_prompt_to_retry_after_auth(agent);
+        let resume_goal = goal_should_resume_after_login_auth(agent);
+        let mut parent_retry = take_prompt_to_retry_after_auth(agent);
+        if resume_goal && parent_retry.is_none() {
+            parent_retry = agent
+                .session
+                .in_flight_prompt
+                .clone()
+                .or_else(|| Some(synthetic_goal_resume_prompt()));
+        }
         let had_parent_retry = parent_retry.is_some();
         if let Some(prompt) = parent_retry {
             agent.scrollback.push_block(RenderBlock::system(
                 "Re-authenticated. Retrying\u{2026}".to_string(),
             ));
-            if was_idle {
+            if resume_goal {
+                if let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt) {
+                    retry_effects.push(effect);
+                }
+            } else if was_idle {
                 agent.session.enqueue_in_flight_prompt_front(prompt);
                 let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
                 retry_effects.extend(drain.effects);
@@ -727,6 +800,26 @@ pub(super) fn handle_auth_complete(
         if app.session_startup_allowed() {
             effects.extend(drain_startup_actions(app));
         }
+        return effects;
+    }
+    // AuthComplete while already authenticated (`AuthState::Done`): IPC / sibling
+    // window / login that already flipped Done. Dropping this left the credentials
+    // toast plus Waiting for the model as the only thing that happened.
+    // Do not drain startup: this is a mid-session recovered login, not welcome.
+    if matches!(app.auth_state, AuthState::Done) {
+        if let Some(meta_val) = meta.as_ref()
+            && let Ok(auth_meta) =
+                serde_json::from_value::<xai_grok_login::AuthMeta>(meta_val.clone())
+        {
+            app.apply_auth_meta(&auth_meta);
+        }
+        apply_recovered_parent_sampler_jwts(app, meta.as_ref());
+        let retry_effects = enqueue_prompts_after_auth(app);
+        let mut effects = dispatch(Action::RequestBundleStatus, app);
+        if app.usage_visible {
+            effects.push(Effect::FetchAppBilling { nonce: 0 });
+        }
+        effects.extend(retry_effects);
         return effects;
     }
     vec![]

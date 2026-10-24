@@ -101,6 +101,7 @@ fn nested_info_from_occupancy(
         subagent_type: Arc::from(row.subagent_type.as_str()),
         finished: false,
         status: None,
+        from_occupancy_restore: true,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: running_occupancy_lifecycle(),
             persona: None,
@@ -1981,7 +1982,7 @@ impl AgentView {
     }
     /// Whether a foreground subagent (`task`/`spawn_subagent`, not `run_in_background`) is currently running.
     /// The parent turn is blocked on it, so the spinner should read as a subagent wait.
-    fn has_running_foreground_subagent(&self) -> bool {
+    pub(crate) fn has_running_foreground_subagent(&self) -> bool {
         self.running_foreground_subagents().next().is_some()
     }
     /// The one predicate shared by the wait gate and its subject.
@@ -3171,6 +3172,7 @@ mod resolve_turn_activity_tests {
                 subagent_type: Arc::from("explore"),
                 finished: false,
                 status: None,
+                from_occupancy_restore: false,
                 attempt: crate::app::subagent::SubagentAttemptInfo {
                     lifecycle:
                         crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),

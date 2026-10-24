@@ -2037,6 +2037,16 @@ subagents are maximally token efficient.
 
 **Talk.** All layers can talk to the layers above and below.
 
+**A finished nested agent is a same-turn next action (operator 2026-10-23).**
+When an L2 or L3 finishes, L1 reports and starts the next named action
+in that same turn. Read the short report. Tell the Operator what landed.
+Then spawn the leftover, start the one `just check-remote`, close the
+board item, or name the blocker. Silence after a finish looks like a
+stall. Waiting for the next Operator ping is a miss. This does not
+weaken fire-and-return on a live compile. Dual-pin: this heading;
+[`AGENTS.md`](AGENTS.md) § *Agent depth*; host `~/.grok/AGENTS.md`
+§ *Report finished nested work the same turn*.
+
 **Cost.** All tokens in an L3 contribute to the token costs of the L2.
 That is cost, not the L1 context chip. Nested L2 and L3 windows stay
 out of the L1 context chip. Each L2 Subagents-list row is a live atomic

@@ -1611,6 +1611,22 @@ pub(super) fn handle_session_notification_with_origin(
                 let last_classifier_details_exists = last_classifier_details_path
                     .as_deref()
                     .is_some_and(|p| std::path::Path::new(p).exists());
+                let (progress_items, session_todos_at_goal_create) = match agent.goal_state.as_ref()
+                {
+                    Some(prev) if prev.goal_id == goal_id => (
+                        prev.progress_items.clone(),
+                        prev.session_todos_at_goal_create.clone(),
+                    ),
+                    _ => (
+                        Vec::new(),
+                        agent
+                            .todo
+                            .todos()
+                            .iter()
+                            .map(|item| item.content.clone())
+                            .collect(),
+                    ),
+                };
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
@@ -1647,6 +1663,8 @@ pub(super) fn handle_session_notification_with_origin(
                     planning: planning.unwrap_or(false),
                     received_at: std::time::Instant::now(),
                     elapsed_floor_ms,
+                    progress_items,
+                    session_todos_at_goal_create,
                 });
                 true
             }
@@ -1799,6 +1817,7 @@ fn queue_wake_turn_complete_notification(app: &mut AppView, agent_id: AgentId) {
         turn_elapsed: None,
         is_busy: false,
         focused: true,
+        spawn_description: None,
     };
     app.pending_notification_escapes = app.notification_service.build_idle_escapes(&idle_title);
     app.deferred_notification = Some((
