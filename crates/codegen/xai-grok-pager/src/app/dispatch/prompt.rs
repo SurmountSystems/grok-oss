@@ -2987,6 +2987,9 @@ pub(super) fn handle_prompt_response(
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
+        if reauth_prompted {
+            effects.push(Effect::AskSiblingAuthorize { delay_ms: 0 });
+        }
 
         // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion (the stale one was wiped above)
         // It fetches only after a clean, non-bash agent turn that leaves the session idle with an empty prompt and no queued work, local or server-side

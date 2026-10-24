@@ -178,7 +178,7 @@ pub fn parse_permission_mode_canonical(mode_str: &str) -> PermissionMode {
 /// Canonical `[ui] permission_mode` string for a resolved [`PermissionMode`].
 ///
 /// Inverse of [`parse_permission_mode_canonical`] for the real variants, so `parse_permission_mode_canonical(permission_mode_canonical_str(m)) == m`.
-pub(crate) fn permission_mode_canonical_str(mode: PermissionMode) -> &'static str {
+pub fn permission_mode_canonical_str(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",

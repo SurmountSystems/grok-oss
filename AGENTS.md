@@ -28,6 +28,10 @@ The product CLI is `grok-oss`. Start `grok-oss`, not bare `grok`.
 
 SuperGrok is a paid product. Never call SuperGrok free. Name which meter you mean: included SuperGrok period limits, SuperGrok dollar credits, or console team prepaid / console API credits.
 
+### Already-open L1 sibling IPC re-auth
+
+Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` on `$GROK_HOME/authorize_ask.sock`. That document never carries tokens. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Never tell the Operator to /login. Dual-pin: [`FORK.md`](FORK.md) same heading.
+
 ## Reports and homes
 
 Reports live under `~/.agents/reports/` on this machine. They are not part of the git tree. Do not invent `docs/issues/` or `docs/dev/bugs/` as a reports home. Do not create project `.agents/reports/` or project-root `.grok/` for reports. Live plans live under `~/.agents/plans/`.

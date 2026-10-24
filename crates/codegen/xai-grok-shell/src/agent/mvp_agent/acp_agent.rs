@@ -1286,9 +1286,11 @@ impl acp::Agent for MvpAgent {
             // spawn (`parent_sampler_handle.current_api_key()` / live_parent_sampler_jwt
             // first). Nested MvpAgent has no parent_sampler_handle field: live JWT
             // comes from `_meta.recoveredBearerJwt` or the resident parent's sampler.
-            // Do not SetApiKey(AuthManager current_wire_valid / current_or_expired):
-            // cli-chat-proxy rejects it while the parent JWT still talks (Operator paste:
-            // auth_kind=bearer … reason=no auth context after login).
+            // Nested must not SetApiKey(AuthManager current_wire_valid /
+            // current_or_expired): cli-chat-proxy rejects it while the parent JWT
+            // still talks (Operator paste: auth_kind=bearer … reason=no auth context
+            // after login). Parent L1 recoveredBearer with no JWT reloads the
+            // shared store instead of posting spawn-time live_api_key.
             let parent_jwt = if recovered_bearer_jwt_meta.is_some() {
                 recovered_bearer_jwt_meta
             } else if let Some(parent_sid) = handle.parent_session_id.as_ref() {
@@ -1303,14 +1305,20 @@ impl acp::Agent for MvpAgent {
                     }
                     None => None,
                 }
-            } else if let Some(key) = handle.sampler_handle.live_api_key() {
-                // Waiting parent after login: AuthComplete UnstickResendPrompt
-                // recoveredBearer with no pager JWT must still POST using this
-                // session's restamped live sampler JWT. Returning None rejected
-                // the parent POST (login still fails to resume).
-                Some(key)
             } else {
-                handle.sampler_handle.current_api_key().await
+                // Already-open L1 after sibling IPC, or waiting parent after
+                // AuthComplete: re-read the shared store and restamp. Do not
+                // POST this process's spawn-time live_api_key after a sibling
+                // login wrote a different bearer. Nested inherit stays above.
+                let store_or_live = xai_grok_login::credential_provider::parent_recovered_bearer_from_shared_store(
+                    &self.auth_manager,
+                    handle.sampler_handle.live_api_key(),
+                );
+                if store_or_live.is_some() {
+                    store_or_live
+                } else {
+                    handle.sampler_handle.current_api_key().await
+                }
             };
             let recovered = xai_grok_login::credential_provider::recovered_bearer_inherit_jwt(
                 parent_jwt,

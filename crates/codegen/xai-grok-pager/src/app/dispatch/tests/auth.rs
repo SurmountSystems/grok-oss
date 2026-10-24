@@ -1011,6 +1011,173 @@ fn credentials_toast_and_waiting_for_the_model_after_auth_resumes_the_waiting_tu
     );
 }
 
+const RUN_LOGIN_NAG: &str = "Run /login to re-authenticate, then resend your message.";
+
+/// Already-open L1 / running pager with expired credentials receives sibling IPC authorize,
+/// reloads the shared store, resends, and does not paint Run /login.
+/// Inherit-on-startup of a new session is not this path. Never tokens on IPC.
+#[test]
+fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login()
+ {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+    use crate::scrollback::block::RenderBlock;
+
+    let mut sibling = test_app_with_agent();
+    sibling.auth_state = AuthState::Authenticating {
+        request_seq: 7,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let publish = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 7,
+            meta: None,
+        }),
+        &mut sibling,
+    );
+    assert!(
+        publish.iter().any(|e| matches!(
+            e,
+            Effect::PublishAuthorizeAsk {
+                authorized: true,
+                permission_mode,
+            } if !permission_mode.is_empty()
+                && !permission_mode.contains("eyJ")
+                && !permission_mode.contains("Bearer")
+        )),
+        "login success in one process must live-publish IPC {{authorized, permission_mode}} and never tokens. got: {publish:?}"
+    );
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-open-l1-sibling-ipc"));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: "waiting prompt after sibling login".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(11),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent.scrollback.push_block(RenderBlock::system(
+            "Invalid or expired credentials. Please run grok-oss /login to re-authenticate."
+                .to_string(),
+        ));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt,
+                ..
+            } if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
+                && text == "waiting prompt after sibling login"
+                && recovered_bearer_jwt.as_deref() != Some("expired-stale-jwt")
+        ) || matches!(
+            e,
+            Effect::SendPrompt { session_id, text, .. }
+                if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
+                    && text == "waiting prompt after sibling login"
+        )),
+        "already-open L1 must reload the shared store and resend the waiting prompt after sibling IPC authorize. got: {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if jwt == "expired-stale-jwt"
+        )),
+        "resend bearer must not be the pre-IPC expired JWT. Store reload, not JWT-drop proxy. got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.parent_sampler_jwt.is_none(),
+        "IPC never carries tokens; already-open L1 drops the stale pager JWT so the shell recoveredBearer path reloads the shared store"
+    );
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "already-open L1 must not keep Authentication required after sibling login"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !scrollback_text.contains(RUN_LOGIN_NAG),
+        "already-open L1 must not paint Run /login to re-authenticate, then resend your message. scrollback={scrollback_text}"
+    );
+    assert!(
+        !scrollback_text.contains("/login"),
+        "never tell the Operator to /login after a sibling session logged in. scrollback={scrollback_text}"
+    );
+}
+
+/// Authorized sibling IPC must not drop a live parent JWT or UnstickResend an
+/// in-flight turn when this L1 does not need reauth.
+#[test]
+fn sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-live-no-reauth"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "in-flight turn still talking".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(3),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some(PARENT_SAMPLER_CURRENT_API_KEY),
+        "authorized apply must not drop a live parent JWT when this L1 does not need reauth"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt { .. } | Effect::SendPrompt { .. }
+        )),
+        "authorized apply must not UnstickResend an in-flight turn when this L1 does not need reauth. got: {effects:?}"
+    );
+}
+
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer
 /// puts this on `_meta.recoveredBearerJwt`.
 const PARENT_SAMPLER_CURRENT_API_KEY: &str = "parent-sampler-current-api-key";

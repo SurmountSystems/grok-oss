@@ -709,6 +709,12 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// A sibling grok-oss process published live `{authorized, permission_mode}` on `authorize_ask.sock`.
+    /// Already-open L1 reloads the shared store and resends. Never tokens. Not inherit-on-startup.
+    SiblingIpcAuthorize {
+        authorized: bool,
+        permission_mode: String,
+    },
     /// Connecting... splash wait ended with no auth URL. Show a real auth error; do not wait on last-session restore.
     ConnectingSplashTimeout,
     /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
@@ -2258,6 +2264,13 @@ pub enum Effect {
     CreditLimitRecheck { agent_id: AgentId },
     /// Schedule a 5s timer that fires `TaskResult::PaywallCheckTick`.
     SchedulePaywallCheck,
+    /// Publish `{authorized, permission_mode}` on `$GROK_HOME/authorize_ask.sock`. Never tokens.
+    PublishAuthorizeAsk {
+        authorized: bool,
+        permission_mode: String,
+    },
+    /// Ask a live sibling over `authorize_ask.sock`. Already-open L1 applies the document.
+    AskSiblingAuthorize { delay_ms: u64 },
     /// Schedule `TaskResult::GateVerifyTimeout { generation }` after [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
     /// [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
     ScheduleGateVerifyTimeout { generation: u64 },
@@ -2895,6 +2908,13 @@ pub enum TaskResult {
         request_seq: u64,
         meta: Option<serde_json::Value>,
     },
+    /// Sibling live authorize document from `$GROK_HOME/authorize_ask.sock`. Never tokens.
+    SiblingIpcAuthorize {
+        authorized: bool,
+        permission_mode: String,
+    },
+    /// Fire-and-forget publish of `{authorized, permission_mode}` finished.
+    AuthorizeAskPublished,
     /// Authentication failed.
     AuthFailed {
         request_seq: u64,

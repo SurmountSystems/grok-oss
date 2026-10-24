@@ -488,6 +488,7 @@ pub(super) fn handle_session_notification_with_origin(
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let mut queue_wake_turn_complete = false;
     let mut pending_finish_for_spawn = None;
+    let mut ask_sibling_authorize = false;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
         ref update @ (XaiSessionUpdate::AutoCompactStarted { .. }
@@ -553,6 +554,14 @@ pub(super) fn handle_session_notification_with_origin(
                         info.attempt.error = Some(std::sync::Arc::from(message));
                     }
                 }
+            }
+            // Idle L1s that already painted ReAuthRequired must keep polling so
+            // a later sibling publish still applies. Do not ask on every
+            // rate-limit RetryState just because a sibling already published.
+            if crate::app::dispatch::scrollback_has_reauth_prompt(&agent.scrollback)
+                || agent.reauth_stashed_prompt.is_some()
+            {
+                ask_sibling_authorize = true;
             }
             true
         }
@@ -1782,6 +1791,10 @@ pub(super) fn handle_session_notification_with_origin(
         let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
         app.pending_effects.extend(effects);
     }
+    if ask_sibling_authorize {
+        app.pending_effects
+            .push(crate::app::actions::Effect::AskSiblingAuthorize { delay_ms: 0 });
+    }
     if let Some(outcome) = terminal_outcome {
         return super::super::turn_completion::apply_terminal_outcome(
             outcome, app, parent_id, is_active,
@@ -2614,8 +2627,14 @@ pub(super) fn apply_sampling_identity_from_retry(
 }
 
 /// One `/login` sentence per expiry. A later failed nested run in the same expired session must not stack the same yellow paragraph.
+/// A live sibling that already authorized must not paint Run /login at all.
 fn push_reauth_required_once(scrollback: &mut crate::scrollback::state::ScrollbackState) {
     if crate::app::dispatch::scrollback_has_reauth_prompt(scrollback) {
+        return;
+    }
+    if xai_grok_shell::util::config::ask_live_authorized_session(xai_grok_config::grok_home())
+        .is_some_and(|doc| doc.authorized)
+    {
         return;
     }
     scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));

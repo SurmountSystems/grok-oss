@@ -346,6 +346,61 @@ fn unstick_waiting_parent_after_auth(
     })
 }
 
+/// Live `{authorized, permission_mode}` for `authorize_ask.sock`. Never tokens.
+fn publish_live_authorize_effect() -> Effect {
+    let permission_mode = xai_grok_shell::util::config::permission_mode_canonical_str(
+        xai_grok_shell::util::config::load_permission_mode(None),
+    )
+    .to_string();
+    Effect::PublishAuthorizeAsk {
+        authorized: true,
+        permission_mode,
+    }
+}
+
+fn any_open_l1_needs_sibling_reauth(app: &AppView) -> bool {
+    app.agents.values().any(|agent| {
+        scrollback_has_reauth_prompt(&agent.scrollback) || agent.reauth_stashed_prompt.is_some()
+    })
+}
+
+/// Already-open L1 applies a sibling login over IPC. Reloads the shared store,
+/// resends the waiting prompt, and must not paint Run /login.
+/// Inherit-on-startup of a new session is not this path.
+pub(super) fn handle_sibling_ipc_authorize(
+    app: &mut AppView,
+    authorized: bool,
+    permission_mode: String,
+) -> Vec<Effect> {
+    let _ = permission_mode;
+    if !authorized {
+        if any_open_l1_needs_sibling_reauth(app) {
+            return vec![Effect::AskSiblingAuthorize { delay_ms: 400 }];
+        }
+        return vec![];
+    }
+    // A later non-auth retry must not drop a live parent JWT or UnstickResend
+    // an in-flight turn just because a sibling already published.
+    if !any_open_l1_needs_sibling_reauth(app) {
+        return vec![];
+    }
+    // Never apply a JWT from IPC. Drop the stale pager bearer so UnstickResend
+    // does not stamp the expired JWT. The shell recoveredBearer path reloads
+    // the shared store (`force_reload_from_disk` / `pick_up_sibling_token`)
+    // and restamps the sampler. Do not POST this process's live_api_key.
+    for agent in app.agents.values_mut() {
+        agent.parent_sampler_jwt = None;
+    }
+    app.auth_state = AuthState::Done;
+    let retry_effects = enqueue_prompts_after_auth(app);
+    let mut effects = dispatch(Action::RequestBundleStatus, app);
+    if app.usage_visible {
+        effects.push(Effect::FetchAppBilling { nonce: 0 });
+    }
+    effects.extend(retry_effects);
+    effects
+}
+
 /// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
 /// the login did not stash a return view (dashboard or another-process login).
 /// Parent already TurnRunning (Waiting for the model) must still POST immediately.
@@ -761,7 +816,8 @@ pub(super) fn handle_auth_complete(
             // One example: an incidental `Ctrl+N` pressed during /login that the chokepoint deferred
             clear_startup_actions(app);
             let retry_effects = enqueue_prompts_after_auth(app);
-            let mut effects = dispatch(Action::RequestBundleStatus, app);
+            let mut effects = vec![publish_live_authorize_effect()];
+            effects.extend(dispatch(Action::RequestBundleStatus, app));
             if app.usage_visible {
                 effects.push(Effect::FetchAppBilling { nonce: 0 });
             }
@@ -771,7 +827,8 @@ pub(super) fn handle_auth_complete(
 
         let retry_effects = enqueue_prompts_after_auth(app);
         // Request bundle status only; the shell auto-syncs after auth
-        let mut effects = dispatch(Action::RequestBundleStatus, app);
+        let mut effects = vec![publish_live_authorize_effect()];
+        effects.extend(dispatch(Action::RequestBundleStatus, app));
         effects.extend(retry_effects);
 
         // Start auto-checking subscription if gated.
@@ -815,7 +872,8 @@ pub(super) fn handle_auth_complete(
         }
         apply_recovered_parent_sampler_jwts(app, meta.as_ref());
         let retry_effects = enqueue_prompts_after_auth(app);
-        let mut effects = dispatch(Action::RequestBundleStatus, app);
+        let mut effects = vec![publish_live_authorize_effect()];
+        effects.extend(dispatch(Action::RequestBundleStatus, app));
         if app.usage_visible {
             effects.push(Effect::FetchAppBilling { nonce: 0 });
         }

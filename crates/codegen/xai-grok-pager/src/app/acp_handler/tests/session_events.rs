@@ -1051,6 +1051,43 @@
         );
     }
 
+    /// Single expiry does not paint Authentication required / Run /login twice.
+    #[test]
+    fn single_expiry_does_not_paint_authentication_required_login_nag_twice() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            1,
+            "one expiry must paint Authentication required once, not twice"
+        );
+        let painted = (0..scrollback.len())
+            .filter_map(|i| {
+                let block = &scrollback.get(i)?.block;
+                match block {
+                    RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                    RenderBlock::System(sys) => Some(sys.text.clone()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            painted.matches("Authentication required:").count(),
+            1,
+            "single expiry must not paint Authentication required twice. painted={painted}"
+        );
+        assert_eq!(
+            painted
+                .matches("Run /login to re-authenticate, then resend your message.")
+                .count(),
+            1,
+            "single expiry must not paint Run /login twice. painted={painted}"
+        );
+    }
+
     /// Login strips the stale banner. A later real expiry in that session must still paint once.
     #[test]
     fn apply_retry_state_auth_expiry_shows_again_after_the_banner_is_stripped() {
