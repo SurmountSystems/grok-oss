@@ -590,6 +590,10 @@ fn render_minimal_status(
             is_bash_turn: agent.bash_turn,
             is_pending_user_input,
             goal_verifying,
+            goal_paused: agent
+                .goal_state
+                .as_ref()
+                .is_some_and(|goal| goal.status.is_paused()),
             watchers,
             parked,
             flat_background: true,
