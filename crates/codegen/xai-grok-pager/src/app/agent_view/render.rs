@@ -648,6 +648,34 @@ fn l1_credits_chip_label(
     credits_label_when_included_period_is_not_next_request()
 }
 
+/// Header `tasks N/M`. Live Subagents win when that list is non-empty.
+/// Otherwise open todo-board rows fill the same chip (in progress, then
+/// pending) so the credits chip can sit between the context figure and
+/// tasks. Completed and cancelled rows do not count.
+fn status_row_task_counts(
+    subagent_running: usize,
+    subagent_listed: usize,
+    todos: &[xai_grok_shell::tools::TodoItem],
+) -> (usize, usize) {
+    if subagent_listed > 0 {
+        return (subagent_running, subagent_listed);
+    }
+    let mut running = 0usize;
+    let mut listed = 0usize;
+    for todo in todos {
+        match todo.status {
+            xai_grok_shell::tools::TodoStatus::InProgress => {
+                running += 1;
+                listed += 1;
+            }
+            xai_grok_shell::tools::TodoStatus::Pending => listed += 1,
+            xai_grok_shell::tools::TodoStatus::Completed
+            | xai_grok_shell::tools::TodoStatus::Cancelled => {}
+        }
+    }
+    (running, listed)
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
 /// Tests take `Default` and override only what they exercise.
@@ -2072,8 +2100,10 @@ impl AgentView {
         } else {
             self.tasks.listed_subagent_counts()
         };
-        if subagent_listed > 0 {
-            let label = format!("tasks {subagent_running}/{subagent_listed}");
+        let (task_running, task_listed) =
+            status_row_task_counts(subagent_running, subagent_listed, self.todo.todos());
+        if task_listed > 0 {
+            let label = format!("tasks {task_running}/{task_listed}");
             status.push(
                 "tasks",
                 Line::from(Span::styled(

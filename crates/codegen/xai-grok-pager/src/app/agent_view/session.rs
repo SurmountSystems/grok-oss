@@ -4290,6 +4290,76 @@ mod resume_restore_occupancy_tests {
         );
     }
 
+    /// Screenshot class (GitHub #246): header `grok-build 6/500K 1%`,
+    /// `Waiting for the model` 5m 13s, no first token, no POST after
+    /// rebuild/resume. Cancelled nested runners left `waiting_model` painted
+    /// while `task_wake` held the sample until `queued_user_promotion`
+    /// (311599 ms). Do not restore that chrome when no sample is in flight.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn after_rebuild_resume_cancelled_nested_must_not_paint_waiting_for_the_model_five_minutes_with_no_post()
+     {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-waiting-model-five-minutes";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+
+        let mut app = primed_resume_app(cwd, sid, true);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let mut nested =
+                crate::app::agent_view::test_fixtures::running_subagent_info("cancelled-l2");
+            nested.set_finished_for_test(true);
+            nested.attempt.status = Some(std::sync::Arc::from("cancelled"));
+            agent
+                .subagent_sessions
+                .insert("cancelled-l2".into(), nested);
+            agent.turn_started_at = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(311_599))
+                    .unwrap_or_else(std::time::Instant::now),
+            );
+            agent.last_activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+            agent.session.enqueue_prompt_front(
+                "continue interrupted turn after rebuild at 6/500K".to_string(),
+            );
+        }
+        let effects = session_loaded(
+            &mut app,
+            sid,
+            Some("subagent-completed-cancelled-l2".to_string()),
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let activity = agent.resolve_turn_activity();
+        let posted = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            )
+        });
+        assert!(
+            posted || !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "rebuild/resume with cancelled nested must POST or must not paint Waiting for the model with no sample; activity={activity:?} effects={effects:?}"
+        );
+        if !posted {
+            assert!(
+                !agent.session.state.is_turn_running(),
+                "no POST after rebuild/resume: do not leave TurnRunning / waiting_model for 311599 ms, got {:?}",
+                agent.session.state
+            );
+            assert_eq!(
+                agent.open_turn_wait_kind(),
+                None,
+                "cancelled nested and no in-flight sample must not classify leftover occupancy as a live wait, got {:?}",
+                agent.open_turn_wait_kind()
+            );
+        }
+    }
+
     /// Named contract: unsent draft restore and queue restore must not both
     /// rehydrate the same string. A WAL Send of that same body must not
     /// enqueue a second copy either.

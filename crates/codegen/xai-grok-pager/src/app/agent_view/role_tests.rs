@@ -151,7 +151,7 @@ fn send_blocking_subagent_to_background_is_kept_and_l1_auto_backgrounds() {
     assert!(
         matches!(
             effect,
-            Effect::DemoteToBackground { tool_call_id, .. }
+            Effect::DemoteToBackground { ref tool_call_id, .. }
                 if tool_call_id == "task-tc-1" || tool_call_id == "sa-child-sid"
         ),
         "send-to-background must still emit DemoteToBackground, got {effect:?}"
@@ -181,7 +181,7 @@ fn send_blocking_get_command_or_subagent_output_wait_to_background_is_kept() {
     assert!(
         matches!(
             auto,
-            Effect::DemoteToBackground { tool_call_id, .. } if tool_call_id == "wait-1"
+            Effect::DemoteToBackground { ref tool_call_id, .. } if tool_call_id == "wait-1"
         ),
         "auto-background must not be deleted as a stand-in for send-to-background, got {auto:?}"
     );

@@ -752,21 +752,20 @@ impl SessionActor {
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // inherit stamp. Do not seed an expired AuthManager token: the resolver would
         // send it, and a fail-closed 401 would look authenticated.
-        // Nested turns keep the JWT the live sampler is already talking with.
-        // AuthManager recovery can mint a different token that cli-chat-proxy still rejects.
-        let nested_live = if self.startup_hints.is_subagent {
-            match self.sampler_handle.live_api_key() {
-                Some(key) => Some(key),
-                None => self
-                    .sampler_handle
-                    .current_api_key()
-                    .await
-                    .filter(|key| !key.trim().is_empty()),
-            }
-        } else {
-            None
+        // Nested turns, and the waiting parent after login restamp, keep the JWT the
+        // live sampler is already talking with. AuthManager recovery can mint a
+        // different token that cli-chat-proxy still rejects.
+        // A noop sampler (no live JWT) still falls through to AuthManager so
+        // limits-mode ranked hop can seed the session JWT.
+        let live_sampler_jwt = match self.sampler_handle.live_api_key() {
+            Some(key) => Some(key),
+            None => self
+                .sampler_handle
+                .current_api_key()
+                .await
+                .filter(|key| !key.trim().is_empty()),
         };
-        let mut api_key = if let Some(live) = nested_live {
+        let mut api_key = if let Some(live) = live_sampler_jwt {
             Some(live)
         } else {
             // Session gate still prefers a wire-valid AT when `[inference]` is
@@ -1397,7 +1396,7 @@ impl SessionActor {
     /// runs; stamp the spawn / last-restamp JWT in that case.
     async fn try_resume_nested_401_with_live_sampler_jwt(
         &self,
-        credential: xai_grok_sampling_types::SentCredential,
+        _credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
         let key = if let Some(key) = self.sampler_handle.live_api_key() {
             key
@@ -1424,9 +1423,14 @@ impl SessionActor {
             None,
         );
         self.set_chat_api_key(key).await;
-        self.prepare_sampler_for_turn().await;
+        if self.startup_hints.is_subagent {
+            self.prepare_sampler_for_turn().await;
+        }
+        // Parent prepare's refresh_token_if_expired overwrites chat credentials
+        // with AuthManager recovered token. Reconstruct copies live_api_key.
+        // The resubmit sends that live JWT, so provenance is Sent.
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
-            credential,
+            credential: xai_grok_sampling_types::SentCredential::Sent,
             store: RecoveredStore::SessionToken,
         })
     }
