@@ -1067,10 +1067,11 @@ fn workspace_lockfile_has_no_yanked_aes_chacha20_spin() {
     };
     let manifest = read(&root, "Cargo.toml");
     assert!(
-        manifest.contains("chacha20-v0.10.2")
-            && manifest.contains("RustCrypto/stream-ciphers")
-            && !manifest.contains("third_party/chacha20"),
-        "workspace must patch crates.io chacha20 to git tag chacha20-v0.10.2, not a path copy:\n{manifest}"
+        !manifest.contains("third_party/chacha20")
+            && !manifest.contains("RustCrypto/stream-ciphers")
+            && !manifest.contains("git = \"https://github.com/rustls/rustls\"")
+            && !manifest.contains("git = \"https://github.com/yfedoseev/office_oxide\""),
+        "chacha20 0.10.2, rustls 0.23.46, and office_oxide 0.1.15 come from the 7-day index, not a git pin or a path copy:\n{manifest}"
     );
     let lock = read(&root, "Cargo.lock");
     for (name, version) in [
@@ -1089,18 +1090,25 @@ fn workspace_lockfile_has_no_yanked_aes_chacha20_spin() {
         });
         assert!(!present, "Cargo.lock must not list yanked {name} {version}");
     }
-    let chacha20_pkg = lock
-        .split("[[package]]")
-        .find(|pkg| pkg.lines().any(|line| line.trim() == "name = \"chacha20\""));
-    let chacha20_pkg = chacha20_pkg.expect("Cargo.lock must list chacha20");
-    assert!(
-        chacha20_pkg.contains("version = \"0.10.2\""),
-        "lockfile chacha20 must be 0.10.2:\n{chacha20_pkg}"
-    );
-    assert!(
-        chacha20_pkg.contains("git+https://github.com/RustCrypto/stream-ciphers"),
-        "lockfile chacha20 must be the official git tag, not crates.io yanked 0.10.0/0.10.1:\n{chacha20_pkg}"
-    );
+    let registry = "source = \"registry+https://github.com/rust-lang/crates.io-index\"";
+    for (name, version) in [
+        ("chacha20", "0.10.2"),
+        ("rustls", "0.23.46"),
+        ("office_oxide", "0.1.15"),
+    ] {
+        let pkg = lock.split("[[package]]").find(|pkg| {
+            pkg.lines()
+                .any(|line| line.trim() == format!("name = \"{name}\""))
+                && pkg
+                    .lines()
+                    .any(|line| line.trim() == format!("version = \"{version}\""))
+        });
+        let pkg = pkg.unwrap_or_else(|| panic!("Cargo.lock must list {name} {version}"));
+        assert!(
+            pkg.contains(registry) && !pkg.contains("git+"),
+            "lockfile {name} {version} must be the registry source, not a git pin:\n{pkg}"
+        );
+    }
 }
 
 #[test]

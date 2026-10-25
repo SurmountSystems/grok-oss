@@ -120,7 +120,10 @@ mod linux {
         fn new() -> std::io::Result<Self> {
             let raw = unsafe { inotify_init1(libc::O_NONBLOCK | libc::O_CLOEXEC) }?;
             let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-            let fd = AsyncFd::with_interest(owned, Interest::READABLE)?;
+            // SAFETY: `owned` is that inotify fd. This type does not close or
+            // replace it for the life of the AsyncFd. Tokio 1.53.3 deprecates
+            // AsyncFd::with_interest (RUSTSEC-2026-0386).
+            let fd = unsafe { AsyncFd::register_with_interest(owned, Interest::READABLE) }?;
             Ok(Inotify { fd })
         }
 
