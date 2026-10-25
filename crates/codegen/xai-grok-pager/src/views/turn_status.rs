@@ -706,6 +706,15 @@ pub fn render_turn_status(
         watching_cue: None,
     }
 }
+/// The status row clips the tail, so an HTTP code has to lead the label.
+fn retry_model_request_label(attempt: u32, reason: &str) -> String {
+    let detail = format!("Retrying the model request (attempt {attempt}): {reason}");
+    match crate::app::error_display::parse_http_status(reason) {
+        Some(code) => format!("HTTP {code}: {detail}"),
+        None => detail,
+    }
+}
+
 /// Compute activity style, label, and whether it's a tool.
 fn compute_activity(
     theme: &Theme,
@@ -760,7 +769,7 @@ fn compute_activity(
             }),
         ) => (
             Style::default().fg(theme.warning),
-            format!("Retrying the model request (attempt {attempt}): {reason}"),
+            retry_model_request_label(*attempt, reason),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
@@ -1064,6 +1073,81 @@ mod tests {
             label.contains("transient error"),
             "retry chrome must name the cause, not hide it behind attempt N: {label}"
         );
+    }
+
+    /// Operator status row, 2026-10-25. The painted line was
+    /// `Retrying the model request (attempt 13): API error (s...` after the
+    /// row clipped. HTTP 500 has to be in the uncut prefix.
+    #[test]
+    fn retrying_http_500_line_contains_500_and_does_not_stop_at_api_error_s() {
+        let reason =
+            "API error (status 500 Internal Server Error): error: Internal error during token generation";
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 13,
+                max_retries: 15,
+                reason: reason.into(),
+                error_type: None,
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            format!("HTTP 500: Retrying the model request (attempt 13): {reason}")
+        );
+        assert!(label.contains("500"), "retry label must include 500: {label}");
+        assert!(
+            !label.starts_with("API error (s"),
+            "retry label must not stop at API error (s: {label}"
+        );
+        assert!(!is_tool);
+        // Screenshot clip: about 54 columns of label, then the ellipsis.
+        // The old wording died at `API error (st`.
+        let clipped = truncate_str(&label, 55);
+        let visible = clipped.split('\u{2026}').next().unwrap_or(clipped.as_str());
+        assert!(
+            visible.contains("500"),
+            "HTTP 500 must sit in the uncut prefix, got {clipped:?}"
+        );
+        assert!(
+            !visible.contains("API error (s"),
+            "clipped retry line must not stop at API error (s, got {clipped:?}"
+        );
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 13,
+            max_retries: 15,
+            reason: reason.into(),
+            error_type: None,
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.turn_elapsed = Some(Duration::from_secs(2 * 3600 + 7 * 60));
+        args.total_tokens = Some(67_600);
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(17));
+        let text = render_row_text(args, 96);
+        let painted = text.split('\u{2026}').next().unwrap_or(text.as_str());
+        assert!(
+            painted.contains("500"),
+            "painted retry line must include 500 before the clip, got {text:?}"
+        );
+        assert!(
+            !(painted.contains("API error (s") && !painted.contains("500")),
+            "painted retry line must not stop at API error (s, got {text:?}"
+        );
+        if let Some(api_at) = painted.find("API error (s") {
+            let code_at = painted
+                .find("500")
+                .expect("500 is in the painted prefix");
+            assert!(
+                code_at < api_at,
+                "HTTP 500 must sit before API error (s, got {text:?}"
+            );
+        }
     }
 
     /// HTTP 502 retry chrome already names the wait (`next try in 29s`).
