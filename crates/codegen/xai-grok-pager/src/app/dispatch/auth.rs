@@ -401,16 +401,56 @@ pub(super) fn handle_sibling_ipc_authorize(
     effects
 }
 
+/// Last typed user line still on screen after a 401. Not a bash row, not cron,
+/// and not `/login` itself. Used when login succeeds and the stash was never set.
+fn waiting_user_prompt_on_scrollback(
+    agent: &AgentView,
+) -> Option<crate::app::agent::InFlightPrompt> {
+    let text = (0..agent.scrollback.len()).rev().find_map(|idx| {
+        let entry = agent.scrollback.entry(idx)?;
+        let crate::scrollback::block::RenderBlock::UserPrompt(block) = &entry.block else {
+            return None;
+        };
+        if block.is_bash || block.is_cron || block.is_interjection {
+            return None;
+        }
+        let text = block.text.trim();
+        if text.is_empty() || text == "/login" || text.starts_with("/login ") {
+            return None;
+        }
+        Some(text.to_string())
+    })?;
+    Some(crate::app::agent::InFlightPrompt {
+        text,
+        images: Vec::new(),
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: Vec::new(),
+    })
+}
+
 /// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
 /// the login did not stash a return view (dashboard or another-process login).
 /// Parent already TurnRunning (Waiting for the model) must still POST immediately.
 /// Interrupted `/goal` (Active / InfraPaused / Interrupted) always UnstickResendPrompt
 /// `/goal resume` with the live login JWT so `resume_goal` runs.
+/// A signed-out turn whose only copy of the prompt is the user line (`hi`) still
+/// UnstickResendPrompts that line. The re-auth banner must not stay up.
 fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
     let mut retry_effects = Vec::new();
     let mut page_flips = Vec::new();
     for agent in app.agents.values_mut() {
         agent.nested_auth_resume_retries = 0;
+        let had_reauth_banner = scrollback_has_reauth_prompt(&agent.scrollback);
+        let recovered_waiting = if had_reauth_banner
+            && agent.reauth_stashed_prompt.is_none()
+            && agent.session.compact_held_prompt.is_none()
+            && agent.session.in_flight_prompt.is_none()
+        {
+            waiting_user_prompt_on_scrollback(agent)
+        } else {
+            None
+        };
         strip_trailing_auth_error_blocks(agent);
         let was_idle = agent.session.state.is_idle();
         let resume_goal = goal_should_resume_after_login_auth(agent);
@@ -422,12 +462,20 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
                 .clone()
                 .or_else(|| Some(synthetic_goal_resume_prompt()));
         }
+        let mut recovered_from_scrollback = false;
+        if parent_retry.is_none()
+            && had_reauth_banner
+            && let Some(prompt) = recovered_waiting
+        {
+            parent_retry = Some(prompt);
+            recovered_from_scrollback = true;
+        }
         let had_parent_retry = parent_retry.is_some();
         if let Some(prompt) = parent_retry {
             agent.scrollback.push_block(RenderBlock::system(
                 "Re-authenticated. Retrying\u{2026}".to_string(),
             ));
-            if resume_goal {
+            if resume_goal || recovered_from_scrollback {
                 if let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt) {
                     retry_effects.push(effect);
                 }

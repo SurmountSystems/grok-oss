@@ -1185,6 +1185,96 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
     );
 }
 
+/// Operator: login succeeds and the waiting prompt is still not submitted.
+/// Signed out, the Operator typed `hi`, the re-auth banner is the only reply,
+/// and nothing was stashed. After authorize_ask says authorized, `hi` is
+/// submitted and `Run /login to re-authenticate, then resend your message.`
+/// is not painted. Inherit-on-startup is not this path.
+#[test]
+fn after_login_succeeds_the_waiting_prompt_is_submitted_and_run_login_is_not_painted() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-waiting-hi"));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = None;
+        agent.session.compact_held_prompt = None;
+        agent.scrollback.push_block(RenderBlock::user_prompt("hi"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Pending { error: None };
+    let before = painted_login_nag_count(test_agent(&app, id));
+    assert_eq!(
+        before, 1,
+        "the signed-out reply paints the re-auth sentence once before login applies"
+    );
+    let effects = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: None,
+                ..
+            } if session_id.0.as_ref() == "sess-waiting-hi" && text == "hi"
+        )),
+        "after login succeeds, authorize_ask must submit the waiting prompt hi. got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "login must strip the re-auth banner instead of leaving it as the reply"
+    );
+    let painted = painted_session_and_system_text(agent);
+    assert_eq!(
+        painted.matches(RUN_LOGIN_NAG).count(),
+        0,
+        "after login succeeds, Run /login to re-authenticate, then resend your message. must not be painted. painted={painted}"
+    );
+    assert!(
+        !painted.contains("Authentication required:"),
+        "one expiry must not leave Authentication required up after login. painted={painted}"
+    );
+    assert!(
+        !painted.contains("/login"),
+        "do not tell the Operator to /login after they signed in. painted={painted}"
+    );
+}
+
+fn painted_login_nag_count(agent: &crate::app::agent_view::AgentView) -> usize {
+    painted_session_and_system_text(agent)
+        .matches(RUN_LOGIN_NAG)
+        .count()
+}
+
+fn painted_session_and_system_text(agent: &crate::app::agent_view::AgentView) -> String {
+    (0..agent.scrollback.len())
+        .filter_map(|i| {
+            let block = &agent.scrollback.entry(i)?.block;
+            match block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                RenderBlock::System(sys) => Some(sys.text.clone()),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Authorized sibling IPC must not drop a live parent JWT or UnstickResend an
 /// in-flight turn when this L1 does not need reauth.
 #[test]

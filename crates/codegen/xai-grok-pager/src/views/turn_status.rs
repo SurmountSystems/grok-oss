@@ -1080,8 +1080,7 @@ mod tests {
     /// row clipped. HTTP 500 has to be in the uncut prefix.
     #[test]
     fn retrying_http_500_line_contains_500_and_does_not_stop_at_api_error_s() {
-        let reason =
-            "API error (status 500 Internal Server Error): error: Internal error during token generation";
+        let reason = "API error (status 500 Internal Server Error): error: Internal error during token generation";
         let theme = Theme::current();
         let (_, label, is_tool) = compute_activity(
             &theme,
@@ -1099,7 +1098,10 @@ mod tests {
             label,
             format!("HTTP 500: Retrying the model request (attempt 13): {reason}")
         );
-        assert!(label.contains("500"), "retry label must include 500: {label}");
+        assert!(
+            label.contains("500"),
+            "retry label must include 500: {label}"
+        );
         assert!(
             !label.starts_with("API error (s"),
             "retry label must not stop at API error (s: {label}"
@@ -1140,9 +1142,7 @@ mod tests {
             "painted retry line must not stop at API error (s, got {text:?}"
         );
         if let Some(api_at) = painted.find("API error (s") {
-            let code_at = painted
-                .find("500")
-                .expect("500 is in the painted prefix");
+            let code_at = painted.find("500").expect("500 is in the painted prefix");
             assert!(
                 code_at < api_at,
                 "HTTP 500 must sit before API error (s, got {text:?}"
