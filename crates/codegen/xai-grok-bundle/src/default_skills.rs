@@ -52,9 +52,17 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
         content: include_str!("../skills/what/SKILL.md"),
         // Installed cache from 2026-08-28, then the later tree body before
         // output_tokens. Both lack local_usage_events_for_session.
+        // Third hash is the broad-trigger tree body before the slash-only
+        // description (sha256 of that SKILL.md on 2026-10-24).
+        // Fourth hash is the installed cache that still listed the broad
+        // trigger with the older local_usage_events wording (sha256sum of
+        // that file on 2026-10-24). Install replaces that body. The cache
+        // file itself is not the source.
         previous_checksums: &[
             "f34d41a91fd6ebc26204b9de85665e4080e4f35cbded31b440504f28d04e342d",
             "6ced030035c14a22ad6abfd6416d2915b9506591e8f366fdad3fe50ce9cb0b96",
+            "c051046d1e66d5917d2f2ccfe2732bc6af6e104d5cf1d7a2d24d66b03f1f87dd",
+            "daddbfa294b5241e8c46f16a40f6a80dc41f573312c84d0490da55e9e78659aa",
         ],
     },
     DefaultProductSkillFile {
@@ -207,7 +215,79 @@ mod tests {
         );
     }
 
+    // Grok OSS: the four-label restatement runs only when the operator typed
+    // /what. "I do not understand", "speak more clearly", and "what is going
+    // on" are ordinary questions. This diverges from the 2026-10-24 broad
+    // description that listed those sentences as triggers.
+    #[test]
+    fn what_skill_trigger_is_slash_command_only() {
+        let skill_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/what/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", skill_path.display()));
+        let (front, body) = skill
+            .split_once("\n---\n")
+            .unwrap_or_else(|| panic!("what SKILL.md missing frontmatter close; got {skill}"));
+        assert!(
+            front.contains("only when the operator types the slash command /what"),
+            "description must run only on /what; got {front}"
+        );
+        assert!(
+            front.contains("Do not run this skill when they say they do not understand"),
+            "description must refuse ordinary confusion as a trigger; got {front}"
+        );
+        assert!(
+            front.contains("Those are ordinary questions"),
+            "description must call confusion an ordinary question; got {front}"
+        );
+        assert!(
+            !front.contains("says they do not understand, asks you to speak more clearly"),
+            "description must not list confusion as a reason to run the skill; got {front}"
+        );
+        assert!(
+            !front.contains("asks what is going on in this session"),
+            "description must not list a status question as a trigger; got {front}"
+        );
+        assert!(
+            !front.contains("Use when the user runs /what, says they do not understand"),
+            "old broad Use-when sentence must not remain; got {front}"
+        );
+        assert!(
+            body.contains("Run this skill only when the operator typed `/what`"),
+            "body must gate the four labels on the slash; got {body}"
+        );
+        assert!(
+            body.contains(
+                "Do not run it\nbecause a sentence sounds confused, annoyed, or like a status question."
+            ),
+            "body must not treat annoyance or a status question as /what; got {body}"
+        );
+        assert!(
+            body.contains("If they did not type `/what`, answer in normal sentences"),
+            "body must answer ordinary questions in normal sentences; got {body}"
+        );
+        assert!(
+            !body.contains("The operator cannot parse the last agent chat. Restate."),
+            "body must not restate merely because chat was hard to parse; got {body}"
+        );
+        assert!(
+            body.contains("Job / State / Operator / Next"),
+            "a real /what still uses the four labels; got {body}"
+        );
+        assert!(body.contains("0005_CATE.md"), "keep CATE; got {body}");
+        assert!(
+            body.contains("local_usage_events_for_session"),
+            "keep the token_report reader; got {body}"
+        );
+        assert!(
+            body.contains("crates/codegen/xai-grok-bundle/skills/"),
+            "keep the bundle source path; got {body}"
+        );
+    }
+
     // Previous shipped bodies live in this tracked file. Nix does not copy untracked markdown.
+    // WHAT_INSTALLED_BEFORE_OUTPUT_TOKENS and WHAT_TREE_BEFORE_OUTPUT_TOKENS are
+    // frozen earlier ships. Their checksums must stay byte-identical, so those
+    // strings still contain the old broad trigger. They are not the live skill.
     const WHAT_INSTALLED_BEFORE_OUTPUT_TOKENS: &str = r#"---
 name: what
 description: >
@@ -521,6 +601,21 @@ No L4.
                 installed.contains("A null `output_tokens` is not printed as `0`"),
                 "{rel} install must keep the null-versus-zero sentence"
             );
+            if rel == "skills/what/SKILL.md" {
+                assert!(
+                    installed.contains("only when the operator types the slash command /what"),
+                    "{rel} install must ship the slash-only trigger"
+                );
+                assert!(
+                    !installed
+                        .contains("says they do not understand, asks you to speak more clearly"),
+                    "{rel} install must not keep the broad trigger sentence"
+                );
+                assert!(
+                    !installed.contains("asks what is going on in this session"),
+                    "{rel} install must not keep the status-question trigger"
+                );
+            }
         }
     }
 
