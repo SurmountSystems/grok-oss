@@ -1100,5 +1100,57 @@ mod tests {
             .expect("second session asks the first over authorize_ask.sock");
         assert!(asked.authorized);
         assert_eq!(asked.permission_mode, "always-approve");
+        let asked_json = serde_json::to_value(&asked).expect("live IPC document json");
+        let asked_keys: std::collections::BTreeSet<&str> = asked_json
+            .as_object()
+            .expect("live IPC document object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            asked_keys,
+            ["authorized", "permission_mode"].into_iter().collect(),
+            "live IPC payload must be {{authorized, permission_mode}}, never tokens. json={asked_json}"
+        );
+    }
+
+    /// IPC `{authorized, permission_mode}` never carries tokens.
+    /// A later merge that adds jwt / api_key / Bearer to this document must fail here.
+    /// Inherit-on-startup of a new session is `second_grok_oss_session_must_not_require_fresh_authorize_when_ipc_has_a_live_authorized_session`, not this unit.
+    #[test]
+    fn authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens() {
+        let doc = AuthorizeAskDocument {
+            authorized: true,
+            permission_mode: "ask".into(),
+        };
+        let json = serde_json::to_value(&doc).expect("serialize");
+        let obj = json.as_object().expect("object");
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["authorized", "permission_mode"].into_iter().collect(),
+            "IPC document keys must be only authorized and permission_mode, never tokens. got {keys:?}"
+        );
+        assert_eq!(obj.get("authorized"), Some(&serde_json::json!(true)));
+        assert_eq!(obj.get("permission_mode"), Some(&serde_json::json!("ask")));
+        assert!(obj.get("jwt").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("access_token").is_none());
+        assert!(obj.get("refresh_token").is_none());
+        assert!(obj.get("bearer").is_none());
+        assert!(obj.get("token").is_none());
+        let dumped = serde_json::to_string(&doc).expect("string");
+        assert!(
+            !dumped.contains("eyJ"),
+            "IPC JSON must not carry a JWT: {dumped}"
+        );
+        assert!(
+            !dumped.contains("Bearer"),
+            "IPC JSON must not carry Bearer: {dumped}"
+        );
+        assert!(
+            !dumped.contains("sk-"),
+            "IPC JSON must not carry an API key: {dumped}"
+        );
     }
 }

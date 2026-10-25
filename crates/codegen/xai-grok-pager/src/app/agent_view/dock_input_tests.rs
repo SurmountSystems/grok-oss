@@ -8,6 +8,7 @@ use crate::app::app_view::InputOutcome;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
@@ -2319,4 +2320,277 @@ fn plan_panel_open_for_present_does_not_show_in_flight_explore_jobs_on_the_subag
         dock_row_mentions(&plan_only, PLAN_ID, PLAN_DESC),
         "a running plan-type L2 still lists while present is open"
     );
+}
+
+const L3_A_TRANSCRIPT: &str = "L3_A_TRANSCRIPT";
+const L3_B_TRANSCRIPT: &str = "L3_B_TRANSCRIPT";
+
+fn insert_named_nested(
+    agent: &mut AgentView,
+    child: &str,
+    description: &str,
+    depth: Option<u32>,
+    parent: &str,
+    transcript: Option<&str>,
+    l2_coordinator: bool,
+) {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    let mut info = super::test_fixtures::running_subagent_info(child);
+    info.description = Arc::from(description);
+    info.attempt.depth = depth;
+    info.attempt.parent_session_id = Some(Arc::from(parent));
+    agent.subagent_sessions.insert(child.to_string(), info);
+    let mut view = super::test_fixtures::make_agent();
+    view.session.session_id = Some(acp::SessionId::new(child));
+    if let Some(line) = transcript {
+        view.scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(line));
+    }
+    if l2_coordinator {
+        view.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.insert_subagent_view(
+            child.to_string(),
+            Box::new(view),
+            super::ChildLink::l2_coordinator(acp::SessionId::new(parent)),
+        );
+    } else {
+        agent.insert_test_child(child.to_string(), Box::new(view));
+    }
+}
+
+fn l1_two_l2_two_l3_fixture(l3_a_depth: Option<u32>) -> AgentView {
+    use agent_client_protocol as acp;
+    let mut l1 = make_agent();
+    l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+    insert_named_nested(
+        &mut l1,
+        "l2-a",
+        "Coordinate A",
+        Some(1),
+        "l1-session",
+        None,
+        true,
+    );
+    insert_named_nested(
+        &mut l1,
+        "l2-b",
+        "Coordinate B",
+        Some(1),
+        "l1-session",
+        None,
+        true,
+    );
+    insert_named_nested(
+        &mut l1,
+        "l3-a",
+        "Prove A",
+        l3_a_depth,
+        "l2-a",
+        Some(L3_A_TRANSCRIPT),
+        false,
+    );
+    insert_named_nested(
+        &mut l1,
+        "l3-b",
+        "Prove B",
+        Some(2),
+        "l2-b",
+        Some(L3_B_TRANSCRIPT),
+        false,
+    );
+    l1.dock_shown = true;
+    l1.dock_on = true;
+    l1
+}
+
+fn assert_l1_subagents_view_is_l2_only(agent: &mut AgentView, owed: &str) {
+    let dock_rows = agent.dock_subagent_rows();
+    let dock_ids: Vec<String> = dock_rows
+        .iter()
+        .map(|(child, _, _)| child.clone())
+        .collect();
+    assert_eq!(
+        dock_ids,
+        vec!["l2-a".to_string(), "l2-b".to_string()],
+        "{owed} dock ids: {dock_rows:?}"
+    );
+    for (_, _, row) in &dock_rows {
+        assert!(
+            !row.description.contains("Prove A") && !row.description.contains("Prove B"),
+            "{owed} L3 description leaked into dock description: {row:?}"
+        );
+        assert!(
+            !row.meta.contains("Prove A") && !row.meta.contains("Prove B"),
+            "{owed} L3 description leaked into dock meta: {row:?}"
+        );
+    }
+    for id in ["l2-a", "l2-b"] {
+        let row = dock_rows
+            .iter()
+            .find(|(child, _, _)| child == id)
+            .expect(id);
+        assert!(
+            row.2.meta.contains("1 specialist"),
+            "{owed} L2 {id} meta needs 1 specialist, got {}",
+            row.2.meta
+        );
+    }
+    agent.tasks.sync(
+        &agent.session.bg_tasks,
+        &agent.subagent_sessions,
+        &agent.session.scheduled_tasks,
+        &agent.workflow_runs,
+    );
+    let mut pane_ids = agent.tasks.listed_agent_session_ids();
+    pane_ids.sort();
+    let mut dock_ids_sorted = dock_ids.clone();
+    dock_ids_sorted.sort();
+    assert_eq!(
+        pane_ids, dock_ids_sorted,
+        "{owed} tasks pane ids must match the dock (order-independent). pane={pane_ids:?} dock={dock_ids:?}"
+    );
+    assert_eq!(
+        pane_ids,
+        vec!["l2-a".to_string(), "l2-b".to_string()],
+        "{owed} tasks pane must list the two L2s only: {pane_ids:?}"
+    );
+    assert_eq!(
+        agent.watchers().subagents,
+        2,
+        "{owed} watching counts must be the two L2s, not L3s. got {}",
+        agent.watchers().subagents
+    );
+    let block = crate::app::status_blocks::tasks_block_text(agent);
+    assert!(
+        block.contains("Coordinate A") && block.contains("Coordinate B"),
+        "{owed} /tasks must name the L2s:\n{block}"
+    );
+    assert!(
+        !block.contains("Prove A") && !block.contains("Prove B"),
+        "{owed} /tasks must not name the L3s:\n{block}"
+    );
+}
+
+/// L1 Subagents view does not include L3 rows.
+#[test]
+fn l1_subagents_view_does_not_include_l3_rows() {
+    const OWED: &str = "L1 Subagents view does not include L3 rows.";
+    let mut agent = l1_two_l2_two_l3_fixture(Some(2));
+    assert_l1_subagents_view_is_l2_only(&mut agent, OWED);
+
+    let mut leaked = l1_two_l2_two_l3_fixture(None);
+    assert_l1_subagents_view_is_l2_only(
+        &mut leaked,
+        "L1 Subagents view does not include L3 rows. A live spawn that left L3 depth None and parent l2-a still must not list that L3.",
+    );
+}
+
+/// Header `tasks N/M` and watching counts match listed live L2s, not L3s.
+#[test]
+fn running_count_matches_listed_live_l2_not_l3() {
+    const OWED: &str = "watchers().subagents equals spinning dock L2 rows equals 2, not 4. Header tasks N/M uses that L2 count.";
+    crate::views::dock::set_enabled_for_test(true);
+    crate::appearance::cache::set_hide_header(false);
+    let mut agent = l1_two_l2_two_l3_fixture(Some(2));
+    let dock_rows = agent.dock_subagent_rows();
+    let spinning = dock_rows.iter().filter(|(_, _, row)| row.spinning).count();
+    assert_eq!(spinning, 2, "{OWED} spinning dock rows: {dock_rows:?}");
+    assert_eq!(
+        agent.watchers().subagents,
+        spinning,
+        "{OWED} watchers().subagents is {}, spinning dock rows are {spinning}",
+        agent.watchers().subagents
+    );
+    assert_eq!(
+        agent.watchers().subagents,
+        2,
+        "{OWED} must be 2 live L2s, not 4 nested rows"
+    );
+    let area = Rect::new(0, 0, 220, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+    agent.draw(
+        area,
+        &mut buf,
+        &ActionRegistry::defaults(),
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        false,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    crate::views::dock::set_enabled_for_test(false);
+    let text: String = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let header = text
+        .lines()
+        .find(|line| line.contains("tasks "))
+        .unwrap_or(text.as_str());
+    assert!(
+        header.contains("tasks 2/2"),
+        "{OWED} header must use the L2 count, got:\n{header}"
+    );
+    assert!(
+        !header.contains("tasks 4/4"),
+        "{OWED} header must not count L3s as tasks 4/4:\n{header}"
+    );
+}
+
+/// L1 wait/title must not name an L3 via `running_live_specialists`.
+#[test]
+fn l1_wait_title_does_not_name_an_l3_via_running_live_specialists() {
+    const OWED: &str = "L1 wait/title must not name an L3 via running_live_specialists.";
+    let mut agent = l1_two_l2_two_l3_fixture(Some(2));
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    let named: Vec<String> = agent
+        .running_live_specialists()
+        .map(|info| info.description.to_string())
+        .collect();
+    assert_eq!(
+        named.len(),
+        2,
+        "{OWED} L1 running_live_specialists must be the two L2s, got {named:?}"
+    );
+    assert!(
+        named.iter().all(|d| d != "Prove A" && d != "Prove B"),
+        "{OWED} running_live_specialists named an L3: {named:?}"
+    );
+    assert!(
+        named.iter().any(|d| d == "Coordinate A") && named.iter().any(|d| d == "Coordinate B"),
+        "{OWED} L1 wait/title must still name the L2s: {named:?}"
+    );
+    let activity = agent.resolve_turn_activity();
+    let label = activity
+        .as_ref()
+        .map(crate::app::subagent::format_activity_label)
+        .unwrap_or_default();
+    assert!(
+        !label.contains("Prove A") && !label.contains("Prove B"),
+        "{OWED} L1 wait subject named an L3: {label}"
+    );
+    assert!(
+        !label.contains("4 subagents"),
+        "{OWED} L1 wait counted L3s as 4 subagents: {label}"
+    );
+    if let Some(crate::acp::tracker::TurnActivity::Waiting(reason)) = activity {
+        let wait = reason.label();
+        assert!(
+            !wait.contains("Prove A") && !wait.contains("Prove B"),
+            "{OWED} L1 wait label named an L3: {wait}"
+        );
+        assert!(
+            !wait.contains("4 subagents"),
+            "{OWED} L1 wait label counted L3s: {wait}"
+        );
+    }
 }

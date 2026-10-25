@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp;
 use xai_grok_tools::types::output::{
-    ApplyPatchOutput, CodexGrepFilesOutput, ListDirOutput, MCPOutputDetails, ReadFileOutput,
-    SearchReplaceEditContextInformation, SearchReplaceEditDetail, SearchReplaceOutput, ToolOutput,
+    ApplyPatchOutput, CodexGrepFilesOutput, ListDirOutput, MCPOutputDetails, MediaGenOutput,
+    ReadFileOutput, SearchReplaceEditContextInformation, SearchReplaceEditDetail,
+    SearchReplaceOutput, ToolOutput,
 };
 use xai_tool_types::{KillTaskOutput, TaskOutputOutput};
 
@@ -108,6 +109,38 @@ pub(crate) fn raw_output_json(
         Some(rw) => rw.rewrite_json(value),
         None => value,
     })
+}
+
+/// ACP content for media-gen tools. Local saves are prompt-format JSON
+/// (`path`, `filename`, `session_folder`, `message`). Uploaded-only stays
+/// free text. Model `to_prompt_format` may densify to TOON; ACP framing stays JSON.
+fn media_gen_acp_content(
+    media: &MediaGenOutput,
+    action: &str,
+    rewriter: Option<&PathRewriter>,
+) -> String {
+    if let Some(url) = &media.uploaded_url {
+        return maybe_rewrite(
+            rewriter,
+            format!(
+                "{action} and uploaded to {url}. The file is not available locally — reference it by this URL. Do not read or re-display it, and do not describe how it appears to the user."
+            ),
+        );
+    }
+    let path = media.path.to_string_lossy().to_string();
+    let message = format!(
+        "{action} and saved to {path}. Do not read or re-display it, and do not describe how it appears to the user."
+    );
+    maybe_rewrite(
+        rewriter,
+        serde_json::json!({
+            "path": path,
+            "filename": &media.filename,
+            "session_folder": &media.session_folder,
+            "message": message,
+        })
+        .to_string(),
+    )
 }
 
 /// Convert tool output to an ACP `ToolCallUpdate` for rich TUI rendering.
@@ -507,19 +540,28 @@ pub(crate) fn acp_tool_update(
                 )]))
                 .raw_output(raw_output_json(output, rewriter)),
         )),
-        // Dual channel: prose for non-pager clients, typed `raw_output` for the pager.
-        ToolOutput::ImageGen(_)
-        | ToolOutput::ImageToVideo(_)
-        | ToolOutput::ReferenceToVideo(_)
-        | ToolOutput::ImageEdit(_) => Some(acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from(tool_call_id)),
-            acp::ToolCallUpdateFields::new()
-                .status(Some(acp::ToolCallStatus::Completed))
-                .content(Some(vec![acp::ToolCallContent::from(
-                    acp::ContentBlock::Text(acp::TextContent::new(output.to_prompt_format())),
-                )]))
-                .raw_output(raw_output_json(output, rewriter)),
-        )),
+        // Dual channel: prompt-format JSON in content, typed `raw_output` for the pager.
+        ToolOutput::ImageGen(m)
+        | ToolOutput::ImageToVideo(m)
+        | ToolOutput::ReferenceToVideo(m)
+        | ToolOutput::ImageEdit(m) => {
+            let action = match output {
+                ToolOutput::ImageGen(_) => "Image generated",
+                ToolOutput::ImageEdit(_) => "Image edited",
+                _ => "Video generated",
+            };
+            Some(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from(tool_call_id)),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::Completed))
+                    .content(Some(vec![acp::ToolCallContent::from(
+                        acp::ContentBlock::Text(acp::TextContent::new(media_gen_acp_content(
+                            m, action, rewriter,
+                        ))),
+                    )]))
+                    .raw_output(raw_output_json(output, rewriter)),
+            ))
+        }
         ToolOutput::SubagentCompleted(sub) => {
             // The text includes the resume handle so users can find it, plus meta for the TUI
             // Shared with the chat-bidi server via `to_model_text` so both clients present a completed subagent identically

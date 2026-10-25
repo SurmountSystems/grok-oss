@@ -274,6 +274,19 @@ mod tests {
         );
     }
 
+    /// Named machine flag: `grok-oss running --json` stays pretty JSON.
+    #[test]
+    fn running_cli_json_flag_emits_json() {
+        let json = format_json(&[]).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("running --json must parse as JSON");
+        assert!(v.is_array(), "running --json is a JSON array, got: {json}");
+        assert!(
+            json.trim_start().starts_with('['),
+            "running --json must not be TOON, got: {json}"
+        );
+    }
+
     #[test]
     fn cli_gui_is_l0_not_running() {
         let plain = PagerArgs::try_parse_from(["grok-oss", "gui"]).unwrap();

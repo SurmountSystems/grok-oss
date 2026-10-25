@@ -1640,3 +1640,309 @@ fn enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_co
     assert!(l1.overlay_return_sid.is_none());
     assert!(l1.subagent_sessions.get(L2).expect("l2").is_running());
 }
+
+const L3_A_TRANSCRIPT: &str = "L3_A_TRANSCRIPT";
+const L3_B_TRANSCRIPT: &str = "L3_B_TRANSCRIPT";
+
+fn seed_running_wait(view: &mut AgentView, tool_id: &str) {
+    use crate::acp::meta::NotificationMeta;
+    use crate::app::agent::AgentState;
+    use agent_client_protocol as acp;
+    view.session.state = AgentState::TurnRunning;
+    view.session.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from(tool_id)),
+                "get_command_or_subagent_output",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+            .locations(vec![]),
+        ),
+        &NotificationMeta::default(),
+        &mut view.scrollback,
+    );
+}
+
+fn two_l2_two_l3_visibility_fixture() -> AgentView {
+    use crate::app::agent::AgentState;
+    use agent_client_protocol as acp;
+    let mut l1 = make_agent();
+    l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+
+    let mut l2_a = make_agent();
+    l2_a.session.session_id = Some(acp::SessionId::new("l2-a"));
+    seed_running_wait(&mut l2_a, "wait-l3-a");
+    let mut l2_a_info = running_subagent_info("l2-a");
+    l2_a_info.description = Arc::from("Coordinate A");
+    l2_a_info.attempt.depth = Some(1);
+    l2_a_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    l1.subagent_sessions.insert("l2-a".to_owned(), l2_a_info);
+    l1.insert_subagent_view(
+        "l2-a".to_owned(),
+        Box::new(l2_a),
+        crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+
+    let mut l2_b = make_agent();
+    l2_b.session.session_id = Some(acp::SessionId::new("l2-b"));
+    seed_running_wait(&mut l2_b, "wait-l3-b");
+    l2_b.session.state = AgentState::TurnRunning;
+    let mut l2_b_info = running_subagent_info("l2-b");
+    l2_b_info.description = Arc::from("Coordinate B");
+    l2_b_info.attempt.depth = Some(1);
+    l2_b_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    l1.subagent_sessions.insert("l2-b".to_owned(), l2_b_info);
+    l1.insert_subagent_view(
+        "l2-b".to_owned(),
+        Box::new(l2_b),
+        crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+
+    let mut l3_a = make_agent();
+    l3_a.session.session_id = Some(acp::SessionId::new("l3-a"));
+    l3_a.scrollback
+        .push_block(RenderBlock::user_prompt(L3_A_TRANSCRIPT));
+    let mut l3_a_info = running_subagent_info("l3-a");
+    l3_a_info.description = Arc::from("Prove A");
+    l3_a_info.attempt.depth = Some(2);
+    l3_a_info.attempt.parent_session_id = Some(Arc::from("l2-a"));
+    l3_a_info.attempt.is_background = true;
+    l3_a_info.attempt.tools_used = vec![Arc::from("read_file")];
+    l1.subagent_sessions.insert("l3-a".to_owned(), l3_a_info);
+    l1.insert_test_child("l3-a".to_owned(), Box::new(l3_a));
+
+    let mut l3_b = make_agent();
+    l3_b.session.session_id = Some(acp::SessionId::new("l3-b"));
+    l3_b.scrollback
+        .push_block(RenderBlock::user_prompt(L3_B_TRANSCRIPT));
+    let mut l3_b_info = running_subagent_info("l3-b");
+    l3_b_info.description = Arc::from("Prove B");
+    l3_b_info.attempt.depth = Some(2);
+    l3_b_info.attempt.parent_session_id = Some(Arc::from("l2-b"));
+    l3_b_info.attempt.is_background = true;
+    l3_b_info.attempt.tools_used = vec![Arc::from("read_file")];
+    l1.subagent_sessions.insert("l3-b".to_owned(), l3_b_info);
+    l1.insert_test_child("l3-b".to_owned(), Box::new(l3_b));
+    l1
+}
+
+fn draw_overlay(l1: &mut AgentView) -> String {
+    let registry = ActionRegistry::defaults();
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    buffer_text(&buf, area)
+}
+
+fn over_copy_both_l3s_onto(l1: &mut AgentView, l2_sid: &str) {
+    let l3_a = l1.subagent_sessions.get("l3-a").expect("l3-a").clone();
+    let l3_b = l1.subagent_sessions.get("l3-b").expect("l3-b").clone();
+    let child = l1.subagent_view_mut(l2_sid).expect("l2 child");
+    child.subagent_sessions.insert("l3-a".to_owned(), l3_a);
+    child.subagent_sessions.insert("l3-b".to_owned(), l3_b);
+}
+
+/// L2 overlay sees only that L2's own L3s.
+#[test]
+fn l2_overlay_sees_only_that_l2s_own_l3s() {
+    const OWED: &str = "L2 overlay sees only that L2's own L3s.";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = two_l2_two_l3_visibility_fixture();
+    let mut mirrored = l1.mirrored_overlay_specialist_ids_for_test("l2-a");
+    mirrored.sort();
+    assert_eq!(
+        mirrored,
+        vec!["l3-a".to_string()],
+        "{OWED} L2-A mirror keys must be l3-a only: {mirrored:?}"
+    );
+    l1.open_subagent_fullscreen("l2-a".to_owned());
+    let painted = draw_overlay(&mut l1);
+    assert!(
+        painted.contains("Prove A") || painted.contains(L3_A_TRANSCRIPT),
+        "{OWED} L2-A overlay must show Prove A and/or L3_A_TRANSCRIPT:\n{painted}"
+    );
+    assert!(
+        !painted.contains("Prove B") && !painted.contains(L3_B_TRANSCRIPT),
+        "{OWED} L2-A overlay must not show Prove B or L3_B_TRANSCRIPT:\n{painted}"
+    );
+    let child_keys: Vec<String> = l1
+        .subagent_view("l2-a")
+        .expect("l2-a")
+        .subagent_sessions
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        !child_keys.iter().any(|id| id == "l3-b"),
+        "{OWED} after draw, L2-A child subagent_sessions still has L3-B: {child_keys:?}"
+    );
+    assert!(
+        l1.subagent_view("l2-a")
+            .expect("l2-a")
+            .prompt
+            .text()
+            .is_empty()
+    );
+    let outcome = l1.handle_input(&key(KeyCode::Enter), &registry);
+    assert!(matches!(outcome, InputOutcome::Changed), "{outcome:?}");
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some("l3-a"),
+        "{OWED} empty Enter must open L3-A, not {:?}",
+        l1.active_subagent
+    );
+    assert_ne!(
+        l1.active_subagent.as_deref(),
+        Some("l3-b"),
+        "{OWED} empty Enter must not open L3-B"
+    );
+}
+
+/// L2-A cannot see L2-B's L3s.
+#[test]
+fn l2_a_cannot_see_l2_b_l3s() {
+    const OWED: &str = "L2-A cannot see L2-B's L3s.";
+    let mut l1 = two_l2_two_l3_visibility_fixture();
+    let mut mirrored = l1.mirrored_overlay_specialist_ids_for_test("l2-a");
+    mirrored.sort();
+    assert_eq!(
+        mirrored,
+        vec!["l3-a".to_string()],
+        "{OWED} L2-A mirror keys: {mirrored:?}"
+    );
+
+    over_copy_both_l3s_onto(&mut l1, "l2-a");
+    l1.open_subagent_fullscreen("l2-a".to_owned());
+    let painted = draw_overlay(&mut l1);
+    assert!(
+        painted.contains("Prove A") || painted.contains(L3_A_TRANSCRIPT),
+        "{OWED} L2-A overlay wait chrome must name Prove A:\n{painted}"
+    );
+    assert!(
+        !painted.contains("Prove B") && !painted.contains(L3_B_TRANSCRIPT),
+        "{OWED} L2-A overlay must not show Prove B or L3_B_TRANSCRIPT:\n{painted}"
+    );
+    let mut pane_ids = l1
+        .subagent_view("l2-a")
+        .expect("l2-a")
+        .tasks
+        .listed_agent_session_ids();
+    pane_ids.sort();
+    assert_eq!(
+        pane_ids,
+        vec!["l3-a".to_string()],
+        "{OWED} L2-A tasks-pane items after a scoped sync must be l3-a only: {pane_ids:?}"
+    );
+    assert!(
+        !pane_ids.iter().any(|id| id == "l3-b"),
+        "{OWED} L2-A tasks pane must not list l3-b: {pane_ids:?}"
+    );
+    let mut dock_ids: Vec<String> = l1
+        .dock_subagent_rows()
+        .into_iter()
+        .map(|(child, _, _)| child)
+        .collect();
+    dock_ids.sort();
+    assert_eq!(
+        dock_ids,
+        vec!["l2-a".to_string(), "l2-b".to_string()],
+        "{OWED} L1 dock must still list l2-a and l2-b only: {dock_ids:?}"
+    );
+
+    l1.close_subagent_fullscreen();
+    let mut l1_b = two_l2_two_l3_visibility_fixture();
+    let mut mirrored_b = l1_b.mirrored_overlay_specialist_ids_for_test("l2-b");
+    mirrored_b.sort();
+    assert_eq!(
+        mirrored_b,
+        vec!["l3-b".to_string()],
+        "{OWED} L2-B mirror keys: {mirrored_b:?}"
+    );
+    over_copy_both_l3s_onto(&mut l1_b, "l2-b");
+    l1_b.open_subagent_fullscreen("l2-b".to_owned());
+    let painted_b = draw_overlay(&mut l1_b);
+    assert!(
+        painted_b.contains("Prove B") || painted_b.contains(L3_B_TRANSCRIPT),
+        "{OWED} L2-B overlay wait chrome must name Prove B:\n{painted_b}"
+    );
+    assert!(
+        !painted_b.contains("Prove A") && !painted_b.contains(L3_A_TRANSCRIPT),
+        "{OWED} L2-B overlay must not show Prove A or L3_A_TRANSCRIPT:\n{painted_b}"
+    );
+    let mut pane_ids_b = l1_b
+        .subagent_view("l2-b")
+        .expect("l2-b")
+        .tasks
+        .listed_agent_session_ids();
+    pane_ids_b.sort();
+    assert_eq!(
+        pane_ids_b,
+        vec!["l3-b".to_string()],
+        "{OWED} L2-B tasks-pane items after a scoped sync must be l3-b only: {pane_ids_b:?}"
+    );
+    assert!(
+        !pane_ids_b.iter().any(|id| id == "l3-a"),
+        "{OWED} L2-B tasks pane must not list l3-a: {pane_ids_b:?}"
+    );
+    let mut dock_ids_b: Vec<String> = l1_b
+        .dock_subagent_rows()
+        .into_iter()
+        .map(|(child, _, _)| child)
+        .collect();
+    dock_ids_b.sort();
+    assert_eq!(
+        dock_ids_b,
+        vec!["l2-a".to_string(), "l2-b".to_string()],
+        "{OWED} after the L2-B overlay, L1 dock must still list l2-a and l2-b only: {dock_ids_b:?}"
+    );
+}
+
+/// Over-copied L2 child map must not paint overlay wait chrome as `2 subagents`.
+#[test]
+fn overlay_wait_chrome_does_not_say_2_subagents_after_over_copy() {
+    const OWED: &str =
+        "Over-copied L2 child map must not paint overlay wait chrome as 2 subagents.";
+    let mut l1 = two_l2_two_l3_visibility_fixture();
+    over_copy_both_l3s_onto(&mut l1, "l2-a");
+    let child_named: Vec<String> = l1
+        .subagent_view("l2-a")
+        .expect("l2-a")
+        .running_live_specialists()
+        .map(|info| info.description.to_string())
+        .collect();
+    assert_eq!(
+        child_named,
+        vec!["Prove A".to_string()],
+        "{OWED} L2-A running_live_specialists after over-copy must be Prove A only: {child_named:?}"
+    );
+    l1.open_subagent_fullscreen("l2-a".to_owned());
+    let painted = draw_overlay(&mut l1);
+    assert!(
+        !painted.contains("2 subagents"),
+        "{OWED} overlay wait chrome still says 2 subagents:\n{painted}"
+    );
+    assert!(
+        painted.contains("Prove A") || painted.contains(L3_A_TRANSCRIPT),
+        "{OWED} L2-A overlay must still name Prove A:\n{painted}"
+    );
+    assert!(
+        !painted.contains("Prove B") && !painted.contains(L3_B_TRANSCRIPT),
+        "{OWED} L2-A overlay must not show Prove B:\n{painted}"
+    );
+}

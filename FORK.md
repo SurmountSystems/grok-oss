@@ -12,6 +12,14 @@ accept external pull requests**. This repo accepts community PRs. If upstream
 ever opens to outside contributions, Surmount intends to **open a PR** and try
 to land the useful fork work there.
 
+**Open source publication gap (pinned 2026-10-24).** It has been a while since
+the last open source publication of Grok Build (upstream
+[xai-org/grok-build](https://github.com/xai-org/grok-build)). This fork keeps
+shipping. Evaluate a newer upstream export when one appears
+(`just upstream-detect` / `grok-nix-helper detect-upstream-export`). Do not
+invent a last publication date. Pointer:
+[`docs/upstream-import-log.md`](docs/upstream-import-log.md).
+
 ## Vision
 
 | Pillar | Practice |
@@ -137,10 +145,11 @@ identifier that has no matching `fn`.
 ### Product
 
 - [x] **UDAX JSON→TOON (T0-T6)**: model-facing structured JSON densifies via
-  shared `util/toon` (`GROK_TOOL_RESULT_FORMAT=auto|toon|json`). Not a land
-  class. Catalog residual-aligned filters: `toon`, `json_to_toon`,
-  `densify_mcp`, `densify_structured`, `task_output_handoff`,
-  `subagent_completed_handoff`. Detail:
+  shared `util/toon` (`GROK_TOOL_RESULT_FORMAT=toon|json|auto`; unset default
+  is **toon**; `auto` stays an explicit token). Not a land class. Catalog
+  residual-aligned filters: `toon`, `json_to_toon`, `densify_mcp`,
+  `densify_structured`, `task_output_handoff`, `subagent_completed_handoff`.
+  Detail:
   [`doc/dev/research/udax-json-toon-2026-07-26.md`](doc/dev/research/udax-json-toon-2026-07-26.md)
 - [x] **ULID helper**: `xai_grok_tools::util::ulid` mints 26-char Crockford
   base32 ids for new work/log/tool artifacts; task UUID v7 unchanged. No land
@@ -2672,7 +2681,7 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count` requires empty Enter on the L2 floor to open the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count. It does not list specialist names in place of that count. `q` or Esc from that L3 returns to the L2 and does not cancel the L2.
 - `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan` requires Enter with text in the L1 Operator box, while a turn is running, to soft-interject into that turn on the L1 session. Empty Enter must not approve a plan.
 
-**Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. GitHub issue 203.
+**Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is a paid product. Never tell the Operator to /login. Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. GitHub issue 203.
 
 - Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
 - Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
@@ -2696,8 +2705,9 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
 - After auth recovery claims success, a nested turn resumes with the live sampler JWT the parent is talking with. It does not give up after 3 retries while that JWT is available. Named tests: `nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt`, `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token`. Nested POST stamps `InheritedSessionBearerResolver`, not `SamplingConfig.api_key`. A recovered AuthManager token must not win on that wire. The inherited parent JWT wins over `current_wire_valid` in `nested_request_bearer`.
 - Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the parent session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. A parent JWT that actually expired still paints that sentence once.
+- Waiting parent 401 after login retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_the_turn_resumes`, `login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_login_retries_with_live_login_jwt`, `credentials_toast_parent_401_without_no_auth_context_after_login_retries_with_live_login_jwt`.
 
-**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Never tell the Operator to /login. Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
+**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth`, `already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`, `authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
 
 **Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
 

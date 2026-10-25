@@ -37,7 +37,9 @@ use std::time::Instant;
 /// Prompt box height. Focus does not change it. The box grows with the
 /// prompt and stops at the window height.
 /// Model wait and retry chrome for leftover rows under the last prompt.
-/// Thinking and a nested subagent wait stay off this row.
+/// Thinking and a nested subagent wait stay off this row. A finished
+/// assistant reply with no in-flight sample must not reach here as
+/// `Waiting(Model)` (GitHub #247).
 pub(super) fn leftover_viewport_wait_label(
     activity: &Option<crate::acp::tracker::TurnActivity>,
 ) -> Option<String> {
@@ -2413,7 +2415,9 @@ impl AgentView {
             sticky_gap_row = sb_output.sticky_gap_row;
             if !self.global_work_paused && !in_dashboard_overlay {
                 let activity = self.resolve_turn_activity();
-                if let Some(label) = leftover_viewport_wait_label(&activity) {
+                if let Some(label) = leftover_viewport_wait_label(&activity)
+                    && !self.painted_assistant_reply_without_in_flight_sample()
+                {
                     let pad = HorizontalLayout::ACCENT.saturating_add(2);
                     let wait_area = Rect {
                         x: layout.scrollback_content.x.saturating_add(pad),
@@ -10414,6 +10418,105 @@ mod header_tasks_match_live_subagents_list {
     }
 }
 
+/// L1 does not leak L3 context into L1 transcript or L1 context scoping.
+#[cfg(test)]
+mod l1_does_not_leak_l3_context_draw_tests {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::actions::ActionRegistry;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::render::ScratchBuffer;
+    use agent_client_protocol as acp;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::sync::Arc;
+    use xai_grok_shell::session::ContextInfo;
+
+    const L3_A_TRANSCRIPT: &str = "L3_A_TRANSCRIPT";
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 220, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn l1_does_not_leak_l3_context_into_l1_transcript_or_context_scoping() {
+        const OWED: &str = "L1 does not leak L3 context into L1 transcript/context scoping.";
+        let mut l1 = make_agent();
+        l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+        l1.session.models.override_context_window(500_000);
+        l1.session_sampling_window = Some(500_000);
+        l1.context_state = Some(ContextInfo::from_notification(152_000, 500_000));
+
+        let mut l2_info = running_subagent_info("l2-a");
+        l2_info.description = Arc::from("Coordinate A");
+        l2_info.attempt.depth = Some(1);
+        l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+        l1.subagent_sessions.insert("l2-a".into(), l2_info);
+        l1.insert_subagent_view(
+            "l2-a".into(),
+            Box::new(make_agent()),
+            crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+        );
+
+        let mut l3 = make_agent();
+        l3.session.session_id = Some(acp::SessionId::new("l3-a"));
+        l3.scrollback
+            .push_block(RenderBlock::user_prompt(L3_A_TRANSCRIPT));
+        l3.context_state = Some(ContextInfo::from_notification(80_000, 200_000));
+        let mut l3_info = running_subagent_info("l3-a");
+        l3_info.description = Arc::from("Prove A");
+        l3_info.attempt.depth = Some(2);
+        l3_info.attempt.parent_session_id = Some(Arc::from("l2-a"));
+        l3_info.attempt.tokens_used = Some(80_000);
+        l3_info.attempt.context_window_tokens = Some(200_000);
+        l1.subagent_sessions.insert("l3-a".into(), l3_info);
+        l1.insert_test_child("l3-a".into(), Box::new(l3));
+
+        assert_eq!(
+            l1.context_state.as_ref().map(|ctx| ctx.used),
+            Some(152_000),
+            "{OWED} L1 context_state.used must stay the L1 figure."
+        );
+        let text = draw(&mut l1);
+        let has_l1_chip = text.contains("152K / 500K") || text.contains("152K/500K");
+        assert!(
+            has_l1_chip,
+            "{OWED} L1 draw must paint 152K / 500K or 152K/500K, got:\n{text}"
+        );
+        assert!(
+            !text.contains("80K") && !text.contains("200K /") && !text.contains("0K / 0K"),
+            "{OWED} L1 chip must not be an L3 window and must not paint 0:\n{text}"
+        );
+        assert!(
+            !text.contains(L3_A_TRANSCRIPT),
+            "{OWED} L1 floor must not paint L3_A_TRANSCRIPT:\n{text}"
+        );
+    }
+}
+
 /// Forked-session upper-left header chrome. The 11:10 screenshot painted
 /// only git branch plus cwd on the status row. That must not pass: a fork
 /// family needs the conversation switcher and the dashboard control on
@@ -11734,6 +11837,58 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !leftover.contains(PLAN_REWRITE_WAIT_HEADING),
             "paint-precedence leftover Revising must not keep rewriting-wait heading:\n{leftover}"
+        );
+    }
+
+    /// Revising chrome is on during an in-flight Revise rewrite and is gone
+    /// after `exit_plan_mode` present. A first present does not keep Revising
+    /// for minutes. Idle Approve / Comment / Revise / Exit replace it.
+    #[test]
+    fn revising_chrome_is_on_during_in_flight_revise_rewrite_and_gone_after_exit_plan_mode_present()
+    {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_feedback_in_flight = None;
+        agent.plan_approval_view = None;
+        agent.session.state = AgentState::TurnRunning;
+        let first_write = draw_screen(&mut agent);
+        assert!(
+            !first_write.contains(PLAN_REVISING_STATUS),
+            "first plan.md write is not a Revise rewrite; Revising chrome must stay off:\n{first_write}"
+        );
+
+        park_exit_plan_mode(&mut agent, "# Rewrite me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+        let _ = agent.send_plan_feedback(None);
+        agent.session.state = AgentState::Idle;
+        let rewriting = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight == Some(PlanFeedbackInFlight::Revising),
+            "Revise must mark an in-flight rewrite"
+        );
+        assert!(
+            rewriting.contains(PLAN_REVISING_STATUS),
+            "Revising chrome is on during an in-flight Revise rewrite:\n{rewriting}"
+        );
+
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+        let presented = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "exit_plan_mode present must clear Revising"
+        );
+        assert!(
+            !presented.contains(PLAN_REVISING_STATUS),
+            "Revising chrome is gone after exit_plan_mode present:\n{presented}"
+        );
+        assert!(
+            presented.contains("Plan ready. Side panel open"),
+            "present replaces Revising with the plan panel:\n{presented}"
+        );
+        assert!(
+            presented.contains("approve | comment | revise | exit"),
+            "idle Approve / Comment / Revise / Exit replace Revising after present:\n{presented}"
         );
     }
 }

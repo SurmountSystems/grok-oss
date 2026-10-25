@@ -1389,10 +1389,12 @@ pub(crate) fn overlay_child_is_l2_coordinator(
     is_l2_list_row(info, &child_ids)
 }
 
-/// How many live L3 specialists an L2 is using.
+/// Live L3 rows whose parent is this L2.
 ///
-/// Counts running, non-workflow rows whose parent session is this L2.
-pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+/// Running, non-workflow specialists spawned by `l2_child_session_id`.
+/// Overlay mirror, overlay wait count, and the L2 tasks list use this so
+/// L2-A never lists L2-B's specialists.
+pub(crate) fn l3_rows_for_l2<'a, I>(infos: I, l2_child_session_id: &str) -> Vec<&'a SubagentInfo>
 where
     I: IntoIterator<Item = &'a SubagentInfo>,
 {
@@ -1403,7 +1405,17 @@ where
                 && info.attempt.workflow_run_id.is_none()
                 && info.attempt.parent_session_id.as_deref() == Some(l2_child_session_id)
         })
-        .count()
+        .collect()
+}
+
+/// How many live L3 specialists an L2 is using.
+///
+/// Counts running, non-workflow rows whose parent session is this L2.
+pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    l3_rows_for_l2(infos, l2_child_session_id).len()
 }
 
 /// L2 row suffix: how many L3 specialists that coordinator is using.

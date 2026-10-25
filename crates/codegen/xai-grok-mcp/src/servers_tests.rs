@@ -4774,6 +4774,32 @@ async fn anonymous_access_probe_sends_default_user_agent() {
     );
 }
 
+/// JSON-RPC wire: anonymous MCP HTTP probe must keep Content-Type application/json.
+#[test]
+fn mcp_http_probe_content_type_stays_application_json() {
+    let src = include_str!("servers.rs");
+    let probe = src
+        .split("async fn probe_anonymous_access")
+        .nth(1)
+        .expect("probe_anonymous_access must exist");
+    let probe = probe
+        .split("match request.send()")
+        .next()
+        .expect("probe must send the request");
+    assert!(
+        probe.contains("HeaderValue::from_static(\"application/json\")"),
+        "MCP HTTP probe Content-Type must stay application/json (JSON-RPC wire)"
+    );
+    assert!(
+        probe.contains("HeaderValue::from_static(\"application/json, text/event-stream\")"),
+        "MCP HTTP probe Accept must stay application/json, text/event-stream"
+    );
+    assert!(
+        !probe.to_ascii_lowercase().contains("toon"),
+        "MCP HTTP probe must not send TOON"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_access_probe_preserves_configured_user_agent() {
     let (url, handles) = spawn_fake_streamable_http(axum::http::StatusCode::OK).await;

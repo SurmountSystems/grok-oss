@@ -5,7 +5,7 @@
 //! - Spec pin: [Token-Oriented Object Notation](https://github.com/toon-format/toon)
 //!   (working draft SPEC; Rust port `toon-format` 0.5.x, default-features off).
 //! - Runtime path never shells out to node/python CLI.
-//! - Policy env: [`ENV_TOOL_RESULT_FORMAT`] = `toon` | `json` | `auto` (default **auto**).
+//! - Policy env: [`ENV_TOOL_RESULT_FORMAT`] = `toon` | `json` | `auto` (default **toon**).
 //!
 //! Integration: structured [`serde_json::Value`] results (e.g. `ToolOutput::Dynamic`)
 //! go through [`maybe_encode_for_llm`] when rendered to model prompt text.
@@ -17,19 +17,22 @@ use serde_json::Value;
 
 /// Env: model-facing structured tool result format.
 ///
-/// - `toon` — always TOON (fallback to compact JSON on encode error)
-/// - `json` — always compact JSON
-/// - `auto` (default when unset/empty/unknown) — TOON when tabular-eligible
-///   or TOON is shorter than compact JSON; else compact JSON
+/// - `toon` (default when unset): always TOON (fallback to compact JSON on encode error)
+/// - `json`: always compact JSON
+/// - `auto` (explicit token; empty/unknown parse): TOON when tabular-eligible;
+///   else compact JSON. A nontabular nested object stays JSON under Auto even
+///   when TOON happens to be shorter; default Toon still encodes that shape.
 pub const ENV_TOOL_RESULT_FORMAT: &str = "GROK_TOOL_RESULT_FORMAT";
 
 /// Policy for [`maybe_encode_for_llm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolResultFormat {
-    /// Prefer TOON when tabular-eligible or byte-smaller than compact JSON.
-    #[default]
+    /// Prefer TOON when tabular-eligible; else compact JSON.
+    /// Explicit policy token; empty/unknown parse still lands here.
     Auto,
     /// Always emit TOON (compact JSON only if encode fails).
+    /// Default when [`ENV_TOOL_RESULT_FORMAT`] is unset.
+    #[default]
     Toon,
     /// Always emit compact JSON.
     Json,
@@ -42,17 +45,17 @@ impl ToolResultFormat {
             "toon" => Self::Toon,
             "json" => Self::Json,
             "auto" | "" => Self::Auto,
-            // Unknown values: safe default (auto), same as unset.
+            // Unknown values: explicit Auto token. Unset env is Toon, not this arm.
             _ => Self::Auto,
         }
     }
 }
 
-/// Resolve policy from [`ENV_TOOL_RESULT_FORMAT`]. Unset → [`ToolResultFormat::Auto`].
+/// Resolve policy from [`ENV_TOOL_RESULT_FORMAT`]. Unset → [`ToolResultFormat::Toon`].
 pub fn tool_result_format_from_env() -> ToolResultFormat {
     match std::env::var(ENV_TOOL_RESULT_FORMAT) {
         Ok(v) => ToolResultFormat::parse(&v),
-        Err(_) => ToolResultFormat::Auto,
+        Err(_) => ToolResultFormat::Toon,
     }
 }
 
@@ -75,7 +78,7 @@ pub fn compact_json(value: &Value) -> String {
 /// arrays (tabular form) or non-empty primitive arrays.
 ///
 /// Shallow scan: the value itself, or any immediate object-field array.
-/// Deep nested-only tables still may win on byte length under `auto`.
+/// Nested objects without a friendly array stay JSON under `auto`.
 pub fn is_tabular_eligible(value: &Value) -> bool {
     match value {
         Value::Array(items) => array_is_toon_friendly(items),
@@ -132,10 +135,16 @@ pub fn maybe_encode_for_llm(value: &Value, policy: ToolResultFormat) -> String {
             Ok(toon) => toon,
             Err(_) => json,
         },
-        ToolResultFormat::Auto => match encode(value) {
-            Ok(toon) if is_tabular_eligible(value) || toon.len() < json.len() => toon,
-            Ok(_) | Err(_) => json,
-        },
+        ToolResultFormat::Auto => {
+            if is_tabular_eligible(value) {
+                match encode(value) {
+                    Ok(toon) => toon,
+                    Err(_) => json,
+                }
+            } else {
+                json
+            }
+        }
     }
 }
 
@@ -386,6 +395,33 @@ mod tests {
         assert!(!out.starts_with('{'), "got: {out}");
     }
 
+    /// Unset env / default policy must encode a nontabular object as TOON keys.
+    /// Explicit Auto still emits compact JSON for this shape (length heuristic).
+    #[test]
+    fn maybe_encode_default_policy_is_toon() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]);
+        let v = json!({"a": {"b": {"c": 1}}});
+        assert!(
+            !is_tabular_eligible(&v),
+            "fixture must stay nontabular so Auto does not densify on eligibility"
+        );
+        let auto = maybe_encode_for_llm(&v, ToolResultFormat::Auto);
+        assert!(
+            auto.trim_start().starts_with('{'),
+            "explicit Auto must stay compact JSON for this nontabular shape, got: {auto}"
+        );
+        let out = maybe_encode_for_llm_from_env(&v);
+        assert!(
+            out.contains("a:") || out.contains("c:"),
+            "default policy must emit TOON keys, got: {out}"
+        );
+        assert!(
+            !out.trim_start().starts_with('{'),
+            "default policy must not be compact JSON, got: {out}"
+        );
+    }
+
     #[test]
     fn policy_parse_tokens() {
         assert_eq!(ToolResultFormat::parse("toon"), ToolResultFormat::Toon);
@@ -402,10 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn env_policy_default_auto() {
+    fn env_policy_default_toon() {
         let _lock = lock_env();
         let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]);
-        assert_eq!(tool_result_format_from_env(), ToolResultFormat::Auto);
+        assert_eq!(tool_result_format_from_env(), ToolResultFormat::Toon);
     }
 
     #[test]
@@ -455,7 +491,7 @@ mod tests {
     #[test]
     fn densify_structured_tabular_auto_emits_toon() {
         let _lock = lock_env();
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // default Toon
 
         let v = json!({
             "hits": [

@@ -1,17 +1,23 @@
 //! `$PATH`-aware helper for steering messages that suggest shell tools.
 //!
-//! Hints that recommend concrete binaries (`jq`, `sed`, `cut`, …) must only
-//! name tools that actually exist on the tool server, with no "if available"
-//! hedge. Consumers call [`QueryTools::detect`] once and build an example
-//! clause via [`examples_clause`]; when nothing relevant is installed the
-//! clause is empty so the surrounding hint reads cleanly.
+//! In-process JSON Pointer is the first-class `json_query` tool (TOON out).
+//! Do not train the model to invent `jq` or `python3 -c json.load` for JSON
+//! the agent already holds. Dump-file recovery steers (MCP truncate, web_fetch
+//! overflow) still list PATH `jq` when that binary exists, because those
+//! consumers query a saved file rather than an in-memory value.
+//!
+//! Hints that recommend concrete binaries (`sed`, `cut`, and PATH `jq` for
+//! saved dumps) must only name tools that actually exist on the tool server,
+//! with no "if available" hedge. Consumers call [`QueryTools::detect`] once
+//! and build an example clause via [`examples_clause`]; when nothing relevant
+//! is installed the clause is empty so the surrounding hint reads cleanly.
 //!
 //! **No `python3`.** Recovery/dump/edit steers must not train the model to
 //! shell Python for maintainer workflows — prefer native tools
-//! (`read_file` / `grep` / `search_replace`) and only name lightweight
-//! shell utilities when line-oriented tools cannot help (long single-line
-//! JSON/text). User-project Python is unrelated and stays allowed in shell
-//! policy.
+//! (`read_file` / `grep` / `search_replace` / `json_query`) and only name
+//! lightweight shell utilities when line-oriented tools cannot help (long
+//! single-line JSON/text). User-project Python is unrelated and stays allowed
+//! in shell policy.
 //!
 //! Shared by the `use_tool` MCP-dump steer, web_fetch overflow, and related
 //! recovery hints.
@@ -20,7 +26,7 @@
 /// detected; see [`xai_grok_config::shell::is_command_available`].
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct QueryTools {
-    /// `jq`, if present.
+    /// PATH `jq`, if present. Dump-file steers only. In-memory JSON uses `json_query`.
     pub(crate) jq: Option<&'static str>,
     /// `sed`, if present.
     pub(crate) sed: Option<&'static str>,
@@ -44,7 +50,12 @@ impl QueryTools {
         })
     }
 
-    /// Backtick-wrapped tools for querying structured JSON, preference order.
+    /// Backtick-wrapped PATH tools for querying a **saved dump file**.
+    ///
+    /// In-process JSON Pointer is `json_query`, not this list. This list stays
+    /// PATH `jq` so MCP dump-file steers keep naming a binary that can open the
+    /// saved file. Do not treat this as a license to shell `jq` over a value
+    /// the agent already holds.
     pub(crate) fn json_tools(self) -> Vec<String> {
         Self::wrap([self.jq])
     }

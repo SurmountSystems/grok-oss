@@ -53,6 +53,11 @@ CREATE INDEX IF NOT EXISTS idx_serving_fingerprint_flip_model
   ON serving_fingerprint_flip(model_id, observed_at);
 "#;
 
+const _: () = assert!(
+    super::SCHEMA_VERSION >= 7,
+    "serving fingerprints are additive schema v7"
+);
+
 pub const SOURCE_COMPLETION: &str = "completion";
 pub const SOURCE_LANGUAGE_MODELS: &str = "language_models";
 
@@ -544,10 +549,6 @@ CREATE TABLE IF NOT EXISTS meta (
         stamp_v6_file(&path);
         let store = open_at(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(
-            SCHEMA_VERSION, 7,
-            "serving fingerprints are additive schema v7"
-        );
         for name in [
             "completion_system_fingerprint",
             "language_model_serving",

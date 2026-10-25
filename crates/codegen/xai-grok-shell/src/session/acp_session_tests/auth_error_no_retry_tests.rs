@@ -2242,6 +2242,16 @@ async fn nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_t
             );
             assert_ne!(
                 headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer spawn-time-jwt"),
+                "401 retry must not reconstruct POST Bearer spawn-time-jwt after login"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer recovered-am-token"),
+                "401 retry must not reconstruct POST Bearer recovered-am-token after login"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
                 None,
                 "Token-Auth xai-grok-cli alone is the live miss; Authorization must be the live login JWT"
             );
@@ -2367,6 +2377,16 @@ async fn login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_lo
                 headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
                 Some("Bearer live-login-jwt"),
                 "login still fails to resume: waiting parent POST Authorization must be the live login JWT. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer spawn-time-jwt"),
+                "waiting parent 401 retry must not reconstruct POST Bearer spawn-time-jwt after login"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer recovered-am-token"),
+                "waiting parent 401 retry must not reconstruct POST Bearer recovered-am-token after login"
             );
             assert_ne!(
                 headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
@@ -2500,6 +2520,16 @@ async fn credentials_toast_parent_401_without_no_auth_context_after_login_retrie
                 headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
                 Some("Bearer live-login-jwt"),
                 "waiting parent POST Authorization must be the live login JWT. Screenshot: {SCREENSHOT_TOAST}"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer spawn-time-jwt"),
+                "credentials-toast parent 401 retry must not reconstruct POST Bearer spawn-time-jwt after login"
+            );
+            assert_ne!(
+                headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer recovered-am-token"),
+                "credentials-toast parent 401 retry must not reconstruct POST Bearer recovered-am-token after login"
             );
             assert_eq!(
                 headers

@@ -472,6 +472,7 @@ impl AgentRebuildSpec {
                     use xai_grok_tools::implementations::grok_build::ask_user_question::UserQuestionSender;
                     resources.insert(UserQuestionSender(user_question_tx.clone()));
                 }
+                resources.insert(crate::token_economy::token_report_live_resource());
             })
             .await;
         Ok((agent, agent_build_elapsed))

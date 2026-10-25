@@ -799,6 +799,40 @@ pub(super) fn handle_session_notification_with_origin(
                     .and_then(|info| info.attempt.terminal_entry_id)
                     .filter(|eid| agent.scrollback.get_by_id(*eid).is_some())
             };
+            // Parent already in this registry is nested: that row's depth
+            // saturating-add 1 (missing parent depth counts as L2). Else this
+            // is an L1-spawned L2, unless the L2 overlay is open and the wire
+            // parent is this L1 session: that spawn is the L3 of the overlay
+            // L2. Parallel L2 coordinators keep depth 1 when the overlay is
+            // closed. Match apply_nested_subagent_update.
+            let overlay_l2 = agent.active_subagent.as_deref().filter(|sid| {
+                agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == parent_session_id.as_str())
+                    && crate::app::subagent::overlay_child_is_l2_coordinator(
+                        &agent.subagent_sessions,
+                        sid,
+                    )
+            });
+            let (depth, effective_parent) =
+                if let Some(parent) = agent.subagent_sessions.get(parent_session_id.as_str()) {
+                    (
+                        Some(parent.attempt.depth.unwrap_or(1).saturating_add(1)),
+                        parent_session_id.clone(),
+                    )
+                } else if let Some(l2_sid) = overlay_l2 {
+                    let nested = agent
+                        .subagent_sessions
+                        .get(l2_sid)
+                        .and_then(|parent| parent.attempt.depth)
+                        .unwrap_or(1)
+                        .saturating_add(1);
+                    (Some(nested), l2_sid.to_string())
+                } else {
+                    (Some(1), parent_session_id.clone())
+                };
             let attempt = crate::app::subagent::SubagentAttemptInfo {
                 lifecycle,
                 persona: persona.map(Arc::from),
@@ -810,8 +844,8 @@ pub(super) fn handle_session_notification_with_origin(
                 workflow_run_id: workflow_run_id.clone().map(Arc::from),
                 context_normalized,
                 parent_prompt_id: parent_prompt_id.map(Arc::from),
-                parent_session_id: Some(Arc::from(parent_session_id.as_str())),
-                depth: None,
+                parent_session_id: Some(Arc::from(effective_parent.as_str())),
+                depth,
                 tokens_past: if is_new_attempt {
                     0
                 } else {
@@ -962,8 +996,9 @@ pub(super) fn handle_session_notification_with_origin(
                 child_view.set_restricted_commands(&restricted);
                 let spawner_is_nested = agent
                     .subagent_sessions
-                    .contains_key(parent_session_id.as_str());
-                let parent_sid = acp::SessionId::new(parent_session_id.clone());
+                    .contains_key(effective_parent.as_str())
+                    || depth.is_some_and(|d| d >= 2);
+                let parent_sid = acp::SessionId::new(effective_parent.clone());
                 // Wire parent session is always the link. Addressability needs
                 // `agentAddress` on that spawn; workflow and nested spawners
                 // stay unaddressable even when an address is present.
@@ -975,9 +1010,13 @@ pub(super) fn handle_session_notification_with_origin(
                     };
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
             }
-            let is_l3 = agent
-                .subagent_sessions
-                .contains_key(parent_session_id.as_str());
+            // Nested parent in the registry, or this row is already depth 2+,
+            // is an L3 even when the wire parent string is L1. Do not push an
+            // L3 Subagent block onto L1 scrollback.
+            let is_l3 = depth.is_some_and(|d| d >= 2)
+                || agent
+                    .subagent_sessions
+                    .contains_key(effective_parent.as_str());
             if is_l3 {
                 // L3 specialists stay in the registry for the L2 count. They
                 // do not get an L1 scrollback lifecycle row.
@@ -2921,7 +2960,6 @@ mod live_l3_depth_tests {
 
     /// A live SubagentSpawned for an L3 writes depth 2.
     /// The notification is addressed to the L2 session, which is the live path that registers the L3 on the L1 registry.
-    /// That path leaves `SubagentAttemptInfo.depth` as `None`.
     #[test]
     fn live_spawn_marks_l3_depth_so_the_overlay_stays_unaddressable() {
         const OWED: &str = "A live SubagentSpawned for an L3 writes depth 2.";
@@ -2959,6 +2997,223 @@ mod live_l3_depth_tests {
                 "l3-spec",
             ),
             "{OWED} Depth 2 keeps the L3 overlay unaddressable."
+        );
+    }
+
+    const L3_A_TRANSCRIPT: &str = "L3_A_TRANSCRIPT";
+
+    fn spawned(
+        parent: &str,
+        child: &str,
+        description: &str,
+    ) -> xai_grok_shell::extensions::notification::SessionUpdate {
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        let mut update = test_subagent_spawned(parent, child);
+        match &mut update {
+            XaiSessionUpdate::SubagentSpawned { description: d, .. } => {
+                *d = description.to_string();
+            }
+            _ => unreachable!("test_subagent_spawned is SubagentSpawned"),
+        }
+        update
+    }
+
+    fn l1_scrollback_has_subagent_child(
+        l1: &crate::app::agent_view::AgentView,
+        child: &str,
+    ) -> bool {
+        (0..l1.scrollback.len()).any(|i| {
+            l1.scrollback
+                .get(i)
+                .is_some_and(|entry| entry.block.child_session_id() == Some(child))
+        })
+    }
+
+    fn l1_scrollback_contains(l1: &crate::app::agent_view::AgentView, needle: &str) -> bool {
+        use crate::scrollback::block::RenderBlock;
+        (0..l1.scrollback.len()).any(|i| {
+            let Some(entry) = l1.scrollback.get(i) else {
+                return false;
+            };
+            match &entry.block {
+                RenderBlock::UserPrompt(block) => block.text.contains(needle),
+                RenderBlock::Subagent(block) => {
+                    block.description.contains(needle) || block.child_session_id.contains(needle)
+                }
+                other => format!("{other:?}").contains(needle),
+            }
+        })
+    }
+
+    fn seed_l1_context(app: &mut crate::app::app_view::AppView) {
+        let l1 = app.agents.get_mut(&AgentId(0)).expect("L1 session");
+        l1.session.models.override_context_window(500_000);
+        l1.session_sampling_window = Some(500_000);
+        l1.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+            152_000, 500_000,
+        ));
+    }
+
+    /// L1 does not leak L3 context into L1 transcript or L1 context scoping.
+    #[test]
+    fn l1_does_not_leak_l3_context_into_l1_transcript_or_context_scoping() {
+        const OWED: &str = "L1 does not leak L3 context into L1 transcript/context scoping.";
+        let mut app = make_app_with_agent("l1-session");
+        seed_l1_context(&mut app);
+        assert!(handle(
+            make_ext_session_notification(
+                "l1-session",
+                spawned("l1-session", "l2-a", "Coordinate A"),
+            ),
+            &mut app,
+        ));
+        {
+            let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+            assert!(
+                l1.subagent_view("l2-a").is_some(),
+                "{OWED} L2-A must exist before the L3 spawn is delivered to that session."
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("l2-a", spawned("l2-a", "l3-a", "Prove A")),
+            &mut app,
+        );
+        {
+            let l1 = app.agents.get_mut(&AgentId(0)).expect("L1 session");
+            if let Some(l3) = l1.subagent_views.get_mut("l3-a") {
+                l3.scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                        L3_A_TRANSCRIPT,
+                    ));
+            }
+            assert!(
+                !l1_scrollback_has_subagent_child(l1, "l3-a"),
+                "{OWED} L1 scrollback has a Subagent block for l3-a."
+            );
+            assert!(
+                !l1_scrollback_contains(l1, L3_A_TRANSCRIPT),
+                "{OWED} L1 scrollback contains L3_A_TRANSCRIPT."
+            );
+            assert_eq!(
+                l1.context_state.as_ref().map(|ctx| ctx.used),
+                Some(152_000),
+                "{OWED} L1 context_state.used must stay the L1 figure."
+            );
+            assert_eq!(
+                l1.context_state.as_ref().map(|ctx| ctx.total),
+                Some(500_000),
+                "{OWED} L1 context_state.total must stay the L1 figure."
+            );
+        }
+
+        let mut addressed_to_l1 = make_app_with_agent("l1-session");
+        seed_l1_context(&mut addressed_to_l1);
+        assert!(handle(
+            make_ext_session_notification(
+                "l1-session",
+                spawned("l1-session", "l2-a", "Coordinate A"),
+            ),
+            &mut addressed_to_l1,
+        ));
+        let _ = handle(
+            make_ext_session_notification("l1-session", spawned("l2-a", "l3-a", "Prove A")),
+            &mut addressed_to_l1,
+        );
+        let l1 = addressed_to_l1.agents.get(&AgentId(0)).expect("L1 session");
+        assert!(
+            !l1_scrollback_has_subagent_child(l1, "l3-a"),
+            "{OWED} L1-addressed L3 spawn still must not push an L1 Subagent block for l3-a."
+        );
+        assert!(
+            !l1_scrollback_contains(l1, L3_A_TRANSCRIPT),
+            "{OWED} L1-addressed L3 spawn must not put L3_A_TRANSCRIPT on L1 scrollback."
+        );
+        assert_eq!(
+            l1.context_state.as_ref().map(|ctx| ctx.used),
+            Some(152_000),
+            "{OWED} L1 context_state.used must stay the L1 figure after the L1-addressed spawn."
+        );
+        assert_eq!(
+            l1.context_state.as_ref().map(|ctx| ctx.total),
+            Some(500_000),
+            "{OWED} L1 context_state.total must stay the L1 figure after the L1-addressed spawn."
+        );
+        let attempt = &l1
+            .subagent_sessions
+            .get("l3-a")
+            .expect("the L1-addressed L3 spawn must register a row on the L1 session")
+            .attempt;
+        assert_eq!(
+            attempt.depth,
+            Some(2),
+            "{OWED} L1-addressed spawn with wire parent l2-a left depth {:?}.",
+            attempt.depth
+        );
+    }
+
+    /// L1-addressed spawn whose wire parent is the L1 session id must still
+    /// write L3 depth 2 when that spawn lands while the L2 overlay is open.
+    /// Parallel L2 coordinators keep depth 1 when the overlay is closed.
+    #[test]
+    fn l1_addressed_spawn_with_wire_parent_equal_to_l1_session_id_writes_l3_depth() {
+        const OWED: &str = "L1-addressed spawn with wire parent equal to the L1 session id writes L3 depth 2 and does not push an L1 Subagent block.";
+        let mut app = make_app_with_agent("l1-session");
+        seed_l1_context(&mut app);
+        assert!(handle(
+            make_ext_session_notification(
+                "l1-session",
+                spawned("l1-session", "l2-a", "Coordinate A"),
+            ),
+            &mut app,
+        ));
+        {
+            let l1 = app.agents.get_mut(&AgentId(0)).expect("L1 session");
+            let l2 = l1
+                .subagent_sessions
+                .get("l2-a")
+                .expect("L2-A must exist before the L1-parented L3 spawn");
+            assert_eq!(
+                l2.attempt.depth,
+                Some(1),
+                "{OWED} L2-A spawn with parent l1-session must stay depth 1, got {:?}.",
+                l2.attempt.depth
+            );
+            assert!(
+                l1_scrollback_has_subagent_child(l1, "l2-a"),
+                "{OWED} L2-A must still get an L1 Subagent block."
+            );
+            l1.open_subagent_fullscreen("l2-a".to_owned());
+            assert_eq!(
+                l1.active_subagent.as_deref(),
+                Some("l2-a"),
+                "{OWED} L2 overlay must be open so the L1-parented spawn is the L3 of that L2."
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("l1-session", spawned("l1-session", "l3-a", "Prove A")),
+            &mut app,
+        );
+        let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+        assert!(
+            !l1_scrollback_has_subagent_child(l1, "l3-a"),
+            "{OWED} L1-addressed L3 spawn with wire parent l1-session still pushed an L1 Subagent block for l3-a."
+        );
+        let attempt = &l1
+            .subagent_sessions
+            .get("l3-a")
+            .expect("the L1-addressed L3 spawn must register a row on the L1 session")
+            .attempt;
+        assert_eq!(
+            attempt.depth,
+            Some(2),
+            "{OWED} L1-addressed spawn with wire parent l1-session left depth {:?}.",
+            attempt.depth
+        );
+        assert_eq!(
+            attempt.parent_session_id.as_deref(),
+            Some("l2-a"),
+            "{OWED} L3 parent must be the open L2, got {:?}.",
+            attempt.parent_session_id
         );
     }
 }

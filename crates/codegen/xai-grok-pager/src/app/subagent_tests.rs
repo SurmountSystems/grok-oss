@@ -626,6 +626,59 @@ fn child_view_for_live_update_hydrates_a_resumed_child_before_returning_it() {
     );
     set_replay_grok_home_for_tests(None);
 }
+
+#[test]
+fn live_subagent_list_shows_only_l2_and_reports_live_l3_count() {
+    const OWED: &str = "live_subagent_list returns L2-A and L2-B only. live_l3_count for l2-a is 1. format_live_l3_count(1) is 1 specialist. Do not list L3 names.";
+    let mut l2_a = make_info();
+    l2_a.subagent_id = Arc::from("sa-l2-a");
+    l2_a.child_session_id = Arc::from("l2-a");
+    l2_a.description = Arc::from("Coordinate A");
+    l2_a.attempt.depth = Some(1);
+    l2_a.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    let mut l2_b = make_info();
+    l2_b.subagent_id = Arc::from("sa-l2-b");
+    l2_b.child_session_id = Arc::from("l2-b");
+    l2_b.description = Arc::from("Coordinate B");
+    l2_b.attempt.depth = Some(1);
+    l2_b.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    let mut l3_a = make_info();
+    l3_a.subagent_id = Arc::from("sa-l3-a");
+    l3_a.child_session_id = Arc::from("l3-a");
+    l3_a.description = Arc::from("Prove A");
+    l3_a.attempt.depth = Some(2);
+    l3_a.attempt.parent_session_id = Some(Arc::from("l2-a"));
+    let mut l3_b = make_info();
+    l3_b.subagent_id = Arc::from("sa-l3-b");
+    l3_b.child_session_id = Arc::from("l3-b");
+    l3_b.description = Arc::from("Prove B");
+    l3_b.attempt.depth = Some(2);
+    l3_b.attempt.parent_session_id = Some(Arc::from("l2-b"));
+    let infos = [&l2_a, &l2_b, &l3_a, &l3_b];
+    let live_ids: Vec<&str> = live_subagent_list(infos)
+        .into_iter()
+        .map(|info| info.child_session_id.as_ref())
+        .collect();
+    assert_eq!(
+        live_ids,
+        vec!["l2-a", "l2-b"],
+        "{OWED} live list: {live_ids:?}"
+    );
+    assert!(
+        live_subagent_list(infos)
+            .iter()
+            .all(|info| info.description.as_ref() != "Prove A"
+                && info.description.as_ref() != "Prove B"),
+        "{OWED} live list still names an L3"
+    );
+    assert_eq!(live_l3_count(infos, "l2-a"), 1, "{OWED}");
+    assert_eq!(
+        format_live_l3_count(1).as_deref(),
+        Some("1 specialist"),
+        "{OWED}"
+    );
+}
+
 #[test]
 fn accepted_attempt_invalidates_prior_disk_proof() {
     for transcript in [

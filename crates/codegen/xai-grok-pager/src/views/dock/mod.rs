@@ -62,6 +62,7 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Release);
 }
 
+#[derive(Debug)]
 pub struct DockRow {
     pub kind: String,
     pub description: String,

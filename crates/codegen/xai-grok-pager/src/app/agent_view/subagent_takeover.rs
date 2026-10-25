@@ -131,16 +131,17 @@ impl AgentView {
         let target = from_row
             .filter(|sid| sid != &l2_sid && self.subagent_views.contains_key(sid))
             .or_else(|| {
-                let mut running: Vec<String> = self
-                    .subagent_sessions
-                    .iter()
-                    .filter(|(id, info)| {
-                        info.is_running()
-                            && info.attempt.parent_session_id.as_deref() == Some(l2_sid.as_str())
-                            && self.subagent_views.contains_key(id.as_str())
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
+                let mut running: Vec<String> = crate::app::subagent::l3_rows_for_l2(
+                    self.subagent_sessions.values(),
+                    l2_sid.as_str(),
+                )
+                .into_iter()
+                .filter(|info| {
+                    self.subagent_views
+                        .contains_key(info.child_session_id.as_ref())
+                })
+                .map(|info| info.child_session_id.to_string())
+                .collect();
                 if running.len() == 1 {
                     running.pop()
                 } else {
@@ -161,17 +162,15 @@ impl AgentView {
         if !self.subagent_views.contains_key(l2_sid) {
             return false;
         }
-        let mut running: Vec<String> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(id, info)| {
-                info.is_running()
-                    && info.attempt.workflow_run_id.is_none()
-                    && info.attempt.parent_session_id.as_deref() == Some(l2_sid)
-                    && self.subagent_views.contains_key(id.as_str())
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
+        let mut running: Vec<String> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), l2_sid)
+                .into_iter()
+                .filter(|info| {
+                    self.subagent_views
+                        .contains_key(info.child_session_id.as_ref())
+                })
+                .map(|info| info.child_session_id.to_string())
+                .collect();
         running.sort();
         let Some(target) = running.into_iter().next() else {
             return false;
@@ -313,7 +312,7 @@ impl AgentView {
         };
         let title_y = frame.title_row.y;
         let _title_row = frame.title_row;
-        let inner = frame.content;
+        let mut inner = frame.content;
         let _border_style = Style::default().fg(border_color);
         // Copy the row fields before the overlay mirror. `badge` used to borrow the
         // session map through the mutable specialist call below.
@@ -388,6 +387,11 @@ impl AgentView {
             )
         };
         let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
+        if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
+            // Title wait chrome calls resolve_turn_activity on this child.
+            // Set the overlay flag before that so L3s are not L1-filtered.
+            child_view.tasks.set_overlay_l2_session_id(Some(child_sid));
+        }
         let mut activity_label: Option<String> = if is_running {
             self.subagent_views
                 .get(child_sid)
@@ -532,10 +536,20 @@ impl AgentView {
         let mut child_cursor = None;
         let mut child_post_flush = None;
         self.paint_opened_l3_context(child_sid);
+        // One-task empty-description wait: title already paints
+        // `Waiting on 1 task...`. Keep a dedicated waiting row strictly
+        // below that title so `[↗]` is not collapsed onto the title cell.
+        let reserved_wait_row =
+            reserved_one_task_wait_row(self, child_sid, activity_label.as_deref(), title_y, inner);
+        if reserved_wait_row.is_some() {
+            inner.y = inner.y.saturating_add(1);
+            inner.height = inner.height.saturating_sub(1);
+        }
         if inner.width > 5
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
+            child_view.tasks.set_overlay_l2_session_id(Some(child_sid));
             // Row clocks only on the L2 window, not every nested draw.
             // A known L3 specialist leaves the flag off. An overlay with no
             // registry row keeps the flag so that window can still show clocks.
@@ -565,7 +579,7 @@ impl AgentView {
             child_cursor = cursor;
             child_post_flush = post_flush;
         }
-        self.record_overlay_specialist_status_hit(buf, area, child_sid);
+        self.record_overlay_specialist_status_hit(buf, area, child_sid, reserved_wait_row);
         self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
         (child_cursor, child_post_flush)
     }
@@ -574,11 +588,14 @@ impl AgentView {
     /// A left click opens that L3 session view.
     /// `Waiting on 1 task...` wins when that row is painted and the specialist
     /// description is empty. The hit is the lowest row of that phrase, plus
-    /// the open-arrow control painted on that row. An unlabeled `Waiting on
-    /// task output…` title and a bottom `1 subagent still running` cue for
-    /// this one-task wait are rewritten to the same phrase so the lower row
-    /// is the control. Named L3 specialist rows also paint that same
-    /// enlarge/open-arrow; activating it opens that L3. Each named row
+    /// the open-arrow control painted on that row. That waiting row is
+    /// strictly below the takeover title: title y and waiting y are not
+    /// the same cell. An unlabeled `Waiting on task output…` title and a
+    /// bottom `1 subagent still running` cue for this one-task wait are
+    /// rewritten to the same phrase so the lower row is the control. When
+    /// those cues are missing, a reserved row under the title still paints
+    /// the phrase and hosts `[↗]`. Named L3 specialist rows also paint that
+    /// same enlarge/open-arrow; activating it opens that L3. Each named row
     /// gets its own arrow and hit. One shared sid is not enough when two
     /// named L3 rows are on screen. A waiting-row-only arrow is not the
     /// L3-row control. Wait chrome that already paints
@@ -594,33 +611,50 @@ impl AgentView {
         buf: &mut Buffer,
         area: Rect,
         child_sid: &str,
+        reserved_wait_row: Option<Rect>,
     ) {
-        let mut specialists: Vec<(String, String, std::time::Instant)> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(_, info)| {
-                info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-            })
-            .map(|(id, info)| {
-                (
-                    id.clone(),
-                    info.description.trim().to_string(),
-                    info.attempt.started_at,
-                )
-            })
-            .collect();
+        let mut specialists: Vec<(String, String, std::time::Instant)> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), child_sid)
+                .into_iter()
+                .map(|info| {
+                    (
+                        info.child_session_id.to_string(),
+                        info.description.trim().to_string(),
+                        info.attempt.started_at,
+                    )
+                })
+                .collect();
         specialists.sort_by_key(|(_, _, started)| *started);
         if specialists.len() == 1 {
             paint_one_task_wait_over_phrase(buf, area, WAITING_ON_TASK_OUTPUT);
+            if let Some(row) = reserved_wait_row {
+                paint_waiting_phrase_on_row(buf, row);
+            }
             if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
                 paint_one_task_wait_over_still_running(buf, area);
-                if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                if let Some(mut rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
                     && let Some((id, phrase, _)) = specialists.first()
                     && phrase.is_empty()
                 {
-                    let hit = paint_waiting_row_open_arrow(buf, area, rect);
-                    self.record_overlay_nested_status_hit(id.clone(), hit);
-                    return;
+                    if let Some(title) = painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                        && rect.y <= title.y
+                    {
+                        if let Some(row) = reserved_wait_row.filter(|row| row.y > title.y) {
+                            paint_waiting_phrase_on_row(buf, row);
+                            if let Some(forced) =
+                                painted_phrase_rect_on_row(buf, area, row.y, WAITING_ON_ONE_TASK)
+                            {
+                                rect = forced;
+                            }
+                        }
+                    }
+                    if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                        .is_some_and(|title| rect.y > title.y)
+                    {
+                        let hit = paint_waiting_row_open_arrow(buf, area, rect);
+                        self.record_overlay_nested_status_hit(id.clone(), hit);
+                        return;
+                    }
                 }
             }
         }
@@ -729,19 +763,17 @@ impl AgentView {
     /// Parent-registry L3 rows are invisible to the L2 view's wait chrome.
     /// Mirror them for this draw so the overlay names the live specialist.
     fn mirror_parented_specialists_for_overlay(&mut self, child_sid: &str) -> Vec<String> {
-        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(id, info)| {
-                info.is_running()
-                    && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-                    && self
-                        .subagent_views
-                        .get(child_sid)
-                        .is_some_and(|child| !child.subagent_sessions.contains_key(id.as_str()))
-            })
-            .map(|(id, info)| (id.clone(), info.clone()))
-            .collect();
+        let already_on_child: std::collections::HashSet<String> = self
+            .subagent_views
+            .get(child_sid)
+            .map(|child| child.subagent_sessions.keys().cloned().collect())
+            .unwrap_or_default();
+        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), child_sid)
+                .into_iter()
+                .filter(|info| !already_on_child.contains(info.child_session_id.as_ref()))
+                .map(|info| (info.child_session_id.to_string(), info.clone()))
+                .collect();
         let Some(child) = self.subagent_views.get_mut(child_sid) else {
             return Vec::new();
         };
@@ -760,6 +792,18 @@ impl AgentView {
         for key in keys {
             child.subagent_sessions.remove(key);
         }
+    }
+
+    /// Test helper: ids `mirror_parented_specialists_for_overlay` would copy.
+    /// Drops them again so the child map is unchanged. Does not change list behavior.
+    #[cfg(test)]
+    pub(crate) fn mirrored_overlay_specialist_ids_for_test(
+        &mut self,
+        child_sid: &str,
+    ) -> Vec<String> {
+        let keys = self.mirror_parented_specialists_for_overlay(child_sid);
+        self.drop_mirrored_overlay_specialists(child_sid, &keys);
+        keys
     }
 
     /// Idle child still listed as running: frame close cancels that row.
@@ -935,12 +979,62 @@ const WAITING_ON_TASK_OUTPUT: &str = "Waiting on task output…";
 const ONE_SUBAGENT_STILL_RUNNING: &str = "1 subagent still running";
 
 fn overlay_nested_specialist_count(view: &AgentView, child_sid: &str) -> usize {
-    view.subagent_sessions
-        .values()
-        .filter(|info| {
-            info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-        })
-        .count()
+    crate::app::subagent::l3_rows_for_l2(view.subagent_sessions.values(), child_sid).len()
+}
+
+/// One empty-description L3 wait keeps the title phrase and needs a
+/// waiting row strictly below that title for `[↗]`. The reserved row is
+/// the first inner content row (below the title border). None when the
+/// title is not that phrase, the specialist is named, or inner is too
+/// short to give the child a row after the steal.
+fn reserved_one_task_wait_row(
+    view: &AgentView,
+    child_sid: &str,
+    activity: Option<&str>,
+    title_y: u16,
+    inner: Rect,
+) -> Option<Rect> {
+    if activity != Some(WAITING_ON_ONE_TASK) {
+        return None;
+    }
+    if inner.height <= 4 || inner.y <= title_y {
+        return None;
+    }
+    let specialists =
+        crate::app::subagent::l3_rows_for_l2(view.subagent_sessions.values(), child_sid);
+    if specialists.len() != 1 {
+        return None;
+    }
+    if !specialists
+        .first()
+        .is_some_and(|info| info.description.trim().is_empty())
+    {
+        return None;
+    }
+    Some(Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    })
+}
+
+/// Paint `Waiting on 1 task...` on `row` when that row does not already
+/// carry the phrase. Used for the reserved waiting row below the title.
+fn paint_waiting_phrase_on_row(buf: &mut Buffer, row: Rect) {
+    if row.height == 0 || row.width == 0 {
+        return;
+    }
+    if painted_phrase_rect_on_row(buf, row, row.y, WAITING_ON_ONE_TASK).is_some() {
+        return;
+    }
+    let theme = Theme::current();
+    buf.set_span_safe(
+        row.x,
+        row.y,
+        &Span::styled(WAITING_ON_ONE_TASK, Style::default().fg(theme.gray)),
+        row.width,
+    );
 }
 
 /// A one-task wait's bottom status still says `1 subagent still running`.

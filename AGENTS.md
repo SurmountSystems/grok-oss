@@ -18,6 +18,10 @@ The Hierarchical fast path on L1 is one already-named command, one already-named
 
 Speaker labels are Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2.
 
+### Nested explore and implement start after Approve
+
+Jumping the gun is spawning nested research during plan write and present. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. L1 writes `plan.md` from Operator evidence, presents, and waits for Approve. The plan skill, the hierarchical skill, and this file say that same thing. A sentence that tells L1 to spawn explores during `/plan` is the miss. The Hierarchical fast path stays (one already-named command, one already-named file read, the asked-for report, one already-named one-line edit). Dual-pin: [`FORK.md`](FORK.md) same heading; host `~/.grok/AGENTS.md` same heading.
+
 ## Builder
 
 Do not run cargo, rustc, clippy, or `cargo test` on this laptop. Agents may run `just check-remote` one at a time. `just test-remote` is Operator-owned. After a product change, one runner owns `just check-remote` then `just install`. Do not restart a live remote compile at five minutes.
@@ -28,13 +32,21 @@ The product CLI is `grok-oss`. Start `grok-oss`, not bare `grok`.
 
 SuperGrok is a paid product. Never call SuperGrok free. Name which meter you mean: included SuperGrok period limits, SuperGrok dollar credits, or console team prepaid / console API credits.
 
-### Already-open L1 sibling IPC re-auth
+### Already-open L1 sibling IPC re-auth (pinned 2026-10-24)
 
-Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` on `$GROK_HOME/authorize_ask.sock`. That document never carries tokens. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Never tell the Operator to /login. Dual-pin: [`FORK.md`](FORK.md) same heading.
+Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` on `$GROK_HOME/authorize_ask.sock`. That document never carries tokens. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT. Named tests and detail: [`FORK.md`](FORK.md) same heading.
+
+### Nested L2 inherit and Authentication required nag (pinned 2026-10-15)
+
+Nested 401 `reason=no auth context` while the parent session still talks does not paint Authentication required / Run /login. SuperGrok is a paid product. Never tell the Operator to /login. Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. Named tests and detail: [`FORK.md`](FORK.md) same heading.
 
 ## Reports and homes
 
 Reports live under `~/.agents/reports/` on this machine. They are not part of the git tree. Do not invent `docs/issues/` or `docs/dev/bugs/` as a reports home. Do not create project `.agents/reports/` or project-root `.grok/` for reports. Live plans live under `~/.agents/plans/`.
+
+## Estimate then reconcile
+
+Call the `token_report` tool for estimate versus actual wall and nested tokens, per job and rolled up. Do not hand-write those markdown tables. Formats are human-readable table and TOON. Pass session_ids and optional job_ulid. The tool calls L2-B live counters and `model_call_cost_for_sessions`. Cost is input plus output. Cached tokens are already inside input. Reasoning tokens are already inside output. Dual-pin: host `~/.grok/AGENTS.md` § *Comprehensive estimate and reconcile*.
 
 ## Priority
 

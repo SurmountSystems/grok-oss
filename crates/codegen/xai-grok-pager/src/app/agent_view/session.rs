@@ -1823,12 +1823,16 @@ impl AgentView {
         if self.bash_turn {
             return None;
         }
-        let reason = if self.has_running_foreground_subagent() {
-            WaitingReason::subagent()
-        } else {
-            WaitingReason::Model
-        };
-        Some(TurnActivity::Waiting(reason))
+        if self.has_running_foreground_subagent() {
+            return Some(TurnActivity::Waiting(WaitingReason::subagent()));
+        }
+        // GitHub #247: a finished assistant row with no in-flight sample is
+        // not first-token wait. Nested fire-and-return must not keep leftover
+        // chrome on Waiting for the model.
+        if self.painted_assistant_reply_without_in_flight_sample() {
+            return None;
+        }
+        Some(TurnActivity::Waiting(WaitingReason::Model))
     }
     /// How chrome should read an open turn's wait.
     ///
@@ -1865,6 +1869,24 @@ impl AgentView {
             return false;
         }
         !self.finished_nested_wait_ids.is_empty()
+    }
+    /// Last scrollback row is a finished assistant reply and nothing is
+    /// sampling. First-token wait still has either an empty pane, a user
+    /// prompt as last row, or `in_flight_prompt`.
+    pub(super) fn painted_assistant_reply_without_in_flight_sample(&self) -> bool {
+        if self.session.in_flight_prompt.is_some() {
+            return false;
+        }
+        let Some(last) = self.scrollback.last() else {
+            return false;
+        };
+        if last.is_running {
+            return false;
+        }
+        match &last.block {
+            crate::scrollback::block::RenderBlock::AgentMessage(msg) => !msg.is_empty(),
+            _ => false,
+        }
     }
     /// Adds the display subject to a `TaskOutput` or `Subagent` wait.
     fn enrich_waiting_activity(
@@ -1989,18 +2011,50 @@ impl AgentView {
     fn running_foreground_subagents(
         &self,
     ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
-        self.subagent_sessions.values().filter(|s| {
-            s.is_running() && !s.attempt.is_background && s.attempt.workflow_run_id.is_none()
-        })
+        self.visible_running_nested_for_wait()
+            .into_iter()
+            .filter(|s| !s.attempt.is_background)
     }
-    /// Running specialists the nested overlay can name: foreground or
-    /// background, excluding workflow runs.
+    /// Running nested rows this view may name in wait/title chrome.
+    /// L1 names L2 coordinators only. An L2 overlay names that L2's L3s only.
     pub(crate) fn running_live_specialists(
         &self,
     ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
+        self.visible_running_nested_for_wait().into_iter()
+    }
+    /// L1 wait/title must not name L3s. Overlay wait chrome must not count
+    /// another L2's specialists after an over-copied child map.
+    fn visible_running_nested_for_wait(&self) -> Vec<&crate::app::subagent::SubagentInfo> {
+        // Overlay wait chrome names that L2's L3s. The overlay flag is the
+        // gate so a child view without child_link still names its specialists.
+        // Empty means this overlay has no parented L3s; fall through so a
+        // specialist already on the child still names wait chrome.
+        if let Some(l2_sid) = self.tasks.overlay_l2_session_id() {
+            let parented =
+                crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), l2_sid);
+            if !parented.is_empty() {
+                return parented;
+            }
+        }
+        if let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.as_ref())
+            && self.child_link().is_some()
+        {
+            let parented =
+                crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), sid);
+            if !parented.is_empty() {
+                return parented;
+            }
+        }
+        let child_ids: HashSet<&str> = self
+            .subagent_sessions
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
         self.subagent_sessions
             .values()
             .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
+            .filter(|s| crate::app::subagent::is_l2_list_row(s, &child_ids))
+            .collect()
     }
     /// Wait chrome stays while at least one named id is still running, or is
     /// not in the bg-task / subagent maps yet and has no `SubagentFinished`
@@ -2737,6 +2791,76 @@ mod resolve_turn_activity_tests {
             label.as_deref(),
             Some("Waiting for the model…"),
             "first-token wait must paint Waiting for the model, got {label:?}"
+        );
+    }
+
+    /// GitHub #247: after L1 already painted a reply, leftover chrome must
+    /// not stay `Waiting for the model`. Fire-and-return nested L2 work
+    /// (unwaited background finish) must not keep L1 on that spinner when
+    /// no sample is in flight. Distinct from first-token wait after an
+    /// unwaited nested finish (`first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model`).
+    #[test]
+    fn after_painted_l1_reply_fire_and_return_nested_must_not_paint_waiting_for_the_model() {
+        use crate::scrollback::block::RenderBlock;
+        use std::sync::Arc;
+
+        let mut view = running_view();
+        view.scrollback.push_block(RenderBlock::agent_message(
+            "quality-green / install status: grok-oss 1.0.45 (112967ff144a)",
+        ));
+        let mut nested = running_child("just check-remote");
+        nested.attempt.is_background = true;
+        nested.subagent_id = Arc::from("sa-check-remote");
+        view.subagent_sessions
+            .insert("l2-check-remote".into(), nested);
+        mark_specialist_completed(view.subagent_sessions.get_mut("l2-check-remote").unwrap());
+        view.note_finished_nested_wait_ids("l2-check-remote", "sa-check-remote");
+        assert!(
+            view.finished_nested_wait_ids.is_empty(),
+            "fire-and-return SubagentFinished must not record finished_nested_wait_ids, got {:?}",
+            view.finished_nested_wait_ids
+        );
+        assert!(
+            view.session.in_flight_prompt.is_none(),
+            "no in-flight sample: in_flight_prompt must stay None after the painted reply"
+        );
+        assert!(
+            view.session.turn_activity().is_none(),
+            "no in-flight sample: tracker has no stream, tool, or thinking, got {:?}",
+            view.session.turn_activity()
+        );
+        let last = view.scrollback.last().expect("painted assistant reply");
+        assert!(
+            last.block.is_agent_message() && !last.is_running,
+            "precondition: last scrollback row is a finished assistant reply"
+        );
+        let activity = view.resolve_turn_activity();
+        let text = activity
+            .as_ref()
+            .map(crate::app::subagent::format_activity_label)
+            .unwrap_or_default();
+        assert!(
+            !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "after a painted L1 reply and no in-flight sample, fire-and-return nested must not keep Waiting for the model, got {activity:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("waiting for the model"),
+            "got {text}"
+        );
+        let label = super::super::render::leftover_viewport_wait_label(&activity);
+        assert_eq!(
+            label, None,
+            "leftover chrome must not paint Waiting for the model under a finished assistant reply, got {label:?}"
+        );
+        assert_ne!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "painted reply plus fire-and-return nested must not be classified as live sampler, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        assert!(
+            view.session.state.is_turn_running(),
+            "chrome idle is the contract; do not fake finish_turn while ACP may still be open"
         );
     }
 

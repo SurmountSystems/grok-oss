@@ -15,7 +15,7 @@ use crate::app::agent_view::l2_token_tracking::{
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
-    is_l2_list_row, live_l3_count, subagent_list_row_usage,
+    is_l2_list_row, l3_rows_for_l2, live_l3_count, subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -825,6 +825,9 @@ pub struct TasksPane {
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
     last_theme: ThemeKind,
     workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    /// When this pane is an L2 overlay, list only that L2's L3s.
+    /// `None` is L1: L2 rows only, never L3s just because the L2 filter is empty.
+    overlay_l2_session_id: Option<String>,
 }
 impl Default for TasksPane {
     fn default() -> Self {
@@ -984,7 +987,19 @@ impl TasksPane {
             highlight_cache: HashMap::new(),
             last_theme: Theme::current_kind(),
             workflow_runs: Vec::new(),
+            overlay_l2_session_id: None,
         }
+    }
+
+    /// L2 overlay lists that coordinator's specialists. L1 leaves this unset.
+    pub(crate) fn set_overlay_l2_session_id(&mut self, l2_session_id: Option<&str>) {
+        self.overlay_l2_session_id = l2_session_id.map(str::to_owned);
+    }
+
+    /// Session id of the open L2 overlay, if this pane is that overlay.
+    /// `None` is L1: wait chrome and the list must not name L3s.
+    pub(crate) fn overlay_l2_session_id(&self) -> Option<&str> {
+        self.overlay_l2_session_id.as_deref()
     }
     pub fn sync(
         &mut self,
@@ -1014,28 +1029,19 @@ impl TasksPane {
             .iter()
             .map(|info| info.child_session_id.as_ref())
             .collect();
-        // The main-thread list is L2 rows. L3 specialists stay in the
-        // registry so the L2 row can show how many it is using.
-        // A nested overlay child's registry has those specialists and no
-        // L2 row. Name them there. Do not list them beside an L2 row.
-        let l2_rows: Vec<&SubagentInfo> = listed
-            .iter()
-            .copied()
-            .filter(|info| is_l2_list_row(info, &child_ids))
-            .collect();
-        let list_rows: Vec<&SubagentInfo> = if l2_rows.is_empty() {
-            listed
-                .iter()
-                .copied()
-                .filter(|info| {
-                    info.is_running()
-                        && info.attempt.workflow_run_id.is_none()
-                        && info.attempt.parent_session_id.is_some()
-                })
-                .collect()
-        } else {
-            l2_rows
-        };
+        // L1 (`overlay_l2_session_id` none): L2 rows only. Never list L3s
+        // just because that filter is empty. An L2 overlay lists only
+        // `l3_rows_for_l2` for this view's session id.
+        let list_rows: Vec<&SubagentInfo> =
+            if let Some(l2_sid) = self.overlay_l2_session_id.as_deref() {
+                l3_rows_for_l2(listed.iter().copied(), l2_sid)
+            } else {
+                listed
+                    .iter()
+                    .copied()
+                    .filter(|info| is_l2_list_row(info, &child_ids))
+                    .collect()
+            };
         let skip_duplicate_running = duplicate_running_description_ids(&list_rows);
         for info in &list_rows {
             if info.attempt.workflow_run_id.is_some() {
@@ -1260,6 +1266,20 @@ impl TasksPane {
             }
         }
         (running, total)
+    }
+
+    /// Child session ids currently listed as Subagents rows.
+    #[cfg(test)]
+    pub(crate) fn listed_agent_session_ids(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent {
+                    child_session_id, ..
+                } => Some(child_session_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
     pub fn hide_completed_subagent(&mut self, child_session_id: &str) {
         self.cleared_completed_ids
@@ -4608,6 +4628,124 @@ mod tests {
         assert!(
             dock_text.iter().any(|line| line.contains("1 specialist")),
             "{OWED} The dock L2 row needs a specialist count. Rows: {dock_text:?}"
+        );
+    }
+
+    fn insert_named(
+        sessions: &mut HashMap<String, SubagentInfo>,
+        child: &str,
+        description: &str,
+        depth: Option<u32>,
+        parent: &str,
+    ) {
+        let mut info = make_info();
+        info.subagent_id = Arc::from(format!("sa-{child}"));
+        info.child_session_id = Arc::from(child);
+        info.description = Arc::from(description);
+        info.attempt.depth = depth;
+        info.attempt.parent_session_id = Some(Arc::from(parent));
+        sessions.insert(child.to_owned(), info);
+    }
+
+    fn l1_two_l2_two_l3_sessions(l3_a_depth: Option<u32>) -> HashMap<String, SubagentInfo> {
+        let mut sessions = HashMap::new();
+        insert_named(&mut sessions, "l2-a", "Coordinate A", Some(1), "l1-session");
+        insert_named(&mut sessions, "l2-b", "Coordinate B", Some(1), "l1-session");
+        insert_named(&mut sessions, "l3-a", "Prove A", l3_a_depth, "l2-a");
+        insert_named(&mut sessions, "l3-b", "Prove B", Some(2), "l2-b");
+        sessions
+    }
+
+    fn assert_l1_subagents_view_is_l2_only(sessions: HashMap<String, SubagentInfo>, owed: &str) {
+        let mut pane = TasksPane::new();
+        pane.sync(&BTreeMap::new(), &sessions, &HashMap::new(), &[]);
+        let mut pane_ids = pane.listed_agent_session_ids();
+        pane_ids.sort();
+        assert_eq!(
+            pane_ids,
+            vec!["l2-a".to_owned(), "l2-b".to_owned()],
+            "{owed} tasks pane ids: {pane_ids:?}"
+        );
+        let pane_labels: Vec<String> = pane
+            .items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            pane_labels
+                .iter()
+                .all(|label| !label.contains("Prove A") && !label.contains("Prove B")),
+            "{owed} tasks pane still lists an L3 name. Rows: {pane_labels:?}"
+        );
+        for label in &pane_labels {
+            if label.contains("Coordinate A") || label.contains("Coordinate B") {
+                assert!(
+                    label.contains("1 specialist"),
+                    "{owed} L2 row needs 1 specialist: {label}"
+                );
+            }
+        }
+
+        let mut l1 = crate::app::agent_view::test_fixtures::make_agent();
+        l1.subagent_sessions = sessions;
+        l1.dock_shown = true;
+        l1.dock_on = true;
+        let dock_rows = l1.dock_subagent_rows();
+        let mut dock_ids: Vec<String> = dock_rows
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect();
+        dock_ids.sort();
+        assert_eq!(dock_ids, pane_ids, "{owed} pane ids must match the dock");
+        for (_, _, row) in &dock_rows {
+            assert!(
+                !row.description.contains("Prove A") && !row.description.contains("Prove B"),
+                "{owed} L3 description leaked into dock description: {row:?}"
+            );
+            assert!(
+                !row.meta.contains("Prove A") && !row.meta.contains("Prove B"),
+                "{owed} L3 description leaked into dock meta: {row:?}"
+            );
+        }
+        for id in ["l2-a", "l2-b"] {
+            let row = dock_rows
+                .iter()
+                .find(|(session_id, _, _)| session_id == id)
+                .expect(id);
+            assert!(
+                row.2.meta.contains("1 specialist"),
+                "{owed} L2 {id} meta needs 1 specialist, got {}",
+                row.2.meta
+            );
+        }
+        assert_eq!(
+            l1.watchers().subagents,
+            2,
+            "{owed} watching counts must be the two L2s, not L3s. got {}",
+            l1.watchers().subagents
+        );
+        let block = crate::app::status_blocks::tasks_block_text(&l1);
+        assert!(
+            block.contains("Coordinate A") && block.contains("Coordinate B"),
+            "{owed} /tasks must name the L2s:\n{block}"
+        );
+        assert!(
+            !block.contains("Prove A") && !block.contains("Prove B"),
+            "{owed} /tasks must not name the L3s:\n{block}"
+        );
+    }
+
+    /// L1 Subagents view does not include L3 rows.
+    #[test]
+    fn l1_subagents_view_does_not_include_l3_rows() {
+        const OWED: &str = "L1 Subagents view does not include L3 rows.";
+        assert_l1_subagents_view_is_l2_only(l1_two_l2_two_l3_sessions(Some(2)), OWED);
+        assert_l1_subagents_view_is_l2_only(
+            l1_two_l2_two_l3_sessions(None),
+            "L1 Subagents view does not include L3 rows. A live spawn that left L3 depth None and parent l2-a still must not list that L3.",
         );
     }
 }

@@ -1829,6 +1829,13 @@ impl AcpUpdateTracker {
             .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        let replay_ts = meta
+            .is_replay
+            .then(|| meta.turn_start_ms.or(meta.agent_timestamp_ms))
+            .flatten();
+        // Wrap echo of this send (model envelope). PromptOrigin::User / missing
+        // prompt_id is a real UserPrompt unless the chunk is that envelope.
+        let incoming_is_wrap_echo = contains_model_facing_wrap(&text);
         if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
             let mut last_id = None;
             for seg in &segments {
@@ -1836,17 +1843,24 @@ impl AcpUpdateTracker {
                 if painted.is_empty() {
                     continue;
                 }
-                last_id = Some(
-                    if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), &painted) {
-                        let id = scrollback.push_block(RenderBlock::agent_message(painted));
-                        scrollback.set_entry_running(id, true);
-                        id
-                    } else {
-                        scrollback.push_block(RenderBlock::UserPrompt(
-                            crate::scrollback::blocks::UserPromptBlock::new(painted),
-                        ))
-                    },
-                );
+                if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), &painted) {
+                    let id = scrollback.push_block(RenderBlock::agent_message(painted));
+                    scrollback.set_entry_running(id, true);
+                    last_id = Some(id);
+                    continue;
+                }
+                if reuse_painted_user_prompt(
+                    scrollback,
+                    &painted,
+                    prompt_index,
+                    replay_ts,
+                    incoming_is_wrap_echo,
+                ) {
+                    continue;
+                }
+                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(
+                    crate::scrollback::blocks::UserPromptBlock::new(painted),
+                )));
             }
             if last_id.is_none() {
                 return false;
@@ -1934,6 +1948,15 @@ impl AcpUpdateTracker {
             }
             block.text = visible;
             block.skill_token_ranges.clear();
+        }
+        if reuse_painted_user_prompt(
+            scrollback,
+            &block.text,
+            prompt_index,
+            replay_ts,
+            incoming_is_wrap_echo,
+        ) {
+            return false;
         }
         block.prompt_index = prompt_index;
         let entry_id = scrollback.push_block(RenderBlock::UserPrompt(block));
@@ -2155,6 +2178,74 @@ fn operator_visible_prompt_text(text: &str) -> String {
         }
     }
     visible
+}
+
+fn user_prompt_visible_eq(a: &str, b: &str) -> bool {
+    operator_visible_prompt_text(a)
+        .split_whitespace()
+        .eq(operator_visible_prompt_text(b).split_whitespace())
+}
+
+/// Last UserPrompt with this visible Operator text, scanning back past turn
+/// chrome. Stops at an AgentMessage or a different UserPrompt so a later
+/// Enter of the same words still paints.
+fn trailing_matching_user_prompt(scrollback: &ScrollbackState, visible: &str) -> Option<usize> {
+    if visible.trim().is_empty() {
+        return None;
+    }
+    for idx in (0..scrollback.len()).rev() {
+        let Some(entry) = scrollback.get(idx) else {
+            continue;
+        };
+        match &entry.block {
+            RenderBlock::UserPrompt(b) => {
+                return user_prompt_visible_eq(&b.text, visible).then_some(idx);
+            }
+            RenderBlock::Thinking(_)
+            | RenderBlock::ToolCall(_)
+            | RenderBlock::SessionEvent(_)
+            | RenderBlock::System(_)
+            | RenderBlock::BgTask(_)
+            | RenderBlock::Subagent(_) => continue,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// GitHub #248: one Enter paints one Operator line. A wrap
+/// UserMessageChunk echo of an already-painted prompt (including `[Image #N]`)
+/// must not push a second UserPrompt. Live echo of the same send is
+/// `skip_next_user_echo` / send-now pending, not this helper.
+/// A real UserPrompt (`PromptOrigin::User` or missing prompt_id, no
+/// model-facing wrap) must still paint even when the visible text matches.
+fn reuse_painted_user_prompt(
+    scrollback: &mut ScrollbackState,
+    visible: &str,
+    prompt_index: Option<usize>,
+    replay_ts: Option<i64>,
+    incoming_is_wrap_echo: bool,
+) -> bool {
+    if !incoming_is_wrap_echo {
+        return false;
+    }
+    let Some(idx) = trailing_matching_user_prompt(scrollback, visible) else {
+        return false;
+    };
+    if let Some(entry) = scrollback.get_mut(idx)
+        && let RenderBlock::UserPrompt(ref mut block) = entry.block
+        && !block.is_interjection
+    {
+        if let Some(pi) = prompt_index
+            && block.prompt_index.is_none()
+        {
+            block.prompt_index = Some(pi);
+        }
+        if let Some(ms) = replay_ts {
+            entry.created_at = Some(utc_ms_to_local(ms));
+        }
+    }
+    true
 }
 
 /// Per-prompt display strings from combine ([`user_prompt_meta::COMBINED_DISPLAY_TEXTS`]).

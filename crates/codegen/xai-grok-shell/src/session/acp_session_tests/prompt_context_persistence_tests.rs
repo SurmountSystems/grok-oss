@@ -1,5 +1,28 @@
 use super::*;
 
+/// On-disk prompt context stays loadable JSON (`prompt_context.json`), never TOON.
+#[test]
+fn prompt_context_filename_stays_json() {
+    assert_eq!(PROMPT_CONTEXT_FILENAME, "prompt_context.json");
+    let src = include_str!("../acp_session.rs");
+    assert!(
+        src.contains("const PROMPT_CONTEXT_FILENAME: &str = \"prompt_context.json\""),
+        "filename must stay prompt_context.json"
+    );
+    assert!(
+        src.contains("serde_json::to_string_pretty(prompt_context)"),
+        "save_prompt_context must write pretty JSON"
+    );
+    let ctx = xai_grok_agent::PromptContext::default();
+    let json = serde_json::to_string_pretty(&ctx).unwrap();
+    assert!(
+        json.trim_start().starts_with('{'),
+        "prompt context body must be JSON, got: {json}"
+    );
+    let loaded: xai_grok_agent::PromptContext = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded.version, ctx.version);
+}
+
 /// Test that PromptContext round-trips through JSON in the save/load format used by `save_prompt_context` and `load_prompt_context`.
 #[test]
 fn test_json_round_trip() {

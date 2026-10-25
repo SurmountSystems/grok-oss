@@ -1046,9 +1046,48 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
             } if !permission_mode.is_empty()
                 && !permission_mode.contains("eyJ")
                 && !permission_mode.contains("Bearer")
+                && !permission_mode.contains("sk-")
+                && permission_mode != "expired-stale-jwt"
         )),
         "login success in one process must live-publish IPC {{authorized, permission_mode}} and never tokens. got: {publish:?}"
     );
+    let published_docs: Vec<xai_grok_shell::util::config::AuthorizeAskDocument> = publish
+        .iter()
+        .filter_map(|e| match e {
+            Effect::PublishAuthorizeAsk {
+                authorized,
+                permission_mode,
+            } => Some(xai_grok_shell::util::config::AuthorizeAskDocument {
+                authorized: *authorized,
+                permission_mode: permission_mode.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !published_docs.is_empty(),
+        "login success must publish AuthorizeAskDocument on authorize_ask.sock. got: {publish:?}"
+    );
+    for doc in &published_docs {
+        let json = serde_json::to_value(doc).expect("IPC document json");
+        let obj = json.as_object().expect("IPC document object");
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["authorized", "permission_mode"].into_iter().collect(),
+            "IPC document must be {{authorized, permission_mode}}, never tokens. json={json}"
+        );
+        assert!(obj.get("jwt").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("access_token").is_none());
+        assert!(obj.get("refresh_token").is_none());
+        assert!(obj.get("bearer").is_none());
+        let dumped = serde_json::to_string(doc).expect("IPC document string");
+        assert!(
+            !dumped.contains("eyJ") && !dumped.contains("Bearer") && !dumped.contains("sk-"),
+            "IPC JSON must not carry a JWT or API key: {dumped}"
+        );
+    }
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1089,18 +1128,17 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
                 session_id,
                 text,
                 recovered_bearer: true,
-                recovered_bearer_jwt,
+                recovered_bearer_jwt: None,
                 ..
             } if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
                 && text == "waiting prompt after sibling login"
-                && recovered_bearer_jwt.as_deref() != Some("expired-stale-jwt")
         ) || matches!(
             e,
             Effect::SendPrompt { session_id, text, .. }
                 if session_id.0.as_ref() == "sess-open-l1-sibling-ipc"
                     && text == "waiting prompt after sibling login"
         )),
-        "already-open L1 must reload the shared store and resend the waiting prompt after sibling IPC authorize. got: {effects:?}"
+        "already-open L1 must reload the shared store and resend the waiting prompt after sibling IPC authorize. IPC never tokens: recovered_bearer_jwt is None so the shell reloads the store, not spawn-time live_api_key. got: {effects:?}"
     );
     assert!(
         effects.iter().all(|e| !matches!(
@@ -1109,8 +1147,11 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
                 recovered_bearer_jwt: Some(jwt),
                 ..
             } if jwt == "expired-stale-jwt"
+                || jwt.contains("eyJ")
+                || jwt.contains("Bearer")
+                || jwt.contains("sk-")
         )),
-        "resend bearer must not be the pre-IPC expired JWT. Store reload, not JWT-drop proxy. got: {effects:?}"
+        "resend bearer must not be the pre-IPC expired JWT or any token from IPC. Store reload, not JWT-drop proxy. got: {effects:?}"
     );
     let agent = test_agent(&app, id);
     assert!(
@@ -1126,12 +1167,21 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
+        !scrollback_text.contains("Authentication required:"),
+        "already-open L1 must not keep Authentication required after sibling login. scrollback={scrollback_text}"
+    );
+    assert!(
         !scrollback_text.contains(RUN_LOGIN_NAG),
         "already-open L1 must not paint Run /login to re-authenticate, then resend your message. scrollback={scrollback_text}"
     );
     assert!(
         !scrollback_text.contains("/login"),
         "never tell the Operator to /login after a sibling session logged in. scrollback={scrollback_text}"
+    );
+    assert_eq!(
+        scrollback_text.matches(RUN_LOGIN_NAG).count(),
+        0,
+        "sibling authorize must not leave even one Run /login nag. scrollback={scrollback_text}"
     );
 }
 
@@ -1175,6 +1225,19 @@ fn sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth() {
             Effect::UnstickResendPrompt { .. } | Effect::SendPrompt { .. }
         )),
         "authorized apply must not UnstickResend an in-flight turn when this L1 does not need reauth. got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        !scrollback_has_reauth_required(agent),
+        "sibling IPC authorize must not paint Authentication required when this L1 does not need reauth"
+    );
+    let scrollback_text = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i).map(|e| format!("{:?}", e.block)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !scrollback_text.contains(RUN_LOGIN_NAG) && !scrollback_text.contains("/login"),
+        "sibling IPC authorize must not tell the Operator to /login when this L1 does not need reauth. scrollback={scrollback_text}"
     );
 }
 

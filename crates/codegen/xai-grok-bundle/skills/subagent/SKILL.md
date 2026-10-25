@@ -108,9 +108,14 @@ No L4. All tokens in an L3 contribute to the token costs of the L2.
   enough to override the user.
 - grok-oss limits chrome is a client printout, not xAI billing truth.
 - SuperGrok Heavy is a distinct weekly pool from standard SuperGrok.
-- For a finished job's actual nested tokens, call the Rust function
+- Call the `token_report` tool for estimate versus actual wall and nested
+  tokens (human-readable table or TOON). Do not hand-write those markdown
+  tables. The tool reads L2-B live counters and SQLite. Pass session_ids
+  (the L2 and every nested L3, once each) and optional job_ulid. Agents do
+  not call ledger functions themselves. The tool uses
   `local_usage_events_for_session` in
-  `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`.
+  `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`
+  through `model_call_cost_for_sessions`.
   Do not use Python. Do not use bash. Do not use a `sqlite3` one-liner.
   The cost cell is `model_call_cost_for_sessions` (input + output), not `total_tokens`,
   and not the standing estimate.

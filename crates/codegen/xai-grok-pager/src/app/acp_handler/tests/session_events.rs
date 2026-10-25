@@ -806,6 +806,19 @@
             "nested spawn 401 with no auth context must not tell the Operator to /login while the parent turn still works"
         );
         assert_eq!(count_reauth_required(&scrollback), 0);
+        let painted = painted_session_and_system_text(&scrollback);
+        assert_eq!(
+            painted.matches("Authentication required:").count(),
+            0,
+            "nested 401 while parent talks must not paint Authentication required. painted={painted}"
+        );
+        assert_eq!(
+            painted
+                .matches("Run /login to re-authenticate, then resend your message.")
+                .count(),
+            0,
+            "nested 401 while parent talks must not paint Run /login. painted={painted}"
+        );
     }
 
     /// Live nested 401: auth_kind=bearer, PermissionDenied, reason=no auth context.
@@ -831,6 +844,19 @@
             "live nested 401 with a Bearer and no auth context must not tell the Operator to /login while the parent turn still works"
         );
         assert_eq!(count_reauth_required(&scrollback), 0);
+        let painted = painted_session_and_system_text(&scrollback);
+        assert_eq!(
+            painted.matches("Authentication required:").count(),
+            0,
+            "live nested bearer 401 while parent talks must not paint Authentication required. painted={painted}"
+        );
+        assert_eq!(
+            painted
+                .matches("Run /login to re-authenticate, then resend your message.")
+                .count(),
+            0,
+            "live nested bearer 401 while parent talks must not paint Run /login. painted={painted}"
+        );
     }
 
     /// Operator: "Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"
@@ -994,6 +1020,20 @@
                 )
             })
             .count()
+    }
+
+    fn painted_session_and_system_text(scrollback: &ScrollbackState) -> String {
+        (0..scrollback.len())
+            .filter_map(|i| {
+                let block = &scrollback.get(i)?.block;
+                match block {
+                    RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                    RenderBlock::System(sys) => Some(sys.text.clone()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn auth_failed_retry() -> RetryState {
