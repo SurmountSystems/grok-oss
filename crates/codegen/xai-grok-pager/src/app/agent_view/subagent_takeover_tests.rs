@@ -213,6 +213,63 @@ fn blocking_subagent_takeover_ctrl_b_sends_to_background() {
     );
     assert!(child.hit_bg_button.rect.is_none());
 }
+/// A running nested specialist whose composer route is hidden must not
+/// capture a plain L1 composer key. The key lands in the L1 prompt in the
+/// same turn. Esc is not pressed. The specialist stays running.
+#[test]
+fn running_nested_takeover_does_not_capture_the_l1_composer() {
+    let registry = ActionRegistry::defaults();
+    let child_sid = "specialist-sid".to_string();
+    let mut parent = make_agent();
+    parent.active_pane = AgentPane::Prompt;
+    parent.vim_mode = false;
+    parent
+        .subagent_sessions
+        .insert(child_sid.clone(), running_subagent_info(&child_sid));
+    let mut child = make_agent();
+    child.session.state = crate::app::agent::AgentState::TurnRunning;
+    parent.insert_test_child(child_sid.clone(), Box::new(child));
+    {
+        let child = parent
+            .subagent_views
+            .get(&child_sid)
+            .unwrap_or_else(|| panic!("missing map entry"));
+        assert_eq!(
+            crate::app::agent_view::ComposerRoute::Hidden,
+            child.composer_route()
+        );
+    }
+    parent.open_subagent_fullscreen(child_sid.clone());
+    parent
+        .subagent_view_mut(&child_sid)
+        .unwrap_or_else(|| panic!("missing map entry"))
+        .session
+        .state = crate::app::agent::AgentState::TurnRunning;
+    assert!(
+        parent
+            .subagent_sessions
+            .get(&child_sid)
+            .is_some_and(|info| info.is_running()),
+        "the specialist must be running before the key"
+    );
+    let _ = parent.handle_input(&key(KeyCode::Char('h')), &registry);
+    assert_eq!(parent.prompt.text(), "h");
+    assert!(
+        parent
+            .subagent_sessions
+            .get(&child_sid)
+            .is_some_and(|info| info.is_running()),
+        "the specialist must still be running"
+    );
+    assert!(
+        parent
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|view| view.session.state.is_turn_running()),
+        "the specialist turn must still be running"
+    );
+    assert_eq!(parent.active_subagent.as_deref(), Some(child_sid.as_str()));
+}
 /// Every glyph in `area`, row by row.
 fn buffer_text(buf: &Buffer, area: Rect) -> String {
     (area.y..area.y + area.height)

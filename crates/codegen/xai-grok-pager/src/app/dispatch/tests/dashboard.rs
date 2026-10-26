@@ -2916,11 +2916,89 @@ fn roster_loaded_clears_dashboard_sessions_loading() {
     let _ = dispatch(
         Action::TaskComplete(TaskResult::RosterLoaded {
             sessions: vec![idle_roster_entry("sess-live", "Working agent")],
+            generation: 0,
         }),
         &mut app,
     );
     assert!(!app.dashboard_sessions_loading);
     assert_eq!(app.leader_roster.len(), 1);
+}
+/// After a newer `x.ai/sessions/changed` is on screen, completing an older in-flight
+/// `x.ai/sessions/list` (`RosterLoaded`) must leave that newer row in place.
+#[test]
+fn newer_sessions_changed_survives_an_older_roster_list_still_in_flight() {
+    let mut stamped = test_app();
+    stamped.leader_mode = true;
+    let mut newer = idle_roster_entry("sess-live", "Newer title");
+    newer.last_change_unix_ms = 1_000;
+    stamped.upsert_roster_entry(newer);
+    stamped.upsert_roster_entry(idle_roster_entry("sess-added", "Added by changed"));
+    stamped.leader_roster_generation = 5;
+    let mut older_but_later_clock = idle_roster_entry("sess-live", "Stale from list");
+    older_but_later_clock.last_change_unix_ms = 9_000;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::RosterLoaded {
+            sessions: vec![older_but_later_clock],
+            generation: 4,
+        }),
+        &mut stamped,
+    );
+    assert_eq!(
+        stamped.leader_roster_generation, 5,
+        "an older list must not rewind the stored generation"
+    );
+    assert_eq!(
+        stamped.leader_roster.len(),
+        2,
+        "an older list must not drop the session the newer event added"
+    );
+    let live = stamped
+        .leader_roster
+        .iter()
+        .find(|row| row.session_id == "sess-live");
+    let Some(live) = live else {
+        panic!("newer row missing: {:?}", stamped.leader_roster);
+    };
+    assert_eq!(live.title.as_deref(), Some("Newer title"));
+    assert_eq!(live.last_change_unix_ms, 1_000);
+
+    let mut unstamped = test_app();
+    unstamped.leader_mode = true;
+    let mut fresh = idle_roster_entry("sess-live", "Newer title");
+    fresh.last_change_unix_ms = 2_000;
+    unstamped.upsert_roster_entry(fresh);
+    let mut stale = idle_roster_entry("sess-live", "Stale title");
+    stale.last_change_unix_ms = 1_000;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::RosterLoaded {
+            sessions: vec![
+                stale,
+                idle_roster_entry("sess-from-list", "From the unstamped list"),
+            ],
+            generation: 0,
+        }),
+        &mut unstamped,
+    );
+    assert_eq!(
+        unstamped.leader_roster_generation, 0,
+        "generation 0 must not move the stored generation"
+    );
+    let live = unstamped
+        .leader_roster
+        .iter()
+        .find(|row| row.session_id == "sess-live");
+    let Some(live) = live else {
+        panic!("newer row missing: {:?}", unstamped.leader_roster);
+    };
+    assert_eq!(live.title.as_deref(), Some("Newer title"));
+    assert_eq!(live.last_change_unix_ms, 2_000);
+    assert!(
+        unstamped
+            .leader_roster
+            .iter()
+            .any(|row| row.session_id == "sess-from-list"),
+        "an unstamped list still applies rows that are not already newer on screen"
+    );
 }
 #[test]
 fn roster_failed_clears_dashboard_sessions_loading() {

@@ -108,6 +108,11 @@ impl ExternalRoster {
     pub(crate) fn changes(&self) -> watch::Receiver<u64> {
         self.inner.generation.subscribe()
     }
+
+    /// Current value of the same counter [`Self::changes`] watches.
+    pub(crate) fn generation(&self) -> u64 {
+        *self.inner.generation.borrow()
+    }
 }
 
 impl std::fmt::Debug for ExternalRoster {
@@ -190,7 +195,8 @@ impl RosterListMerge {
         if rows.is_empty() {
             return Cow::Borrowed(line);
         }
-        let Some(sessions) = list_sessions_mut(&mut json) else {
+        let generation = self.roster.generation();
+        let Some(sessions) = list_sessions_mut(&mut json, generation) else {
             return Cow::Borrowed(line);
         };
         sessions.extend(
@@ -251,7 +257,8 @@ impl RosterListMerge {
 
 /// `result.result.sessions` (the `ExtMethodResult` envelope) or the bare `result.sessions`;
 /// `None` for an errored response or a body of neither shape.
-fn list_sessions_mut(json: &mut Value) -> Option<&mut Vec<Value>> {
+/// When the sessions array is present, stamps `generation` on that same object.
+fn list_sessions_mut(json: &mut Value, generation: u64) -> Option<&mut Vec<Value>> {
     let result = json.get_mut("result")?.as_object_mut()?;
     if result.get("error").is_some_and(|error| !error.is_null()) {
         return None;
@@ -261,16 +268,21 @@ fn list_sessions_mut(json: &mut Value) -> Option<&mut Vec<Value>> {
     } else {
         result
     };
+    body.insert("generation".to_owned(), Value::from(generation));
     body.get_mut("sessions")?.as_array_mut()
 }
 
 /// The `x.ai/sessions/changed` line for a roster change, shaped like the agent's own
 /// broadcast (`_`-prefixed method, bare params).
-pub(crate) fn changed_notification(upserted: Vec<RosterEntry>, removed: Vec<String>) -> String {
+pub(crate) fn changed_notification(
+    upserted: Vec<RosterEntry>,
+    removed: Vec<String>,
+    generation: u64,
+) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": format!("_{SESSIONS_CHANGED_METHOD}"),
-        "params": RosterChanged { upserted, removed },
+        "params": RosterChanged { upserted, removed, generation },
     })
     .to_string()
 }
@@ -284,6 +296,7 @@ pub(crate) async fn run_changed_notifier(roster: ExternalRoster, mut sink: impl 
     changes.mark_changed();
     let mut known: HashMap<String, RosterEntry> = HashMap::new();
     while changes.changed().await.is_ok() {
+        let generation = *changes.borrow();
         let rows = roster.rows();
         let removed: Vec<String> = known
             .keys()
@@ -302,7 +315,7 @@ pub(crate) async fn run_changed_notifier(roster: ExternalRoster, mut sink: impl 
         if upserted.is_empty() && removed.is_empty() {
             continue;
         }
-        sink(changed_notification(upserted, removed));
+        sink(changed_notification(upserted, removed, generation));
     }
 }
 

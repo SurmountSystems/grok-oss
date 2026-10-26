@@ -539,6 +539,61 @@ fn authenticated_401s_still_exhaust_after_three_retries() {
     });
 }
 
+/// The exhaust sentence prints the rejection count as `MAX_RETRIES + 1` and the retry cap as the `MAX_RETRIES` constant.
+/// Those two digits are format arguments in the failure text.
+/// They are not the HTTP send count and not the Retrying update fields.
+#[test]
+fn exhaust_sentence_prints_rejection_count_and_retry_cap() {
+    on_session_stack(|| {
+        run_current_thread(true, || async {
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                "never-issued-token",
+            )
+            .await
+            .expect("mock inference server");
+
+            let refresher = Arc::new(WakeGapRefresher {
+                calls: Arc::new(AtomicU32::new(0)),
+                fail_pre_request: false,
+                mint_ttl: chrono::Duration::hours(1),
+            });
+            let (_dir, am) = expired_auth_manager(refresher);
+            let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
+
+            let outcome = run_prompt_with_cap(&actor, "auth-retry-printed-counts", 86_400).await;
+            let err = outcome.expect_err("the printed exhaust sentence is on the failed turn");
+            let rendered = serde_json::to_string(&err.data).unwrap_or_default();
+            let painted = terminal_failure(&updates)
+                .map(|(_, message)| message)
+                .unwrap_or_default();
+
+            let rejection_count = AuthRetrySchedule::MAX_RETRIES + 1;
+            let retry_cap = AuthRetrySchedule::MAX_RETRIES;
+            let printed_rejections = format!(
+                "{rejection_count} authenticated inference requests were still rejected (401)"
+            );
+            let printed_cap = format!("giving up after {retry_cap} retries");
+            assert!(
+                rendered.contains(&printed_rejections),
+                "the error must print the rejection count as MAX_RETRIES + 1, got: {rendered}"
+            );
+            assert!(
+                rendered.contains(&printed_cap),
+                "the error must print the retry cap as the MAX_RETRIES constant, got: {rendered}"
+            );
+            assert!(
+                painted.contains(&printed_rejections),
+                "the terminal notification must print the rejection count as MAX_RETRIES + 1, got: {painted}"
+            );
+            assert!(
+                painted.contains(&printed_cap),
+                "the terminal notification must print the retry cap as the MAX_RETRIES constant, got: {painted}"
+            );
+        });
+    });
+}
+
 /// Refresh-outage refresher: every refresh fails transiently, counting `ServerRejected` and
 /// `PreRequest` attempts so tests pin that parked cycles dispatch neither. Recovery arrives
 /// out-of-band (hot_swap + notify), the way production recovers.

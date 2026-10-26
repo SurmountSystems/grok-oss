@@ -478,6 +478,7 @@ impl acp::Agent for MvpAgent {
                 &crate::util::config::AuthorizeAskDocument {
                     authorized: true,
                     permission_mode,
+                    event_ms: crate::util::config::authorize_ask_event_ms(),
                 },
             );
         }

@@ -53,6 +53,40 @@ pub(super) fn leftover_viewport_wait_label(
     }
 }
 
+/// The status row already paints `Waiting for the model…` (plus the timer).
+/// The leftover transcript line must not paint that same string on the same turn.
+pub(super) fn status_row_shows_model_wait(
+    status_row_visible: bool,
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+) -> bool {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    status_row_visible && matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model)))
+}
+
+pub(super) fn leftover_model_wait_is_duplicate(label: &str, status_shows_model_wait: bool) -> bool {
+    status_shows_model_wait && label.contains("Waiting for the model")
+}
+
+/// One turn, one `Waiting for the model` line. Status row wins when it is up.
+/// Leftover is the line only when the status row is not showing that wait.
+pub(super) fn compose_waiting_for_model_lines(
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+    status_shows_model_wait: bool,
+) -> Vec<String> {
+    use crate::acp::tracker::WaitingReason;
+    let mut lines = Vec::new();
+    if status_shows_model_wait {
+        lines.push(WaitingReason::Model.label());
+    }
+    if let Some(label) = leftover_viewport_wait_label(activity)
+        && label.contains("Waiting for the model")
+        && !leftover_model_wait_is_duplicate(&label, status_shows_model_wait)
+    {
+        lines.push(label);
+    }
+    lines
+}
+
 /// Paint `label` on the first empty row under the last occupied row.
 /// A second call sees the label and does not add another line.
 fn paint_leftover_viewport_wait(buf: &mut Buffer, area: Rect, label: &str, style: Style) {
@@ -2415,8 +2449,19 @@ impl AgentView {
             sticky_gap_row = sb_output.sticky_gap_row;
             if !self.global_work_paused && !in_dashboard_overlay {
                 let activity = self.resolve_turn_activity();
+                let goal_verifying = self
+                    .goal_state
+                    .as_ref()
+                    .is_some_and(|g| g.verifying_completion);
+                let status_shows_model_wait = status_row_shows_model_wait(
+                    turn_status_height > 0
+                        && self.plan_loop_status_label().is_none()
+                        && !goal_verifying,
+                    &activity,
+                );
                 if let Some(label) = leftover_viewport_wait_label(&activity)
                     && !self.painted_assistant_reply_without_in_flight_sample()
+                    && !leftover_model_wait_is_duplicate(&label, status_shows_model_wait)
                 {
                     let pad = HorizontalLayout::ACCENT.saturating_add(2);
                     let wait_area = Rect {

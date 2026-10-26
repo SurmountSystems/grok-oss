@@ -657,6 +657,9 @@ pub struct AppView {
     /// Populated from `x.ai/sessions/list` polls and `x.ai/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which gates roster rendering.
     pub leader_roster: Vec<crate::app::roster::RosterEntry>,
+    /// Highest applied stamped roster generation (`x.ai/sessions/changed` or `x.ai/sessions/list`).
+    /// `0` means no stamped event has been applied. An older non-zero generation is ignored.
+    pub leader_roster_generation: u64,
     /// Local on-disk session list (dormant/idle sessions) shown on the dashboard when NOT in leader mode.
     /// There is no live leader roster to poll outside leader mode.
     /// We fetch the same `x.ai/session/list` the resume picker uses and render those as idle rows.
@@ -970,6 +973,9 @@ pub struct AppView {
     pub auth_methods: Vec<acp::AuthMethod>,
     /// Authentication state for the welcome screen login flow.
     pub auth_state: AuthState,
+    /// Newest applied authorize IPC unix-ms stamp. Auth IPC only.
+    /// A `0` stamp is not an authorize: it does not enqueue and does not replace a stored stamp.
+    pub newest_applied_authorize_event_ms: u64,
     /// Set by `/logout` until the shell answers, while `auth_state` still reads `Done`
     pub logout_pending: bool,
     /// Folder-trust state for the welcome screen.
@@ -1573,6 +1579,7 @@ impl AppView {
             bootstrap_acp_commands,
             auth_methods: Vec::new(),
             auth_state: AuthState::Done,
+            newest_applied_authorize_event_ms: 0,
             logout_pending: false,
             trust_state: TrustState::Done,
             consent_state: crate::app::consent::ConsentState::Done,
@@ -1648,6 +1655,7 @@ impl AppView {
             auto_topup: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
+            leader_roster_generation: 0,
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
             workspace_membership: Default::default(),
@@ -1976,6 +1984,9 @@ impl AppView {
             .iter_mut()
             .find(|e| e.session_id == entry.session_id)
         {
+            if existing.last_change_unix_ms > entry.last_change_unix_ms {
+                return;
+            }
             *existing = entry;
         } else {
             self.leader_roster.push(entry);

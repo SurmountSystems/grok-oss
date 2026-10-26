@@ -4,8 +4,8 @@
 //! It also carries recently-touched on-disk (`Dormant`) sessions.
 //! Clients read it two ways:
 //!
-//!   - request/response `x.ai/sessions/list` returns `{ "sessions": [RosterEntry, …] }`
-//!   - broadcast notification `x.ai/sessions/changed` carries `{ "upserted": [RosterEntry, …], "removed": ["sess-abc", …] }`
+//!   - request/response `x.ai/sessions/list` returns `{ "sessions": [RosterEntry, …], "generation": N }`
+//!   - broadcast notification `x.ai/sessions/changed` carries `{ "upserted": [RosterEntry, …], "removed": ["sess-abc", …], "generation": N }`
 //!
 //! The wire shape is intentionally small and current-state only; no event fold or materialized snapshot is required (the snapshot is deferred).
 
@@ -81,6 +81,10 @@ pub struct RosterEntry {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RosterListResponse {
     pub sessions: Vec<RosterEntry>,
+    /// Monotone counter shared with `x.ai/sessions/changed`.
+    /// `0` means this sender did not stamp the message.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Params payload for the `x.ai/sessions/changed` broadcast notification.
@@ -90,6 +94,9 @@ pub struct RosterChanged {
     pub upserted: Vec<RosterEntry>,
     #[serde(default)]
     pub removed: Vec<String>,
+    /// Same counter as [`RosterListResponse::generation`]. `0` means unstamped.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// JSON-RPC method names for the roster API.

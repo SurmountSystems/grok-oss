@@ -1386,7 +1386,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SiblingIpcAuthorize {
             authorized,
             permission_mode,
-        } => handle_sibling_ipc_authorize(app, authorized, permission_mode),
+            event_ms,
+        } => handle_sibling_ipc_authorize(app, authorized, permission_mode, event_ms),
         Action::ConnectingSplashTimeout => dispatch_connecting_splash_timeout(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),

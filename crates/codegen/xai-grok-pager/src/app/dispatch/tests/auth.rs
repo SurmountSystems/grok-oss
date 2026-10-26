@@ -251,6 +251,85 @@ fn auth_complete_triggers_bundle_status_fetch() {
     );
 }
 
+/// A successful login starts the included SuperGrok period limits refresh
+/// immediately. That refresh is not `FetchAppBilling { nonce: 0 }`, which
+/// sends empty `x.ai/billing` params and still waits inside one minute.
+#[test]
+fn successful_login_starts_included_period_limits_refresh_while_a_debounced_refresh_is_still_inside_its_wait()
+ {
+    fn assert_immediate_included_period_refresh(effects: &[Effect]) {
+        assert!(
+            effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    Effect::FetchIncludedPeriodLimitsOnLogin { nonce: 0 }
+                )
+            }),
+            "login must start the included SuperGrok period limits refresh immediately, got {effects:?}"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::FetchBundleStatus)),
+            "login still requests bundle status, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::FetchAppBilling { nonce: 0 })),
+            "that refresh is not FetchAppBilling nonce 0, which sends empty x.ai/billing params, got {effects:?}"
+        );
+    }
+
+    let mut authenticating = test_app();
+    authenticating.usage_visible = false;
+    authenticating.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+        }),
+        &mut authenticating,
+    );
+    assert!(matches!(authenticating.auth_state, AuthState::Done));
+    assert_immediate_included_period_refresh(&effects);
+
+    let mut mid_session = test_app();
+    mid_session.usage_visible = false;
+    mid_session.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    mid_session.auth_return_view = Some(ActiveView::Welcome);
+    let mid_effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+        }),
+        &mut mid_session,
+    );
+    assert_immediate_included_period_refresh(&mid_effects);
+
+    let mut already_done = test_app();
+    already_done.usage_visible = false;
+    already_done.auth_state = AuthState::Done;
+    let done_effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+        }),
+        &mut already_done,
+    );
+    assert_immediate_included_period_refresh(&done_effects);
+}
+
 #[test]
 fn auth_complete_with_deferred_load_also_fetches_status() {
     let mut app = test_app();
@@ -1011,6 +1090,100 @@ fn credentials_toast_and_waiting_for_the_model_after_auth_resumes_the_waiting_tu
     );
 }
 
+/// Operator 2026-10-25: "Waiting for the model" is visible twice, and right
+/// after login the turn is not proceeding.
+/// Login success, one wait line for that turn, and the queued prompt is submitted.
+#[test]
+fn after_login_one_turn_paints_waiting_for_the_model_once_and_submits_the_waiting_prompt() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::SessionEvent;
+
+    let waiting = "the prompt that was waiting after login";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-one-wait-after-login"));
+        agent.parent_sampler_jwt = Some(PARENT_SAMPLER_CURRENT_API_KEY.to_string());
+        agent.reauth_stashed_prompt = None;
+        agent.session.in_flight_prompt = None;
+        agent.session.enqueue_prompt(waiting.into());
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+                elapsed: Some(std::time::Duration::from_secs(68)),
+            }));
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 52,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 52,
+            meta: Some(serde_json::json!({
+                "recoveredBearerJwt": PARENT_SAMPLER_CURRENT_API_KEY,
+                "parentSamplerJwt": PARENT_SAMPLER_CURRENT_API_KEY
+            })),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(app.auth_state, AuthState::Done),
+        "login success is AuthState::Done, got {:?}",
+        app.auth_state
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id,
+                text,
+                recovered_bearer: true,
+                recovered_bearer_jwt: Some(jwt),
+                ..
+            } if session_id.0.as_ref() == "sess-one-wait-after-login"
+                && text == waiting
+                && jwt == PARENT_SAMPLER_CURRENT_API_KEY
+        )),
+        "after login the waiting prompt must be submitted, got: {effects:?}"
+    );
+    let agent = test_agent(&app, id);
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "the waiting prompt must leave the queue once it is submitted, pending={:?}",
+        agent
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    let lines = agent.on_screen_waiting_for_model_lines();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one post-login turn paints Waiting for the model once, got {lines:?}"
+    );
+    assert!(
+        lines[0].contains("Waiting for the model"),
+        "the one line must be the model wait, got {lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("Waiting for the model"))
+            .count(),
+        1,
+        "must not paint Waiting for the model twice, got {lines:?}"
+    );
+}
+
 const RUN_LOGIN_NAG: &str = "Run /login to re-authenticate, then resend your message.";
 
 /// Already-open L1 / running pager with expired credentials receives sibling IPC authorize,
@@ -1043,13 +1216,15 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
             Effect::PublishAuthorizeAsk {
                 authorized: true,
                 permission_mode,
+                event_ms,
             } if !permission_mode.is_empty()
+                && *event_ms > 0
                 && !permission_mode.contains("eyJ")
                 && !permission_mode.contains("Bearer")
                 && !permission_mode.contains("sk-")
                 && permission_mode != "expired-stale-jwt"
         )),
-        "login success in one process must live-publish IPC {{authorized, permission_mode}} and never tokens. got: {publish:?}"
+        "login success in one process must live-publish IPC {{authorized, permission_mode, event_ms}} and never tokens. got: {publish:?}"
     );
     let published_docs: Vec<xai_grok_shell::util::config::AuthorizeAskDocument> = publish
         .iter()
@@ -1057,9 +1232,11 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
             Effect::PublishAuthorizeAsk {
                 authorized,
                 permission_mode,
+                event_ms,
             } => Some(xai_grok_shell::util::config::AuthorizeAskDocument {
                 authorized: *authorized,
                 permission_mode: permission_mode.clone(),
+                event_ms: *event_ms,
             }),
             _ => None,
         })
@@ -1074,8 +1251,10 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
         let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["authorized", "permission_mode"].into_iter().collect(),
-            "IPC document must be {{authorized, permission_mode}}, never tokens. json={json}"
+            ["authorized", "event_ms", "permission_mode"]
+                .into_iter()
+                .collect(),
+            "IPC document must be {{authorized, permission_mode, event_ms}}, never tokens. json={json}"
         );
         assert!(obj.get("jwt").is_none());
         assert!(obj.get("api_key").is_none());
@@ -1118,6 +1297,8 @@ fn already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reload
         Action::SiblingIpcAuthorize {
             authorized: true,
             permission_mode: "ask".into(),
+            // A missing stamp (event_ms 0) is not an authorize.
+            event_ms: 1_700,
         },
         &mut app,
     );
@@ -1218,6 +1399,8 @@ fn after_login_succeeds_the_waiting_prompt_is_submitted_and_run_login_is_not_pai
         Action::SiblingIpcAuthorize {
             authorized: true,
             permission_mode: "ask".into(),
+            // A missing stamp (event_ms 0) is not an authorize.
+            event_ms: 1_700,
         },
         &mut app,
     );
@@ -1301,6 +1484,8 @@ fn sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth() {
         Action::SiblingIpcAuthorize {
             authorized: true,
             permission_mode: "ask".into(),
+            // A missing stamp (event_ms 0) is not an authorize. This case is a real stamp.
+            event_ms: 1_800,
         },
         &mut app,
     );
@@ -1329,6 +1514,327 @@ fn sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth() {
         !scrollback_text.contains(RUN_LOGIN_NAG) && !scrollback_text.contains("/login"),
         "sibling IPC authorize must not tell the Operator to /login when this L1 does not need reauth. scrollback={scrollback_text}"
     );
+}
+
+fn open_l1_needing_sibling_reauth(session_id: &str, prompt: &str) -> AppView {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new(session_id));
+        agent.parent_sampler_jwt = Some("expired-stale-jwt".into());
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: prompt.into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(11),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Pending { error: None };
+    app.newest_applied_authorize_event_ms = 0;
+    app
+}
+
+fn waiting_prompt_was_resent(effects: &[Effect], session_id: &str, text: &str) -> bool {
+    effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::UnstickResendPrompt {
+                session_id: sid,
+                text: sent,
+                recovered_bearer: true,
+                recovered_bearer_jwt: None,
+                ..
+            } if sid.0.as_ref() == session_id && sent == text
+        ) || matches!(
+            e,
+            Effect::SendPrompt {
+                session_id: sid,
+                text: sent,
+                ..
+            } if sid.0.as_ref() == session_id && sent == text
+        )
+    })
+}
+
+/// A delayed ask can still carry an older snapshot. The newest event_ms wins.
+/// An older true must not resend over a newer false. An older false must not
+/// schedule another 400ms ask over a newer true that already resent.
+/// Neither payload paints Run /login.
+#[test]
+fn newer_sibling_ipc_authorize_wins_over_an_older_debounced_snapshot() {
+    let session_id = "sess-open-l1-newer-stamp";
+    let prompt = "waiting prompt after sibling login";
+    let mut app = open_l1_needing_sibling_reauth(session_id, prompt);
+    let id = AgentId(0);
+    let newer_false = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: false,
+            permission_mode: "ask".into(),
+            event_ms: 2_000,
+        },
+        &mut app,
+    );
+    assert!(
+        newer_false
+            .iter()
+            .any(|e| matches!(e, Effect::AskSiblingAuthorize { delay_ms: 400 })),
+        "a newer unauthorized snapshot still asks again while reauth is open. got: {newer_false:?}"
+    );
+    assert!(
+        !waiting_prompt_was_resent(&newer_false, session_id, prompt),
+        "a newer unauthorized snapshot must not resend. got: {newer_false:?}"
+    );
+    assert_eq!(app.newest_applied_authorize_event_ms, 2_000);
+    assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some("expired-stale-jwt"),
+    );
+    assert_eq!(
+        test_agent(&app, id)
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some(prompt),
+    );
+
+    let older_true = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 1_000,
+        },
+        &mut app,
+    );
+    assert!(
+        older_true.is_empty(),
+        "an older authorized snapshot must not resend, must not schedule another ask, and must not change auth. got: {older_true:?}"
+    );
+    assert!(
+        !waiting_prompt_was_resent(&older_true, session_id, prompt),
+        "an older true must not run the resend. got: {older_true:?}"
+    );
+    assert_eq!(
+        app.newest_applied_authorize_event_ms, 2_000,
+        "an older stamp must not clear the newer decision"
+    );
+    assert!(
+        matches!(app.auth_state, AuthState::Pending { error: None }),
+        "an older true must not mark auth done"
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some("expired-stale-jwt"),
+        "an older true must not drop the stale pager JWT"
+    );
+    assert_eq!(
+        test_agent(&app, id)
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some(prompt),
+        "an older true must not take the waiting prompt"
+    );
+    assert_eq!(
+        painted_login_nag_count(test_agent(&app, id)),
+        0,
+        "an older snapshot must not paint Run /login to re-authenticate, then resend your message."
+    );
+
+    let true_session = "sess-open-l1-newer-true";
+    let true_prompt = "waiting prompt the newer true already resent";
+    let mut resent = open_l1_needing_sibling_reauth(true_session, true_prompt);
+    let newer_true = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 5_000,
+        },
+        &mut resent,
+    );
+    assert!(
+        waiting_prompt_was_resent(&newer_true, true_session, true_prompt),
+        "a newer true still reloads the shared store and resends. got: {newer_true:?}"
+    );
+    assert_eq!(resent.newest_applied_authorize_event_ms, 5_000);
+    assert!(matches!(resent.auth_state, AuthState::Done));
+    assert!(test_agent(&resent, id).parent_sampler_jwt.is_none());
+    assert!(test_agent(&resent, id).reauth_stashed_prompt.is_none());
+
+    {
+        let agent = resent.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "still waiting after the newer true".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(12),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    let older_false = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: false,
+            permission_mode: "ask".into(),
+            event_ms: 1_000,
+        },
+        &mut resent,
+    );
+    assert!(
+        older_false.is_empty(),
+        "an older false must not schedule another 400ms ask after a newer true already resent. got: {older_false:?}"
+    );
+    assert!(
+        older_false
+            .iter()
+            .all(|e| !matches!(e, Effect::AskSiblingAuthorize { .. })),
+        "an older false must not schedule AskSiblingAuthorize. got: {older_false:?}"
+    );
+    assert_eq!(resent.newest_applied_authorize_event_ms, 5_000);
+    assert!(matches!(resent.auth_state, AuthState::Done));
+    assert_eq!(
+        test_agent(&resent, id)
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("still waiting after the newer true"),
+        "an older false must not clear the newer true"
+    );
+    assert_eq!(
+        painted_login_nag_count(test_agent(&resent, id)),
+        0,
+        "an older false must not paint Run /login to re-authenticate, then resend your message."
+    );
+}
+
+/// A missing stamp is not an authorize. `event_ms` 0 against a stored 0 must
+/// not enqueue the waiting prompt and must not replace a stored stamp.
+/// A newer non-zero stamp still applies and may enqueue.
+/// An older non-zero stamp still returns no effects.
+/// Neither payload paints Run /login.
+#[test]
+fn zero_event_ms_against_stored_zero_does_not_enqueue_the_waiting_prompt() {
+    let session_id = "sess-open-l1-zero-stamp";
+    let prompt = "waiting prompt must stay when the stamp is missing";
+    let mut app = open_l1_needing_sibling_reauth(session_id, prompt);
+    let id = AgentId(0);
+    assert_eq!(app.newest_applied_authorize_event_ms, 0);
+
+    let missing = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 0,
+        },
+        &mut app,
+    );
+    assert!(
+        missing.iter().all(|e| !matches!(
+            e,
+            Effect::UnstickResendPrompt { .. } | Effect::SendPrompt { .. }
+        )),
+        "event_ms 0 against a stored 0 must not push a prompt enqueue. got: {missing:?}"
+    );
+    assert!(
+        !waiting_prompt_was_resent(&missing, session_id, prompt),
+        "event_ms 0 against a stored 0 must not resend the waiting prompt. got: {missing:?}"
+    );
+    assert!(
+        missing.is_empty(),
+        "event_ms 0 against a stored 0 must return no effects. got: {missing:?}"
+    );
+    assert_eq!(
+        app.newest_applied_authorize_event_ms, 0,
+        "event_ms 0 must not write a stamp when the store is already 0"
+    );
+    assert!(
+        matches!(app.auth_state, AuthState::Pending { error: None }),
+        "event_ms 0 must not mark auth done"
+    );
+    assert_eq!(
+        test_agent(&app, id).parent_sampler_jwt.as_deref(),
+        Some("expired-stale-jwt"),
+        "event_ms 0 must not drop the stale pager JWT"
+    );
+    assert_eq!(
+        test_agent(&app, id)
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some(prompt),
+        "event_ms 0 must not take the waiting prompt"
+    );
+    assert_eq!(
+        painted_login_nag_count(test_agent(&app, id)),
+        0,
+        "event_ms 0 must not paint Run /login to re-authenticate, then resend your message."
+    );
+
+    app.newest_applied_authorize_event_ms = 4_000;
+    let zero_over_real = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 0,
+        },
+        &mut app,
+    );
+    assert!(
+        zero_over_real.is_empty(),
+        "event_ms 0 must not replace a stored non-zero stamp or enqueue. got: {zero_over_real:?}"
+    );
+    assert_eq!(
+        app.newest_applied_authorize_event_ms, 4_000,
+        "event_ms 0 must not replace a stored non-zero stamp"
+    );
+    assert_eq!(
+        test_agent(&app, id)
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some(prompt),
+        "event_ms 0 must not take the waiting prompt off a stored non-zero stamp"
+    );
+
+    let newer = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 5_000,
+        },
+        &mut app,
+    );
+    assert!(
+        waiting_prompt_was_resent(&newer, session_id, prompt),
+        "a newer non-zero stamp still applies and may enqueue. got: {newer:?}"
+    );
+    assert_eq!(app.newest_applied_authorize_event_ms, 5_000);
+    assert!(matches!(app.auth_state, AuthState::Done));
+    assert_eq!(
+        painted_login_nag_count(test_agent(&app, id)),
+        0,
+        "a newer non-zero stamp must not paint Run /login to re-authenticate, then resend your message."
+    );
+
+    let older = dispatch(
+        Action::SiblingIpcAuthorize {
+            authorized: true,
+            permission_mode: "ask".into(),
+            event_ms: 1_000,
+        },
+        &mut app,
+    );
+    assert!(
+        older.is_empty(),
+        "an older non-zero stamp must still return no effects. got: {older:?}"
+    );
+    assert_eq!(app.newest_applied_authorize_event_ms, 5_000);
 }
 
 /// Live parent sampler JWT (`parent_sampler_handle.current_api_key()`). Nested recoveredBearer

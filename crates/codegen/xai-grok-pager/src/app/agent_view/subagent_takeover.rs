@@ -545,6 +545,10 @@ impl AgentView {
             inner.y = inner.y.saturating_add(1);
             inner.height = inner.height.saturating_sub(1);
         }
+        let l1_composer_band = self.l1_composer_band_for_running_hidden_takeover(child_sid, inner);
+        if let Some(band) = l1_composer_band {
+            inner.height = inner.height.saturating_sub(band.height);
+        }
         if inner.width > 5
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
@@ -581,7 +585,91 @@ impl AgentView {
         }
         self.record_overlay_specialist_status_hit(buf, area, child_sid, reserved_wait_row);
         self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
+        if let Some(band) = l1_composer_band {
+            self.paint_l1_composer_under_takeover(buf, band);
+        }
         (child_cursor, child_post_flush)
+    }
+
+    /// Registry row still running, and the open view has no composer route.
+    /// That is the specialist case where the takeover would otherwise be the only typer.
+    fn running_hidden_specialist(&self, child_sid: &str) -> bool {
+        let hidden = self
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::Hidden);
+        hidden
+            && self
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| info.is_running())
+    }
+
+    /// Plain typing keys are not takeover input while that specialist runs.
+    /// Bare `q` stays on the close path. Ctrl+B is not a text key.
+    fn plain_key_reaches_l1_while_hidden_specialist_runs(
+        &self,
+        key: Option<&crossterm::event::KeyEvent>,
+        child_sid: &str,
+    ) -> bool {
+        let Some(key) = key else {
+            return false;
+        };
+        if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
+            return false;
+        }
+        if !crate::input::key::is_text_input_key(key) {
+            return false;
+        }
+        self.running_hidden_specialist(child_sid)
+    }
+
+    /// One row under the child, inside the frame, only while the L1 composer
+    /// would otherwise be absent. The child keeps `inner.height > 3`.
+    fn l1_composer_band_for_running_hidden_takeover(
+        &self,
+        child_sid: &str,
+        inner: Rect,
+    ) -> Option<Rect> {
+        if !self.running_hidden_specialist(child_sid) {
+            return None;
+        }
+        let height: u16 = 1;
+        if inner.width < 4 || inner.height <= 3u16.saturating_add(height) {
+            return None;
+        }
+        Some(Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(inner.height).saturating_sub(height),
+            width: inner.width,
+            height,
+        })
+    }
+
+    fn paint_l1_composer_under_takeover(&mut self, buf: &mut Buffer, band: Rect) {
+        use crate::views::prompt_widget::{PromptBg, PromptStyle};
+        let style = PromptStyle {
+            focused: true,
+            show_prefix: true,
+            vpad_top: 0,
+            chrome: false,
+            chrome_pad_left: 0,
+            chrome_pad_right: 0,
+            bg: PromptBg::Default,
+            accent_color_override: None,
+            border_color_override: None,
+            prefix_override: None,
+            placeholder_override: None,
+            placeholder_when_focused: false,
+            hide_idle_placeholder: true,
+            compact: true,
+            show_accent_line: false,
+            show_borders: false,
+            title: None,
+            title_reserve_right: 0,
+            image_preview: false,
+        };
+        let _ = self.prompt.draw(buf, band, None, &style, None, None);
     }
 
     /// The specialist status the L2 overlay just painted is a click target.
@@ -822,9 +910,11 @@ impl AgentView {
         }
         Some(info.subagent_id.to_string())
     }
-    /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
-    /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
-    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, idle-quote, forward + filter.
+    /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise input goes to the
+    /// child view, except a plain typing key while a hidden-route specialist is still running: that key returns
+    /// `None` so the L1 prompt inserts it in this turn. `q`/`Esc` from bare scrollback still close the view.
+    /// Ctrl+Q always bubbles to the global quit. Ctrl+B still forwards so send-to-background can emit.
+    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, plain L1 key, idle-quote, forward + filter.
     pub(super) fn intercept_takeover_input(
         &mut self,
         ev: &Event,
@@ -931,6 +1021,9 @@ impl AgentView {
                     return Some(InputOutcome::Changed);
                 }
             }
+        }
+        if self.plain_key_reaches_l1_while_hidden_specialist_runs(key, &child_sid) {
+            return None;
         }
         let child_quote = key.and_then(|key| {
             self.subagent_views

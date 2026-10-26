@@ -112,9 +112,10 @@ pub use limits_snapshot_hub::{
     LimitsSnapshotRole, POLL_OUTCOME_AUTH, POLL_OUTCOME_NETWORK, POLL_OUTCOME_NEVER,
     POLL_OUTCOME_OK, POLL_OUTCOME_OTHER, SNAPSHOT_FILE_NAME, SNAPSHOT_LOCK_FILE_NAME, SNAPSHOT_TTL,
     SNAPSHOT_TTL_SECS, apply_limits_snapshot, coordinate_limits_snapshot,
-    fetch_management_into_snapshot, read_limits_snapshot_file, select_team_prepaid_meter,
-    shared_limits_snapshot_disabled, should_also_call_management_prepaid_balance,
-    snapshot_is_stale, snapshot_json_contains_secrets, write_limits_snapshot_file,
+    coordinate_limits_snapshot_immediate, fetch_management_into_snapshot,
+    read_limits_snapshot_file, select_team_prepaid_meter, shared_limits_snapshot_disabled,
+    should_also_call_management_prepaid_balance, snapshot_is_stale, snapshot_json_contains_secrets,
+    write_limits_snapshot_file,
 };
 pub use manager::{AuthManager, shared_api_key_provider};
 pub(crate) use manager::{AuthRemedy, SilentRefresh};

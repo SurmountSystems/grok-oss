@@ -66,6 +66,9 @@ pub struct RosterEntry {
 pub struct RosterListResponse {
     #[serde(default)]
     pub sessions: Vec<RosterEntry>,
+    /// Monotone roster counter. `0` means the sender did not stamp the message.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Broadcast payload for `x.ai/sessions/changed`.
@@ -75,6 +78,9 @@ pub struct RosterChanged {
     pub upserted: Vec<RosterEntry>,
     #[serde(default)]
     pub removed: Vec<String>,
+    /// Same counter as [`RosterListResponse::generation`]. `0` means unstamped.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Parse an `x.ai/sessions/list` ext-response body into a [`RosterListResponse`].
@@ -120,6 +126,7 @@ mod tests {
 
         let agent_resp = agent::RosterListResponse {
             sessions: vec![agent_entry()],
+            generation: 0,
         };
 
         // Exact wire bytes the agent emits for `x.ai/sessions/list`.
@@ -190,6 +197,7 @@ mod tests {
         };
         let ext_response = ExtMethodResult::success(agent::RosterListResponse {
             sessions: vec![agent_entry(), cursor_row],
+            generation: 0,
         })
         .to_ext_response()
         .expect("agent serializes the roster response");
@@ -227,6 +235,7 @@ mod tests {
         let agent_changed = agent::RosterChanged {
             upserted: vec![agent_entry()],
             removed: vec!["sess-gone".to_string()],
+            generation: 9,
         };
         // `emit_roster_changed` serializes the bare payload (no envelope).
         let params = serde_json::to_string(&agent_changed).expect("serialize RosterChanged");
@@ -240,5 +249,9 @@ mod tests {
         assert_eq!(upserted.session_id, "sess-abc");
         assert_eq!(upserted.activity, RosterActivity::Working);
         assert_eq!(parsed.removed, vec!["sess-gone".to_string()]);
+        assert_eq!(
+            parsed.generation, 9,
+            "generation must survive the round trip"
+        );
     }
 }

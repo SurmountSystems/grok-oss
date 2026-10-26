@@ -424,6 +424,12 @@ pub(super) fn handle_sessions_changed(notif: &acp::ExtNotification, app: &mut Ap
         tracing::warn!("Failed to parse x.ai/sessions/changed");
         return false;
     };
+    if changed.generation > 0 && changed.generation < app.leader_roster_generation {
+        return false;
+    }
+    if changed.generation > 0 {
+        app.leader_roster_generation = changed.generation;
+    }
     let mut affected = false;
     for entry in changed.upserted {
         app.upsert_roster_entry(entry);

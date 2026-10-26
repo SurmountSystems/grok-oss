@@ -1834,6 +1834,28 @@ impl AgentView {
         }
         Some(TurnActivity::Waiting(WaitingReason::Model))
     }
+    /// Lines this turn paints that say `Waiting for the model`.
+    /// The status row is the one line when it is visible. The leftover
+    /// transcript row is not a second copy of that string.
+    pub(crate) fn on_screen_waiting_for_model_lines(&self) -> Vec<String> {
+        let activity = self.resolve_turn_activity();
+        let status_visible = crate::views::turn_status::should_show(
+            &self.session.state,
+            self.drain_blocked(),
+            self.session_starting_since,
+            self.watchers(),
+            self.renders_parked(),
+        );
+        let goal_verifying = self
+            .goal_state
+            .as_ref()
+            .is_some_and(|g| g.verifying_completion);
+        let status_shows = super::render::status_row_shows_model_wait(
+            status_visible && self.plan_loop_status_label().is_none() && !goal_verifying,
+            &activity,
+        );
+        super::render::compose_waiting_for_model_lines(&activity, status_shows)
+    }
     /// How chrome should read an open turn's wait.
     ///
     /// Live nested wait, live sampler wait, and false wait after nested

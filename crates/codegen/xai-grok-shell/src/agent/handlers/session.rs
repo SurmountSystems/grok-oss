@@ -47,9 +47,13 @@ async fn handle_roster_list(
     _args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
     let sessions = agent.build_roster().await;
-    ExtMethodResult::success(crate::agent::roster::RosterListResponse { sessions })
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+    ExtMethodResult::success(crate::agent::roster::RosterListResponse {
+        sessions,
+        // The agent list is not the external-roster counter. 0 means unstamped.
+        generation: 0,
+    })
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 #[derive(Deserialize)]

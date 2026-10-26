@@ -751,8 +751,19 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             },
             query,
         ),
-        TaskResult::RosterLoaded { sessions } => {
-            app.leader_roster = sessions;
+        TaskResult::RosterLoaded {
+            sessions,
+            generation,
+        } => {
+            let stale = generation > 0 && generation < app.leader_roster_generation;
+            if !stale {
+                if generation > 0 {
+                    app.leader_roster_generation = generation;
+                }
+                for entry in sessions {
+                    app.upsert_roster_entry(entry);
+                }
+            }
             app.dashboard_sessions_loading = false;
             vec![]
         }
@@ -1185,7 +1196,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::SiblingIpcAuthorize {
             authorized,
             permission_mode,
-        } => handle_sibling_ipc_authorize(app, authorized, permission_mode),
+            event_ms,
+        } => handle_sibling_ipc_authorize(app, authorized, permission_mode, event_ms),
         TaskResult::AuthorizeAskPublished => vec![],
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {

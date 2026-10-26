@@ -11,14 +11,27 @@ pub const AUTHORIZE_ASK_SOCK_NAME: &str = "authorize_ask.sock";
 
 /// Live-session authorization status published for a second grok-oss process.
 ///
-/// Same pattern as `limits_billing_ask.sock`. The document is a boolean plus the
-/// canonical permission mode. It is not a token and not a second permission system.
+/// Same pattern as `limits_billing_ask.sock`. The document is a boolean, the
+/// canonical permission mode, and a unix millisecond stamp. It is not a token
+/// and not a second permission system.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorizeAskDocument {
     /// The live session has already completed authorization.
     pub authorized: bool,
     /// Canonical `[ui] permission_mode` (`always-approve`, `ask`, `auto`, `context-only`).
     pub permission_mode: String,
+    /// Unix time in milliseconds when this document was published. Not a token.
+    /// Omitted on the wire deserializes as `0`. `0` must not replace a real later stamp.
+    #[serde(default)]
+    pub event_ms: u64,
+}
+
+/// Unix millisecond stamp for [`AuthorizeAskDocument::event_ms`]. Not a token.
+pub fn authorize_ask_event_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 struct LiveAuthorizeAskSocket {
@@ -1072,6 +1085,7 @@ mod tests {
             &AuthorizeAskDocument {
                 authorized: true,
                 permission_mode: "always-approve".into(),
+                event_ms: 1,
             },
         )
         .expect("first session publishes authorization on authorize_ask.sock");
@@ -1100,6 +1114,7 @@ mod tests {
             .expect("second session asks the first over authorize_ask.sock");
         assert!(asked.authorized);
         assert_eq!(asked.permission_mode, "always-approve");
+        assert_eq!(asked.event_ms, 1);
         let asked_json = serde_json::to_value(&asked).expect("live IPC document json");
         let asked_keys: std::collections::BTreeSet<&str> = asked_json
             .as_object()
@@ -1109,12 +1124,14 @@ mod tests {
             .collect();
         assert_eq!(
             asked_keys,
-            ["authorized", "permission_mode"].into_iter().collect(),
-            "live IPC payload must be {{authorized, permission_mode}}, never tokens. json={asked_json}"
+            ["authorized", "event_ms", "permission_mode"]
+                .into_iter()
+                .collect(),
+            "live IPC payload must be {{authorized, permission_mode, event_ms}}, never tokens. json={asked_json}"
         );
     }
 
-    /// IPC `{authorized, permission_mode}` never carries tokens.
+    /// IPC `{authorized, permission_mode, event_ms}` never carries tokens.
     /// A later merge that adds jwt / api_key / Bearer to this document must fail here.
     /// Inherit-on-startup of a new session is `second_grok_oss_session_must_not_require_fresh_authorize_when_ipc_has_a_live_authorized_session`, not this unit.
     #[test]
@@ -1122,17 +1139,31 @@ mod tests {
         let doc = AuthorizeAskDocument {
             authorized: true,
             permission_mode: "ask".into(),
+            event_ms: 1_700_000_000_000,
         };
         let json = serde_json::to_value(&doc).expect("serialize");
         let obj = json.as_object().expect("object");
         let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["authorized", "permission_mode"].into_iter().collect(),
-            "IPC document keys must be only authorized and permission_mode, never tokens. got {keys:?}"
+            ["authorized", "event_ms", "permission_mode"]
+                .into_iter()
+                .collect(),
+            "IPC document keys must be only authorized, permission_mode, and event_ms, never tokens. got {keys:?}"
         );
         assert_eq!(obj.get("authorized"), Some(&serde_json::json!(true)));
         assert_eq!(obj.get("permission_mode"), Some(&serde_json::json!("ask")));
+        assert_eq!(
+            obj.get("event_ms"),
+            Some(&serde_json::json!(1_700_000_000_000u64))
+        );
+        let omitted = serde_json::from_str::<AuthorizeAskDocument>(
+            r#"{"authorized":true,"permission_mode":"ask"}"#,
+        )
+        .expect("a document that omits event_ms still parses");
+        assert_eq!(omitted.event_ms, 0);
+        assert!(omitted.authorized);
+        assert_eq!(omitted.permission_mode, "ask");
         assert!(obj.get("jwt").is_none());
         assert!(obj.get("api_key").is_none());
         assert!(obj.get("access_token").is_none());

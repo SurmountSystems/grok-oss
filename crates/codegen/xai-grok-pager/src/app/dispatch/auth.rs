@@ -346,7 +346,7 @@ fn unstick_waiting_parent_after_auth(
     })
 }
 
-/// Live `{authorized, permission_mode}` for `authorize_ask.sock`. Never tokens.
+/// Live `{authorized, permission_mode, event_ms}` for `authorize_ask.sock`. Never tokens.
 fn publish_live_authorize_effect() -> Effect {
     let permission_mode = xai_grok_shell::util::config::permission_mode_canonical_str(
         xai_grok_shell::util::config::load_permission_mode(None),
@@ -355,6 +355,7 @@ fn publish_live_authorize_effect() -> Effect {
     Effect::PublishAuthorizeAsk {
         authorized: true,
         permission_mode,
+        event_ms: xai_grok_shell::util::config::authorize_ask_event_ms(),
     }
 }
 
@@ -364,15 +365,41 @@ fn any_open_l1_needs_sibling_reauth(app: &AppView) -> bool {
     })
 }
 
+/// Incoming authorize IPC must not apply.
+/// A missing stamp (`event_ms` 0) is not an authorize, including when the
+/// stored stamp is also 0. It must not enqueue and must not replace a
+/// stored non-zero stamp.
+/// A non-zero stamp is skipped only when it is strictly older.
+fn authorize_ipc_event_is_older(newest_applied: u64, incoming: u64) -> bool {
+    if incoming == 0 {
+        return true;
+    }
+    incoming < newest_applied
+}
+
 /// Already-open L1 applies a sibling login over IPC. Reloads the shared store,
 /// resends the waiting prompt, and must not paint Run /login.
 /// Inherit-on-startup of a new session is not this path.
+/// An older non-zero `event_ms` returns no effects. A missing stamp
+/// (`event_ms` 0) also returns no effects and does not replace a stored stamp.
+/// The 400ms ask is not the ordering rule.
 pub(super) fn handle_sibling_ipc_authorize(
     app: &mut AppView,
     authorized: bool,
     permission_mode: String,
+    event_ms: u64,
 ) -> Vec<Effect> {
     let _ = permission_mode;
+    // A missing stamp is not an authorize, even when the stored stamp is 0.
+    if event_ms == 0 {
+        return vec![];
+    }
+    if authorize_ipc_event_is_older(app.newest_applied_authorize_event_ms, event_ms) {
+        return vec![];
+    }
+    if event_ms > app.newest_applied_authorize_event_ms {
+        app.newest_applied_authorize_event_ms = event_ms;
+    }
     if !authorized {
         if any_open_l1_needs_sibling_reauth(app) {
             return vec![Effect::AskSiblingAuthorize { delay_ms: 400 }];
@@ -426,6 +453,29 @@ fn waiting_user_prompt_on_scrollback(
         scrollback_entry: crate::scrollback::EntryId::new(0),
         combined_scrollback_entries: Vec::new(),
         chip_elements: Vec::new(),
+    })
+}
+
+/// Turn is already Waiting for the model, with no in-flight prompt.
+/// The text the Operator sent is only on the local queue. Login must POST it.
+fn take_front_queued_user_prompt(
+    agent: &mut AgentView,
+) -> Option<crate::app::agent::InFlightPrompt> {
+    let front = agent.session.pending_prompts.front()?;
+    if front.kind != crate::app::agent::QueueEntryKind::Prompt {
+        return None;
+    }
+    let text = front.text.trim();
+    if text.is_empty() || text == "/login" || text.starts_with("/login ") {
+        return None;
+    }
+    let queued = agent.session.pending_prompts.pop_front()?;
+    Some(crate::app::agent::InFlightPrompt {
+        text: queued.text,
+        images: queued.images,
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: queued.chip_elements,
     })
 }
 
@@ -499,6 +549,22 @@ fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
             && let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt)
         {
             retry_effects.push(effect);
+        }
+        // Queued text, no in-flight sample, chrome already Waiting for the model.
+        // `maybe_drain_queue` stays blocked while TurnRunning, so login never POSTed it.
+        if !had_parent_retry && !was_idle && agent.session.in_flight_prompt.is_none() {
+            let stuck_on_model = matches!(
+                agent.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::Model,
+                ))
+            );
+            if stuck_on_model
+                && let Some(prompt) = take_front_queued_user_prompt(agent)
+                && let Some(effect) = unstick_waiting_parent_after_auth(agent, prompt)
+            {
+                retry_effects.push(effect);
+            }
         }
         retry_effects.extend(nested);
     }
@@ -866,6 +932,7 @@ pub(super) fn handle_auth_complete(
             let retry_effects = enqueue_prompts_after_auth(app);
             let mut effects = vec![publish_live_authorize_effect()];
             effects.extend(dispatch(Action::RequestBundleStatus, app));
+            effects.push(Effect::FetchIncludedPeriodLimitsOnLogin { nonce: 0 });
             if app.usage_visible {
                 effects.push(Effect::FetchAppBilling { nonce: 0 });
             }
@@ -886,6 +953,8 @@ pub(super) fn handle_auth_complete(
             effects.push(Effect::CheckSubscription { verify: None });
             effects.push(Effect::SchedulePaywallCheck);
         }
+        // Included SuperGrok period limits percent, even when usage is hidden.
+        effects.push(Effect::FetchIncludedPeriodLimitsOnLogin { nonce: 0 });
         // Fetch billing so the welcome screen can show a credit warning.
         if app.usage_visible {
             effects.push(Effect::FetchAppBilling { nonce: 0 });
@@ -922,6 +991,7 @@ pub(super) fn handle_auth_complete(
         let retry_effects = enqueue_prompts_after_auth(app);
         let mut effects = vec![publish_live_authorize_effect()];
         effects.extend(dispatch(Action::RequestBundleStatus, app));
+        effects.push(Effect::FetchIncludedPeriodLimitsOnLogin { nonce: 0 });
         if app.usage_visible {
             effects.push(Effect::FetchAppBilling { nonce: 0 });
         }
