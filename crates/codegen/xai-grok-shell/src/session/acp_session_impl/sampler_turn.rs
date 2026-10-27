@@ -754,15 +754,12 @@ impl SessionActor {
                 let _ = am.align_to_ranked_free_period_primary();
             }
         }
-        // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
-        // inherit stamp. Do not seed an expired AuthManager token: the resolver would
-        // send it, and a fail-closed 401 would look authenticated.
+        // Session path: prefer a wire-valid access token when the live sampler
+        // key is the one a 401 already rejected. When chat credentials already
+        // hold that live sampler JWT, login restamp won. The waiting parent
+        // POST must use it. A different AuthManager token must not replace it.
         // Nested turns (`startup_hints.is_subagent`), and a live sampler JWT that
-        // already equals the stored bearer, keep that live JWT. AuthManager must
-        // not replace a working parent sampler JWT.
-        // A non-nested session whose stored wire-valid bearer differs from the
-        // live key sends that stored bearer on the next request. The live key
-        // is the one a 401 already rejected.
+        // already equals the stored bearer, keep that live JWT.
         // A noop sampler (no live JWT) still falls through to AuthManager so
         // limits-mode ranked hop can seed the session JWT.
         let live_sampler_jwt = match self.sampler_handle.live_api_key() {
@@ -778,8 +775,17 @@ impl SessionActor {
             .as_ref()
             .and_then(|am| am.current_wire_valid().map(|a| a.key))
             .filter(|key| !key.trim().is_empty());
+        // Login restamp writes the live sampler JWT into chat credentials before
+        // this reconstruct. That key is not the rejected bearer.
+        let chat_holds_live_sampler_jwt = live_sampler_jwt.as_deref().is_some_and(|live| {
+            let live = live.trim();
+            !live.is_empty() && creds.api_key.as_deref().map(str::trim) == Some(live)
+        });
         // Resolver fallback only. A resolved `[inference]` key stays on today's path.
-        let recovered_bearer = if !self.startup_hints.is_subagent
+        // When chat does not hold the live key, a different wire-valid bearer is
+        // the recovery store. The live key is the one a 401 already rejected.
+        let recovered_bearer = if !chat_holds_live_sampler_jwt
+            && !self.startup_hints.is_subagent
             && crate::agent::inference_override::reconstruct_installs_inherited_session_bearer_resolver(
                 use_bearer_resolver,
             )
@@ -934,6 +940,10 @@ impl SessionActor {
             .is_none_or(|key| key.trim().is_empty())
         {
             sampling.api_key = self.sampler_handle.current_api_key().await;
+        }
+        // Ranked overlay must not replace the login JWT chat credentials already hold.
+        if chat_holds_live_sampler_jwt {
+            sampling.api_key = live_sampler_jwt.clone();
         }
         if sampling.api_key.as_ref().is_none_or(|key| key.is_empty()) {
             crate::agent::config::match_cli_chat_proxy_identity_headers_to_parent(
