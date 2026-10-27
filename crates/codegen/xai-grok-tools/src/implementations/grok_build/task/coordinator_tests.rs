@@ -1483,19 +1483,31 @@ async fn external_cancel_token_cancels_live_child() {
 #[tokio::test]
 async fn dropping_coordinator_cancels_live_child() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
-    let cancellation = CancellationToken::new();
-    let mut request = request("owner-drop", true);
-    request.cancel_token = cancellation.clone();
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request, None).await }
+        async move { backend.spawn(request("owner-drop", true), None).await }
     });
     assert_eq!(harness.started.recv().await.as_deref(), Some("owner-drop"));
+    // The runner waits on `ChildRunRequest.cancellation`, a child of the
+    // caller's request token. Drop cancels that child token only.
+    let child_token = harness
+        .tokens
+        .recv()
+        .await
+        .expect("runner must expose the child cancellation token");
+    assert!(
+        !child_token.is_cancelled(),
+        "precondition: the live child token is not cancelled before drop"
+    );
 
     harness.actor.abort();
-    tokio::time::timeout(std::time::Duration::from_secs(1), cancellation.cancelled())
+    tokio::time::timeout(std::time::Duration::from_secs(1), child_token.cancelled())
         .await
-        .expect("coordinator drop should cancel child");
+        .expect("coordinator drop should cancel the child token the runner waits on");
+    assert!(
+        child_token.is_cancelled(),
+        "coordinator drop should cancel the live child"
+    );
     assert!(spawn.await.unwrap().is_err());
 }
 

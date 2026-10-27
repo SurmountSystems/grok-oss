@@ -908,7 +908,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         wake_of: Option<DisplacedCompletedChild>,
     ) {
         let id = request.id.clone();
-        let cancellation = request.cancel_token.clone();
+        // `CancellationToken::child_token`: parent cancel cancels this role.
+        // `finish_child` cancels the child token, which does not cancel the parent,
+        // so a finished role does not cancel the token later roles still hold.
+        let cancellation = request.cancel_token.child_token();
         // `spawn_reply: None`: the caller was auto-backgrounded while queued.
         let handle_only = request.run_in_background || spawn_reply.is_none();
         let agent_address = agent_address.or_else(|| {
@@ -1172,8 +1175,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ChildRecord::Pending(child) => (child.cancellation.is_cancelled(), child.disposition),
             ChildRecord::Active(child) => (child.cancellation.is_cancelled(), child.disposition),
         };
-        // A finished child must not keep sampling. The runner's token is
-        // this same cancellation token.
+        // A finished child must not keep sampling. This is the child token from
+        // `start_child`, not the caller's parent token. Cancelling it stops this
+        // role and does not cancel later roles that still hold the parent.
         match &record {
             ChildRecord::Pending(child) => child.cancellation.cancel(),
             ChildRecord::Active(child) => child.cancellation.cancel(),

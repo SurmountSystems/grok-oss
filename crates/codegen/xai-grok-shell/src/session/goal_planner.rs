@@ -682,10 +682,9 @@ async fn outcome_if_spawn_stopped(
             ))
         }
         SpawnError::Interrupted => {
-            // A finished writer shares this token with `finish_child`, which cancels it
-            // when the writer stops sampling. The select can report Interrupted after
-            // `{PLAN_FILE}` is already on disk. A non-empty file counts; a missing file
-            // is a real interrupt and the caller may replan.
+            // User steering cancels the planner token. The select can report
+            // Interrupted after `{PLAN_FILE}` is already on disk. A non-empty file
+            // counts; a missing file is a real interrupt and the caller may replan.
             Some(
                 accept_written_plan_or_else(
                     plan_file,
@@ -699,9 +698,7 @@ async fn outcome_if_spawn_stopped(
         }
         SpawnError::Runtime { message, cancelled } => {
             // The child's turn error (repeating-sentence stop, sampling-window
-            // death) arrives here as Runtime. `finish_child` can also cancel the
-            // shared token after a successful write so the spawn result wins
-            // this arm instead of Interrupted. A non-empty `{PLAN_FILE}` is the
+            // death) arrives here as Runtime. A non-empty `{PLAN_FILE}` is the
             // plan; do not fail-closed and delete it.
             if non_empty_plan_file(plan_file).await {
                 tracing::info!(
