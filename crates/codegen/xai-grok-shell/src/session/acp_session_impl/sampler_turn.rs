@@ -566,8 +566,12 @@ impl SessionActor {
 
     /// 401 arm for a provider-backed model: re-run the helper once and resubmit.
     /// A missing key means the cold mint failed and the request went out unauthenticated, so mint instead.
-    /// Returns `false` when the fresh-mint guard blocked the re-run or the helper failed; the 401 then becomes a terminal error.
-    async fn try_provider_401_recovery(&self, provider: &xai_grok_login::AuthProviderRef) -> bool {
+    /// Returns `None` when the fresh-mint guard blocked the re-run or the helper failed; the 401 then becomes a terminal error.
+    /// The pair is the rejected bearer (missing when the request had none) and the bearer recovery stored.
+    async fn try_provider_401_recovery(
+        &self,
+        provider: &xai_grok_login::AuthProviderRef,
+    ) -> Option<(Option<String>, String)> {
         let rejected_key = self.chat_state_handle.get_credentials().await.api_key;
         let recovered = match rejected_key {
             Some(ref rejected_key) => provider.recover_rejected_token(rejected_key).await,
@@ -584,7 +588,7 @@ impl SessionActor {
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({ "provider": provider.name })),
             );
-            return false;
+            return None;
         };
         tracing::info!(
             session_id = %self.session_info.id.0,
@@ -596,8 +600,9 @@ impl SessionActor {
             Some(self.session_info.id.0.as_ref()),
             None,
         );
-        self.set_chat_api_key(new_key).await;
-        true
+        let rejected_bearer = rejected_key.filter(|key| !key.trim().is_empty());
+        self.set_chat_api_key(new_key.clone()).await;
+        Some((rejected_bearer, new_key))
     }
 
     /// Gate inputs for `model_id` routed to `base_url`.
@@ -752,9 +757,12 @@ impl SessionActor {
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // inherit stamp. Do not seed an expired AuthManager token: the resolver would
         // send it, and a fail-closed 401 would look authenticated.
-        // Nested turns, and the waiting parent after login restamp, keep the JWT the
-        // live sampler is already talking with. AuthManager recovery can mint a
-        // different token that cli-chat-proxy still rejects.
+        // Nested turns (`startup_hints.is_subagent`), and a live sampler JWT that
+        // already equals the stored bearer, keep that live JWT. AuthManager must
+        // not replace a working parent sampler JWT.
+        // A non-nested session whose stored wire-valid bearer differs from the
+        // live key sends that stored bearer on the next request. The live key
+        // is the one a 401 already rejected.
         // A noop sampler (no live JWT) still falls through to AuthManager so
         // limits-mode ranked hop can seed the session JWT.
         let live_sampler_jwt = match self.sampler_handle.live_api_key() {
@@ -765,7 +773,31 @@ impl SessionActor {
                 .await
                 .filter(|key| !key.trim().is_empty()),
         };
-        let mut api_key = if let Some(live) = live_sampler_jwt {
+        let wire_valid_key = self
+            .auth_manager
+            .as_ref()
+            .and_then(|am| am.current_wire_valid().map(|a| a.key))
+            .filter(|key| !key.trim().is_empty());
+        // Resolver fallback only. A resolved `[inference]` key stays on today's path.
+        let recovered_bearer = if !self.startup_hints.is_subagent
+            && crate::agent::inference_override::reconstruct_installs_inherited_session_bearer_resolver(
+                use_bearer_resolver,
+            )
+        {
+            wire_valid_key.as_ref().and_then(|wire| {
+                let live = live_sampler_jwt.as_deref()?;
+                if live.trim().is_empty() || wire == live {
+                    None
+                } else {
+                    Some(wire.clone())
+                }
+            })
+        } else {
+            None
+        };
+        let mut api_key = if let Some(recovered) = recovered_bearer.clone() {
+            Some(recovered)
+        } else if let Some(live) = live_sampler_jwt.clone() {
             Some(live)
         } else {
             // Session gate still prefers a wire-valid AT when `[inference]` is
@@ -774,9 +806,7 @@ impl SessionActor {
             // catalog NotByok on a third-party host.
             crate::agent::inference_override::reconstruct_turn_api_key(
                 use_bearer_resolver && ActiveAuthBackend::default().is_xai_authority(),
-                self.auth_manager
-                    .as_ref()
-                    .and_then(|am| am.current_wire_valid().map(|a| a.key)),
+                wire_valid_key,
                 creds.api_key.clone(),
             )
         };
@@ -893,9 +923,10 @@ impl SessionActor {
         } else {
             None
         };
-        crate::agent::inference_override::apply_reconstruct_turn_credentials(
+        crate::agent::inference_override::apply_reconstruct_turn_credentials_keeping_recovered(
             &mut sampling,
             ranked_auto_home.as_deref(),
+            recovered_bearer.as_deref().and(live_sampler_jwt.as_deref()),
         );
         if sampling
             .api_key
@@ -1364,6 +1395,8 @@ impl SessionActor {
                 return Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
                     credential: xai_grok_sampling_types::SentCredential::Sent,
                     store: RecoveredStore::SessionToken,
+                    rejected_bearer: already.clone().filter(|key| !key.trim().is_empty()),
+                    recovered_bearer: already.filter(|key| !key.trim().is_empty()),
                 });
             }
             return None;
@@ -1377,11 +1410,15 @@ impl SessionActor {
             Some(self.session_info.id.0.as_ref()),
             None,
         );
+        let rejected_bearer = already.filter(|key| !key.trim().is_empty());
+        let recovered_bearer = Some(bearer.clone()).filter(|key| !key.trim().is_empty());
         self.set_chat_api_key(bearer).await;
         self.prepare_sampler_for_turn().await;
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
             credential: xai_grok_sampling_types::SentCredential::Sent,
             store: RecoveredStore::SessionToken,
+            rejected_bearer,
+            recovered_bearer,
         })
     }
 
@@ -1406,12 +1443,10 @@ impl SessionActor {
                 .await
                 .filter(|key| !key.trim().is_empty())?
         };
-        if !self.startup_hints.is_subagent {
-            let already = self.chat_state_handle.get_credentials().await.api_key;
-            if already.as_deref() == Some(key.as_str()) {
-                // Parent same-key: login did not restamp a new JWT. Keep WebLogin / OIDC.
-                return None;
-            }
+        let already = self.chat_state_handle.get_credentials().await.api_key;
+        if !self.startup_hints.is_subagent && already.as_deref() == Some(key.as_str()) {
+            // Parent same-key: login did not restamp a new JWT. Keep WebLogin / OIDC.
+            return None;
         }
         tracing::info!(
             session_id = %self.session_info.id.0,
@@ -1422,6 +1457,8 @@ impl SessionActor {
             Some(self.session_info.id.0.as_ref()),
             None,
         );
+        let rejected_bearer = already.filter(|key| !key.trim().is_empty());
+        let recovered_bearer = Some(key.clone()).filter(|bearer| !bearer.trim().is_empty());
         self.set_chat_api_key(key).await;
         if self.startup_hints.is_subagent {
             self.prepare_sampler_for_turn().await;
@@ -1432,6 +1469,8 @@ impl SessionActor {
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
             credential: xai_grok_sampling_types::SentCredential::Sent,
             store: RecoveredStore::SessionToken,
+            rejected_bearer,
+            recovered_bearer,
         })
     }
 
@@ -1470,6 +1509,8 @@ impl SessionActor {
         SamplerFailureRecovery::RefreshAuthAndResubmit {
             credential,
             store: RecoveredStore::SessionToken,
+            rejected_bearer: None,
+            recovered_bearer: None,
         }
     }
 
@@ -1803,6 +1844,16 @@ impl SessionActor {
             {
                 return Ok(self.park_uncharged_401(error.credential, true));
             }
+            let rejected_bearer = self
+                .sampler_handle
+                .live_api_key()
+                .filter(|key| !key.trim().is_empty())
+                .or_else(|| {
+                    am.current_wire_valid()
+                        .or_else(|| am.current_or_expired())
+                        .map(|auth| auth.key)
+                        .filter(|key| !key.trim().is_empty())
+                });
             if am
                 .try_recover_unauthorized(xai_grok_login::recovery::RecoverySource::Turn)
                 .await
@@ -1814,9 +1865,20 @@ impl SessionActor {
                     None,
                 );
                 self.prepare_sampler_for_turn().await;
+                let recovered_bearer = self
+                    .sampler_handle
+                    .live_api_key()
+                    .filter(|key| !key.trim().is_empty())
+                    .or_else(|| {
+                        am.current_wire_valid()
+                            .map(|auth| auth.key)
+                            .filter(|key| !key.trim().is_empty())
+                    });
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                     credential: error.credential,
                     store: RecoveredStore::SessionToken,
+                    rejected_bearer,
+                    recovered_bearer,
                 });
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
@@ -1847,12 +1909,16 @@ impl SessionActor {
 
         // 4c. Auth failure or bare 401 on a provider-backed model (gateway 401s can classify under other error kinds).
         if let Some(ref provider) = auth_provider
-            && self.try_provider_401_recovery(provider).await
+            && let Some((rejected_bearer, recovered_bearer)) =
+                self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
+            let recovered_bearer = Some(recovered_bearer).filter(|key| !key.trim().is_empty());
             return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                 credential: error.credential,
                 store: RecoveredStore::AuthProvider,
+                rejected_bearer,
+                recovered_bearer,
             });
         }
 
@@ -2367,9 +2433,17 @@ impl SessionActor {
             SamplerFailureRecovery::CompactAndResubmit => {
                 Ok(SamplerTurnOutcome::CompactAndResubmit)
             }
-            SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
-                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
-            }
+            SamplerFailureRecovery::RefreshAuthAndResubmit {
+                credential,
+                store,
+                rejected_bearer,
+                recovered_bearer,
+            } => Ok(SamplerTurnOutcome::RefreshAuthAndResubmit {
+                credential,
+                store,
+                rejected_bearer,
+                recovered_bearer,
+            }),
             SamplerFailureRecovery::EndChildWithoutCompact => {
                 Ok(SamplerTurnOutcome::EndChildWithoutCompact)
             }

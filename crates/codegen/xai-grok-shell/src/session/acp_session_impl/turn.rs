@@ -3448,7 +3448,12 @@ impl SessionActor {
                         stop: CompletedStop::EndTurn,
                     });
                 }
-                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
+                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit {
+                    credential,
+                    store,
+                    rejected_bearer,
+                    recovered_bearer,
+                }) => {
                     if auth_retry_schedule.reset_if_incident_spans_suspend() {
                         tracing::info!("auth 401 retry: incident spanned a suspend; budget reset");
                         xai_grok_telemetry::unified_log::info(
@@ -3457,7 +3462,29 @@ impl SessionActor {
                             Some(serde_json::json!({ "loop_index": loop_index })),
                         );
                     }
-                    match auth_retry_schedule.on_recovered_401(credential) {
+                    // A 401 of bearer OLD, when recovery stored a different bearer NEW, is not
+                    // a rejection of NEW. Same bearer, or a missing string, keeps the counters.
+                    let previous_bearer_replaced = previous_bearer_was_replaced(
+                        rejected_bearer.as_deref(),
+                        recovered_bearer.as_deref(),
+                    );
+                    let mut decision = auth_retry_schedule.on_recovered_401(credential);
+                    if previous_bearer_replaced {
+                        auth_retry_schedule.clear_incident_for_previous_bearer();
+                        tracing::info!(
+                            "auth 401 retry: rejected bearer differs from the recovered bearer; \
+                             that 401 is not charged against the new bearer"
+                        );
+                        if matches!(decision, AuthRetryDecision::Exhausted) {
+                            // The schedule exhausted on the previous bearer. Resubmit so NEW
+                            // gets its own budget. The give-up sentence is unchanged.
+                            decision = AuthRetryDecision::Backoff {
+                                attempt: 1,
+                                delay: std::time::Duration::from_secs(1),
+                            };
+                        }
+                    }
+                    match decision {
                         AuthRetryDecision::UnchargedResubmit { resubmit, delay } => {
                             tracing::warn!(
                                 resubmit,

@@ -107,6 +107,7 @@ use tool_layer_images::*;
 mod auth_retry;
 pub(crate) use auth_retry::{
     AuthRetryDecision, AuthRetrySchedule, human_duration, pace_uncharged_resubmit,
+    previous_bearer_was_replaced,
 };
 #[path = "acp_session_impl/rate_limit_waits.rs"]
 mod rate_limit_waits;

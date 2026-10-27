@@ -232,6 +232,14 @@ impl AuthRetrySchedule {
         *self = Self::new();
     }
 
+    /// Drop the charged incident that belongs to a bearer recovery just replaced.
+    /// The 401 on the previous bearer must not stay in the counts that exhaust the new bearer.
+    /// Parked uncharged resubmits stay. Call this only when the rejected bearer
+    /// string differs from the bearer recovery stored.
+    pub(crate) fn clear_incident_for_previous_bearer(&mut self) {
+        self.reset_incident_keeping_park();
+    }
+
     /// `(rejections, authenticated)` seen this incident, for the exhaustion message.
     pub(crate) fn incident_counts(&self) -> (u32, u32) {
         (self.incident_rejections, self.incident_authenticated)
@@ -241,6 +249,22 @@ impl AuthRetrySchedule {
     pub(crate) fn uncharged_rejections(&self) -> u32 {
         self.uncharged_resubmits
     }
+}
+
+/// True only when both bearer strings are present and they differ.
+/// A missing string or two equal strings keep the incident, including every
+/// send of the same token.
+pub(crate) fn previous_bearer_was_replaced(
+    rejected: Option<&str>,
+    recovered: Option<&str>,
+) -> bool {
+    let Some(rejected) = rejected.map(str::trim).filter(|key| !key.is_empty()) else {
+        return false;
+    };
+    let Some(recovered) = recovered.map(str::trim).filter(|key| !key.is_empty()) else {
+        return false;
+    };
+    rejected != recovered
 }
 
 #[cfg(test)]

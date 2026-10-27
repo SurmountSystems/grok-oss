@@ -48,6 +48,12 @@ pub(crate) enum SamplerFailureRecovery {
     RefreshAuthAndResubmit {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
+        /// Bearer on the request that just got 401, when that string is still known.
+        /// `None` when the rejected request had no bearer string.
+        rejected_bearer: Option<String>,
+        /// Bearer recovery just stored for the resubmit.
+        /// `None` when recovery did not store a bearer string.
+        recovered_bearer: Option<String>,
     },
     /// L3 hit the nested window. End the child. Do not compact-and-continue.
     /// An L3 specialist, or a once-run nested role, filled its sampling window.
@@ -75,6 +81,12 @@ pub(crate) enum SamplerTurnOutcome {
     RefreshAuthAndResubmit {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
+        /// Bearer on the request that just got 401, when that string is still known.
+        /// `None` when the rejected request had no bearer string.
+        rejected_bearer: Option<String>,
+        /// Bearer recovery just stored for the resubmit.
+        /// `None` when recovery did not store a bearer string.
+        recovered_bearer: Option<String>,
     },
     /// L3 hit the nested window. End the child. Do not compact-and-continue.
     /// Mirrors [`SamplerFailureRecovery::EndChildWithoutCompact`].

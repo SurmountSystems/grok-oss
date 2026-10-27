@@ -318,6 +318,7 @@ async fn credential_less_401_with_deferred_refresh_parks_on_uncharged_resubmit()
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         credential: xai_grok_sampling_types::SentCredential::Missing,
                         store: RecoveredStore::SessionToken,
+                        ..
                     })
                 ),
                 "credential-less 401 with self-healing deferred refresh must park on \
@@ -358,6 +359,7 @@ async fn parked_credential_less_401_reparks_without_recovery_dispatch() {
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         credential: xai_grok_sampling_types::SentCredential::Missing,
                         store: RecoveredStore::SessionToken,
+                        ..
                     })
                 ),
                 "an already-parked credential-less 401 must re-park"
@@ -406,6 +408,7 @@ async fn mid_salvage_credential_less_401_still_parks() {
                         Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                             credential: xai_grok_sampling_types::SentCredential::Missing,
                             store: RecoveredStore::SessionToken,
+                            ..
                         })
                     ),
                     "a mid-salvage credential-less 401 must park ({park:?})"
@@ -2004,6 +2007,7 @@ async fn missing_auth_context_401_stamps_the_parent_bearer_and_resubmits() {
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         store: RecoveredStore::SessionToken,
                         credential: xai_grok_sampling_types::SentCredential::Sent,
+                        ..
                     })
                 ),
                 "a no-auth-context 401 must stamp a new parent bearer once, not park 50 uncharged retries"
@@ -2113,6 +2117,7 @@ async fn nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt() {
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         store: RecoveredStore::SessionToken,
                         credential: xai_grok_sampling_types::SentCredential::Sent,
+                        ..
                     })
                 ),
                 "a nested 401 after recovery must resume, not give up"
@@ -2211,6 +2216,7 @@ async fn nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_t
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         store: RecoveredStore::SessionToken,
                         credential: xai_grok_sampling_types::SentCredential::Sent,
+                        ..
                     })
                 ),
                 "Logging in still fails to resume the conversation. Nested spawn with reason=no auth context must retry with the live login JWT so the turn resumes. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)."
@@ -2349,6 +2355,7 @@ async fn login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_lo
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         store: RecoveredStore::SessionToken,
                         credential: xai_grok_sampling_types::SentCredential::Sent,
+                        ..
                     })
                 ),
                 "login still fails to resume: after AuthComplete / recovered live JWT, the waiting parent POST must actually go out. Operator: Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)."
@@ -2492,6 +2499,7 @@ async fn credentials_toast_parent_401_without_no_auth_context_after_login_retrie
                     Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
                         store: RecoveredStore::SessionToken,
                         credential: xai_grok_sampling_types::SentCredential::Sent,
+                        ..
                     })
                 ),
                 "Operator 2026-10-23: This is still happening. Screenshot: {SCREENSHOT_TOAST} plus Waiting for the model. After AuthComplete / recovered live JWT, the waiting parent 401 that lacks reason=no auth context must retry with live_api_key(), not sit on the credentials toast."
