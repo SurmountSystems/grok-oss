@@ -1,6 +1,7 @@
 //! Mirrors [`crate::session::goal_classifier`] but is fail-CLOSED: any failure pauses the goal.
-//! Writes a structured plan to the [`GoalTracker::plan_path`](crate::session::goal_tracker::GoalTracker::plan_path) file.
-//! The spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject a deterministic spawner.
+//! At goal creation the runner spawns four roles in order: research, recon, plan writer, then plan reviewer.
+//! The plan writer writes a structured plan to the [`GoalTracker::plan_path`](crate::session::goal_tracker::GoalTracker::plan_path) file.
+//! Research, recon, and review files sit next to that plan path. The spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject a deterministic spawner.
 
 #![allow(dead_code)]
 
@@ -134,12 +135,57 @@ where
 /// It does not cap user-initiated `/goal resume` retries, which re-run the planner unbounded.
 pub(crate) const GOAL_PLANNER_MAX_RUNS: u32 = 1;
 
-/// The planner reads and greps the workspace and, when web search is enabled, researches external facts to clarify scope.
+/// Research, recon, the plan writer, and the plan reviewer share this subagent type so each keeps a capable toolset.
 const GOAL_PLANNER_SUBAGENT_TYPE: &str = GOAL_ROLE_SUBAGENT_TYPE;
 
 const GOAL_PLANNER_SUBAGENT_DESCRIPTION: &str = "goal plan writer";
 
+const GOAL_RESEARCH_PROMPT_TEMPLATE: &str = include_str!("templates/goal_research_prompt.md");
+const GOAL_RECON_PROMPT_TEMPLATE: &str = include_str!("templates/goal_recon_prompt.md");
 const GOAL_PLANNER_PROMPT_TEMPLATE: &str = include_str!("templates/goal_planner_prompt.md");
+const GOAL_PLAN_REVIEW_PROMPT_TEMPLATE: &str = include_str!("templates/goal_plan_review_prompt.md");
+
+/// One goal-creation role. The runner requests each role as its own spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalCreationRole {
+    Research,
+    Recon,
+    PlanWriter,
+    Reviewer,
+}
+
+impl GoalCreationRole {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Research => "goal research specialist",
+            Self::Recon => "goal recon specialist",
+            Self::PlanWriter => GOAL_PLANNER_SUBAGENT_DESCRIPTION,
+            Self::Reviewer => "goal plan reviewer",
+        }
+    }
+
+    fn fail_open_label(self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::Recon => "recon",
+            Self::PlanWriter => "planner",
+            Self::Reviewer => "plan_reviewer",
+        }
+    }
+}
+
+/// Sibling of `plan.md` or `plan-<id>.md`: `research.md` / `research-<id>.md`, and the same for recon and review.
+pub(crate) fn goal_creation_artifact(plan_file: &Path, role_stem: &str) -> PathBuf {
+    let file_name = plan_file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "plan.md".to_string());
+    let renamed = match file_name.strip_prefix("plan") {
+        Some(rest) => format!("{role_stem}{rest}"),
+        None => format!("{role_stem}.md"),
+    };
+    plan_file.with_file_name(renamed)
+}
 
 // Outcome and spawner abstraction
 
@@ -165,10 +211,11 @@ pub(crate) enum GoalPlannerOutcome {
 /// Production uses [`ChannelSpawner`]; tests use `MockSpawner` (defined in the tests module).
 #[async_trait::async_trait]
 pub(crate) trait GoalPlannerSpawner: Send + Sync {
-    /// Spawn under `id` and return the terminal response when the subagent finishes.
+    /// Spawn one goal-creation role under `id` and return the terminal response when it finishes.
     async fn spawn_planner(
         &self,
         id: &str,
+        role: GoalCreationRole,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError>;
 }
@@ -230,17 +277,19 @@ impl GoalPlannerSpawner for ChannelSpawner {
     async fn spawn_planner(
         &self,
         id: &str,
+        role: GoalCreationRole,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError> {
+        let description = role.description();
         // Clone the primary render for the trace pair only when tracing; the wrapper moves each render into its attempt (no other clone)
         let trace_prompt = self.trace_sink.as_ref().map(|_| prompt.primary.clone());
         let outcome = spawn_with_fail_open_retry(
-            "planner",
+            role.fail_open_label(),
             None,
             &self.role_override,
             self.events.as_ref(),
             prompt,
-            |model, harness, prompt| self.send_one(id, prompt, model, harness),
+            |model, harness, prompt| self.send_one(id, description, prompt, model, harness),
         )
         .await;
 
@@ -250,7 +299,7 @@ impl GoalPlannerSpawner for ChannelSpawner {
                 self.trace_sink.as_ref(),
                 id,
                 GOAL_PLANNER_SUBAGENT_TYPE,
-                GOAL_PLANNER_SUBAGENT_DESCRIPTION,
+                description,
                 trace_prompt.as_deref(),
                 text,
             ),
@@ -259,7 +308,7 @@ impl GoalPlannerSpawner for ChannelSpawner {
                     self.trace_sink.as_ref(),
                     id,
                     GOAL_PLANNER_SUBAGENT_TYPE,
-                    GOAL_PLANNER_SUBAGENT_DESCRIPTION,
+                    description,
                     trace_prompt.as_deref(),
                     message,
                 )
@@ -276,6 +325,7 @@ impl ChannelSpawner {
     async fn send_one(
         &self,
         id: &str,
+        description: &str,
         prompt: String,
         model: Option<String>,
         harness_agent_type: Option<String>,
@@ -283,7 +333,7 @@ impl ChannelSpawner {
         let request = SubagentRequest {
             id: id.to_string(),
             prompt,
-            description: GOAL_PLANNER_SUBAGENT_DESCRIPTION.to_string(),
+            description: description.to_string(),
             subagent_type: GOAL_PLANNER_SUBAGENT_TYPE.to_string(),
             parent_session_id: self.parent_session_id.clone(),
             parent_prompt_id: self.parent_prompt_id.clone(),
@@ -387,87 +437,286 @@ pub(crate) async fn run_goal_planner(
     }
 
     let plan_file_str = inputs.plan_file.to_string_lossy();
-    let with_plan_file = GOAL_PLANNER_PROMPT_TEMPLATE.replace("{PLAN_FILE}", &plan_file_str);
-    // Render once per toolset: `primary` for the resolved toolset, `fallback` for the default/parent toolset the explicit-pair retry falls back to
-    let render = |tool_names: &RoleToolNames| -> String {
-        let rendered = tool_names.apply(&with_plan_file);
-        let mut full = String::with_capacity(rendered.len() + inputs.objective.len() + 256);
+    let research_file = goal_creation_artifact(inputs.plan_file, "research");
+    let recon_file = goal_creation_artifact(inputs.plan_file, "recon");
+    let review_file = goal_creation_artifact(inputs.plan_file, "review");
+    let research_file_str = research_file.to_string_lossy();
+    let recon_file_str = recon_file.to_string_lossy();
+    let review_file_str = review_file.to_string_lossy();
+
+    // Research and recon do not read each other's files. Separate spawns, separate prompts.
+    // Research is requested first so a cancel retries this attempt before the later roles.
+    let research_prompt = goal_creation_prompt(
+        GOAL_RESEARCH_PROMPT_TEMPLATE,
+        &[("{RESEARCH_FILE}", research_file_str.as_ref())],
+        inputs.tool_names,
+        inputs.inherit_tool_names,
+        inputs.objective,
+        inputs.context,
+    );
+    let research_result =
+        spawn_goal_creation_role(&spawner, GoalCreationRole::Research, research_prompt).await;
+    if let Some(stop) = outcome_if_spawn_stopped(
+        research_result,
+        inputs.plan_file,
+        plan_file_str.as_ref(),
+        inputs.attempt,
+        started,
+        emit_event,
+    )
+    .await
+    {
+        return stop;
+    }
+    if !non_empty_plan_file(&research_file).await {
+        tracing::info!(
+            research_file = %research_file_str,
+            "goal planner: research file missing or empty; failing closed",
+        );
+        return record_fail_closed(
+            GoalPlannerFailClosedReason::MissingPlan,
+            inputs.attempt,
+            started,
+            emit_event,
+        );
+    }
+
+    let recon_prompt = goal_creation_prompt(
+        GOAL_RECON_PROMPT_TEMPLATE,
+        &[("{RECON_FILE}", recon_file_str.as_ref())],
+        inputs.tool_names,
+        inputs.inherit_tool_names,
+        inputs.objective,
+        inputs.context,
+    );
+    let recon_result =
+        spawn_goal_creation_role(&spawner, GoalCreationRole::Recon, recon_prompt).await;
+    if let Some(stop) = outcome_if_spawn_stopped(
+        recon_result,
+        inputs.plan_file,
+        plan_file_str.as_ref(),
+        inputs.attempt,
+        started,
+        emit_event,
+    )
+    .await
+    {
+        return stop;
+    }
+    if !non_empty_plan_file(&recon_file).await {
+        tracing::info!(
+            recon_file = %recon_file_str,
+            "goal planner: recon file missing or empty; failing closed",
+        );
+        return record_fail_closed(
+            GoalPlannerFailClosedReason::MissingPlan,
+            inputs.attempt,
+            started,
+            emit_event,
+        );
+    }
+
+    // Both artifact paths exist. The plan writer reads those two paths and writes only the plan.
+    let plan_prompt = goal_creation_prompt(
+        GOAL_PLANNER_PROMPT_TEMPLATE,
+        &[
+            ("{PLAN_FILE}", plan_file_str.as_ref()),
+            ("{RESEARCH_FILE}", research_file_str.as_ref()),
+            ("{RECON_FILE}", recon_file_str.as_ref()),
+        ],
+        inputs.tool_names,
+        inputs.inherit_tool_names,
+        inputs.objective,
+        inputs.context,
+    );
+    let plan_result =
+        spawn_goal_creation_role(&spawner, GoalCreationRole::PlanWriter, plan_prompt).await;
+    if !non_empty_plan_file(inputs.plan_file).await {
+        if let Some(stop) = outcome_if_spawn_stopped(
+            plan_result,
+            inputs.plan_file,
+            plan_file_str.as_ref(),
+            inputs.attempt,
+            started,
+            emit_event,
+        )
+        .await
+        {
+            return stop;
+        }
+        tracing::info!(
+            plan_file = %plan_file_str,
+            "goal planner: plan file missing or empty; failing closed",
+        );
+        return record_fail_closed(
+            GoalPlannerFailClosedReason::MissingPlan,
+            inputs.attempt,
+            started,
+            emit_event,
+        );
+    }
+
+    // The plan file and the research file exist. The reviewer writes a review and does not rewrite the plan.
+    let review_prompt = goal_creation_prompt(
+        GOAL_PLAN_REVIEW_PROMPT_TEMPLATE,
+        &[
+            ("{REVIEW_FILE}", review_file_str.as_ref()),
+            ("{PLAN_FILE}", plan_file_str.as_ref()),
+            ("{RESEARCH_FILE}", research_file_str.as_ref()),
+            ("{RECON_FILE}", recon_file_str.as_ref()),
+        ],
+        inputs.tool_names,
+        inputs.inherit_tool_names,
+        inputs.objective,
+        inputs.context,
+    );
+    let review_result =
+        spawn_goal_creation_role(&spawner, GoalCreationRole::Reviewer, review_prompt).await;
+    if non_empty_plan_file(inputs.plan_file).await {
+        // A reviewer stop must not discard a plan that is already on disk.
+        let _ = review_result;
+        return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+    }
+    if let Some(stop) = outcome_if_spawn_stopped(
+        review_result,
+        inputs.plan_file,
+        plan_file_str.as_ref(),
+        inputs.attempt,
+        started,
+        emit_event,
+    )
+    .await
+    {
+        return stop;
+    }
+    tracing::info!(
+        plan_file = %plan_file_str,
+        "goal planner: plan file missing or empty after review; failing closed",
+    );
+    record_fail_closed(
+        GoalPlannerFailClosedReason::MissingPlan,
+        inputs.attempt,
+        started,
+        emit_event,
+    )
+}
+
+/// Render one role prompt. Path tokens are real paths, not file bodies.
+fn goal_creation_prompt(
+    template: &str,
+    path_replacements: &[(&str, &str)],
+    tool_names: &RoleToolNames,
+    inherit_tool_names: &RoleToolNames,
+    objective: &str,
+    context: &str,
+) -> RoleRenderedPrompt {
+    let render = |names: &RoleToolNames| {
+        let mut with_paths = template.to_string();
+        for (token, value) in path_replacements {
+            with_paths = with_paths.replace(token, value);
+        }
+        let rendered = names.apply(&with_paths);
+        let mut full = String::with_capacity(rendered.len() + objective.len() + context.len() + 64);
         full.push_str(&rendered);
         full.push_str("\n\nOBJECTIVE:\n");
-        full.push_str(inputs.objective);
+        full.push_str(objective);
         full.push_str("\n\nCONTEXT:\n");
-        full.push_str(inputs.context);
+        full.push_str(context);
         full.push('\n');
         full
     };
-    let prompt = RoleRenderedPrompt {
-        primary: render(inputs.tool_names),
-        fallback: render(inputs.inherit_tool_names),
-    };
+    RoleRenderedPrompt {
+        primary: render(tool_names),
+        fallback: render(inherit_tool_names),
+    }
+}
 
+async fn spawn_goal_creation_role(
+    spawner: &Arc<dyn GoalPlannerSpawner>,
+    role: GoalCreationRole,
+    prompt: RoleRenderedPrompt,
+) -> Result<String, SpawnError> {
     let spawn_id = uuid::Uuid::now_v7().to_string();
-    let response = match spawner.spawn_planner(&spawn_id, prompt).await {
-        Ok(text) => text,
-        Err(SpawnError::Transport(detail)) => {
+    spawner.spawn_planner(&spawn_id, role, prompt).await
+}
+
+/// `None` means the spawn returned `Ok` and the caller should check that role's file.
+/// A non-empty plan file on a stop is Planned, same as a single writer that died after the write.
+async fn outcome_if_spawn_stopped(
+    result: Result<String, SpawnError>,
+    plan_file: &Path,
+    plan_file_str: &str,
+    attempt: u32,
+    started: std::time::Instant,
+    emit_event: &dyn Fn(Event),
+) -> Option<GoalPlannerOutcome> {
+    let err = match result {
+        Ok(_) => return None,
+        Err(err) => err,
+    };
+    match err {
+        SpawnError::Transport(detail) => {
             // Nested writer can drop the channel after `{PLAN_FILE}` is already
             // on disk. A written plan is Planned, not "No plan was produced."
-            if non_empty_plan_file(inputs.plan_file).await {
+            if non_empty_plan_file(plan_file).await {
                 tracing::info!(
                     plan_file = %plan_file_str,
                     error = %detail,
                     "goal planner: transport stop after the plan file was written; accepting it",
                 );
-                return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+                return Some(planned_outcome(plan_file, attempt, started, emit_event));
             }
             if spawn_error_is_repeating_sentence_stop(&detail) {
                 tracing::info!(
                     error = %detail,
                     "goal planner: repeating-sentence transport with no plan; treating as interrupt so the harness can retry",
                 );
-                return GoalPlannerOutcome::Interrupted;
+                return Some(GoalPlannerOutcome::Interrupted);
             }
             tracing::warn!(error = %detail, "goal planner: transport error; failing closed");
-            return record_fail_closed(
+            Some(record_fail_closed(
                 GoalPlannerFailClosedReason::Transport,
-                inputs.attempt,
+                attempt,
                 started,
                 emit_event,
-            );
+            ))
         }
-        Err(SpawnError::Interrupted) => {
+        SpawnError::Interrupted => {
             // A finished writer shares this token with `finish_child`, which cancels it
             // when the writer stops sampling. The select can report Interrupted after
             // `{PLAN_FILE}` is already on disk. A non-empty file counts; a missing file
             // is a real interrupt and the caller may replan.
-            return accept_written_plan_or_else(
-                inputs.plan_file,
-                inputs.attempt,
-                started,
-                emit_event,
-                GoalPlannerOutcome::Interrupted,
+            Some(
+                accept_written_plan_or_else(
+                    plan_file,
+                    attempt,
+                    started,
+                    emit_event,
+                    GoalPlannerOutcome::Interrupted,
+                )
+                .await,
             )
-            .await;
         }
-        Err(SpawnError::Runtime { message, cancelled }) => {
+        SpawnError::Runtime { message, cancelled } => {
             // The child's turn error (repeating-sentence stop, sampling-window
             // death) arrives here as Runtime. `finish_child` can also cancel the
             // shared token after a successful write so the spawn result wins
             // this arm instead of Interrupted. A non-empty `{PLAN_FILE}` is the
             // plan; do not fail-closed and delete it.
-            if non_empty_plan_file(inputs.plan_file).await {
+            if non_empty_plan_file(plan_file).await {
                 tracing::info!(
                     plan_file = %plan_file_str,
                     cancelled,
                     "goal planner: runtime stop after the plan file was written; accepting it",
                 );
-                return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+                return Some(planned_outcome(plan_file, attempt, started, emit_event));
             }
             if !cancelled && spawn_error_is_repeating_sentence_stop(&message) {
                 tracing::info!(
                     error = %message,
                     "goal planner: repeating-sentence stop with no plan; treating as interrupt so the harness can retry",
                 );
-                return GoalPlannerOutcome::Interrupted;
+                return Some(GoalPlannerOutcome::Interrupted);
             }
             let reason = if cancelled {
                 GoalPlannerFailClosedReason::Aborted
@@ -479,26 +728,9 @@ pub(crate) async fn run_goal_planner(
                 cancelled,
                 "goal planner: subagent runtime error; failing closed",
             );
-            return record_fail_closed(reason, inputs.attempt, started, emit_event);
+            Some(record_fail_closed(reason, attempt, started, emit_event))
         }
-    };
-
-    if !non_empty_plan_file(inputs.plan_file).await {
-        tracing::info!(
-            plan_file = %plan_file_str,
-            terminal_token_ok = parse_terminal_response(&response),
-            response_snippet = %response.chars().take(120).collect::<String>(),
-            "goal planner: plan file missing or empty; failing closed",
-        );
-        return record_fail_closed(
-            GoalPlannerFailClosedReason::MissingPlan,
-            inputs.attempt,
-            started,
-            emit_event,
-        );
     }
-
-    planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event)
 }
 
 /// A plan counts only when `{PLAN_FILE}` is a non-empty file. An empty stub does not.
@@ -627,32 +859,57 @@ mod tests {
     }
 
     #[test]
-    fn planner_template_default_render_names_the_web_tools() {
-        // The research mandate is inert if the planner can't see the tool
-        let rendered = RoleToolNames::inherit_defaults().apply(GOAL_PLANNER_PROMPT_TEMPLATE);
+    fn research_template_default_render_names_the_web_tools() {
+        // The research mandate is inert if the research specialist cannot see the tool.
+        // The plan writer must not carry that instruction.
+        let rendered = RoleToolNames::inherit_defaults().apply(GOAL_RESEARCH_PROMPT_TEMPLATE);
         assert!(
             rendered.contains("web_search"),
             "default render must name the web-search tool",
         );
         assert!(rendered.contains("web_fetch"));
         assert_no_tool_placeholders(&rendered);
+        let plan = RoleToolNames::inherit_defaults().apply(GOAL_PLANNER_PROMPT_TEMPLATE);
+        assert!(
+            !plan.contains("web_search"),
+            "plan writer must not name the web-search tool",
+        );
+        assert!(
+            !plan.contains("research it with"),
+            "plan writer must not contain the web-research instruction",
+        );
+        assert!(
+            !plan.contains("Inspect files"),
+            "plan writer must not contain the file-inspection instruction",
+        );
     }
 
     #[test]
-    fn planner_template_cursor_render_names_the_web_search_tool() {
-        // The previously-broken case: on the alternate toolset the web tool is named "WebSearch", so the planner prompt must render THAT
-        // Otherwise the weak model never reaches for it and plans from memory
+    fn research_template_cursor_render_names_the_web_search_tool() {
+        // The previously-broken case: on the alternate toolset the web tool is named "WebSearch", so the research prompt must render THAT.
+        // Otherwise the weak model never reaches for it and researches from memory.
         let rendered = RoleToolNames::from_summary(&summary_with(&[
             (ToolKind::WebSearch, "WebSearch"),
             (ToolKind::WebFetch, "WebFetch"),
         ]))
-        .apply(GOAL_PLANNER_PROMPT_TEMPLATE);
+        .apply(GOAL_RESEARCH_PROMPT_TEMPLATE);
         assert!(
             rendered.contains("WebSearch"),
             "cursor render must name the cursor web-search tool",
         );
         assert!(rendered.contains("WebFetch"));
         assert_no_tool_placeholders(&rendered);
+        let plan = RoleToolNames::from_summary(&summary_with(&[
+            (ToolKind::WebSearch, "WebSearch"),
+            (ToolKind::WebFetch, "WebFetch"),
+        ]))
+        .apply(GOAL_PLANNER_PROMPT_TEMPLATE);
+        assert!(
+            !plan.contains("WebSearch"),
+            "plan writer must not name the cursor web-search tool",
+        );
+        assert!(!plan.contains("research it with"));
+        assert!(!plan.contains("Inspect files"));
     }
 
     #[tokio::test]
@@ -678,7 +935,11 @@ mod tests {
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
-                .spawn_planner("plan-id", role_prompt("prompt"))
+                .spawn_planner(
+                    "plan-id",
+                    GoalCreationRole::PlanWriter,
+                    role_prompt("prompt"),
+                )
                 .await;
         });
 
@@ -722,6 +983,17 @@ mod tests {
         assert_eq!(planned_goal_title(""), None);
     }
 
+    /// One recorded goal-creation spawn. File flags are sampled before this spawn writes.
+    #[derive(Clone)]
+    struct RoleSpawnSeen {
+        id: String,
+        role: GoalCreationRole,
+        prompt: String,
+        research_nonempty: bool,
+        recon_nonempty: bool,
+        plan_nonempty: bool,
+    }
+
     /// Deterministic spawner with knobs for response text, whether to write the plan file, and the file body.
     struct MockSpawner {
         response: Result<String, SpawnError>,
@@ -729,6 +1001,7 @@ mod tests {
         plan_body: Vec<u8>,
         plan_file_target: std::path::PathBuf,
         last_prompt: Mutex<Option<String>>,
+        seen: Mutex<Vec<RoleSpawnSeen>>,
     }
 
     impl MockSpawner {
@@ -739,6 +1012,7 @@ mod tests {
                 plan_body: body.to_vec(),
                 plan_file_target: plan_file.to_path_buf(),
                 last_prompt: Mutex::new(None),
+                seen: Mutex::new(Vec::new()),
             }
         }
 
@@ -749,6 +1023,7 @@ mod tests {
                 plan_body: Vec::new(),
                 plan_file_target: plan_file.to_path_buf(),
                 last_prompt: Mutex::new(None),
+                seen: Mutex::new(Vec::new()),
             }
         }
 
@@ -759,20 +1034,55 @@ mod tests {
                 plan_body: Vec::new(),
                 plan_file_target: plan_file.to_path_buf(),
                 last_prompt: Mutex::new(None),
+                seen: Mutex::new(Vec::new()),
             }
         }
+    }
+
+    fn nonempty_file(path: &std::path::Path) -> bool {
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false)
     }
 
     #[async_trait::async_trait]
     impl GoalPlannerSpawner for MockSpawner {
         async fn spawn_planner(
             &self,
-            #[allow(unused_variables)] id: &str,
+            id: &str,
+            role: GoalCreationRole,
             prompt: RoleRenderedPrompt,
         ) -> Result<String, SpawnError> {
+            let research = goal_creation_artifact(&self.plan_file_target, "research");
+            let recon = goal_creation_artifact(&self.plan_file_target, "recon");
+            self.seen.lock().unwrap().push(RoleSpawnSeen {
+                id: id.to_string(),
+                role,
+                prompt: prompt.primary.clone(),
+                research_nonempty: nonempty_file(&research),
+                recon_nonempty: nonempty_file(&recon),
+                plan_nonempty: nonempty_file(&self.plan_file_target),
+            });
             *self.last_prompt.lock().unwrap() = Some(prompt.primary);
             if self.write_plan {
-                let _ = tokio::fs::write(&self.plan_file_target, &self.plan_body).await;
+                // A stop after a requested write still leaves the plan file, so the
+                // existing "plan on disk counts" tests stay Planned on the first spawn.
+                if self.response.is_err() {
+                    let _ = tokio::fs::write(&self.plan_file_target, &self.plan_body).await;
+                }
+                let dest = match role {
+                    GoalCreationRole::Research => research,
+                    GoalCreationRole::Recon => recon,
+                    GoalCreationRole::PlanWriter => self.plan_file_target.clone(),
+                    GoalCreationRole::Reviewer => {
+                        goal_creation_artifact(&self.plan_file_target, "review")
+                    }
+                };
+                // An empty body must not create a non-empty research or recon file.
+                // The plan writer still writes that empty body so an empty plan fails closed.
+                if !self.plan_body.is_empty() || matches!(role, GoalCreationRole::PlanWriter) {
+                    let _ = tokio::fs::write(&dest, &self.plan_body).await;
+                }
             }
             match &self.response {
                 Ok(text) => Ok(text.clone()),
@@ -883,6 +1193,7 @@ mod tests {
             plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
             plan_file_target: plan_file.clone(),
             last_prompt: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
         });
         let (log, emit) = collect_events();
 
@@ -933,6 +1244,7 @@ mod tests {
             plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
             plan_file_target: plan_file.clone(),
             last_prompt: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
         });
         let (log, emit) = collect_events();
 
@@ -1023,6 +1335,7 @@ mod tests {
             plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
             plan_file_target: plan_file.clone(),
             last_prompt: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
         });
         let (log, emit) = collect_events();
 
@@ -1112,6 +1425,7 @@ mod tests {
             plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
             plan_file_target: plan_file.clone(),
             last_prompt: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
         });
         let (log, emit) = collect_events();
 
@@ -1159,6 +1473,7 @@ mod tests {
             plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
             plan_file_target: plan_file.clone(),
             last_prompt: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
         });
         let (log, emit) = collect_events();
 
@@ -1413,6 +1728,168 @@ mod tests {
         let _ = std::fs::remove_file(&plan_file);
     }
 
+    /// Goal creation requests four distinct roles. The plan-writer template does not
+    /// contain the web-research instruction and does not contain the file-inspection instruction.
+    #[tokio::test]
+    async fn goal_creation_requests_four_distinct_roles_and_plan_writer_does_not_research_or_inspect_files()
+     {
+        let plan_file = tmp_plan_file("four-roles");
+        let plan_body = b"# Plan: four distinct roles\n\n## Goal kind\ncode-change\n";
+        let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, plan_body));
+        let observed = spawner.clone();
+        let (_, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "ship the widget named in src/widget.rs",
+                context: "notes for the named file",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "four role spawns with artifacts on disk must plan, outcome={outcome:?}",
+        );
+        let seen = observed.seen.lock().unwrap().clone();
+        let roles: Vec<GoalCreationRole> = seen.iter().map(|row| row.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                GoalCreationRole::Research,
+                GoalCreationRole::Recon,
+                GoalCreationRole::PlanWriter,
+                GoalCreationRole::Reviewer,
+            ],
+            "goal creation must request four distinct roles in order, not one writer",
+        );
+        let ids: std::collections::BTreeSet<&str> =
+            seen.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            4,
+            "the four spawns must use distinct ids: {ids:?}"
+        );
+        let descriptions: Vec<&str> = roles.iter().map(|role| role.description()).collect();
+        assert_eq!(
+            descriptions,
+            vec![
+                "goal research specialist",
+                "goal recon specialist",
+                "goal plan writer",
+                "goal plan reviewer",
+            ],
+        );
+
+        let plan_writer = seen
+            .iter()
+            .find(|row| row.role == GoalCreationRole::PlanWriter)
+            .expect("plan writer spawn");
+        assert!(
+            plan_writer.research_nonempty && plan_writer.recon_nonempty,
+            "plan writer runs only after the research file and the recon file exist",
+        );
+        let reviewer = seen
+            .iter()
+            .find(|row| row.role == GoalCreationRole::Reviewer)
+            .expect("reviewer spawn");
+        assert!(
+            reviewer.plan_nonempty && reviewer.research_nonempty,
+            "reviewer runs only after the plan file and the research file exist",
+        );
+
+        let research_path = goal_creation_artifact(&plan_file, "research");
+        let recon_path = goal_creation_artifact(&plan_file, "recon");
+        let review_path = goal_creation_artifact(&plan_file, "review");
+        assert!(
+            plan_writer
+                .prompt
+                .contains(&*research_path.to_string_lossy()),
+            "plan writer must be given the research path",
+        );
+        assert!(
+            plan_writer.prompt.contains(&*recon_path.to_string_lossy()),
+            "plan writer must be given the recon path",
+        );
+        assert!(
+            plan_writer.prompt.contains(&*plan_file.to_string_lossy()),
+            "plan writer must be given the plan path",
+        );
+        assert!(
+            !plan_writer.prompt.contains("# Plan: four distinct roles"),
+            "do not paste the research or recon file body into the plan writer prompt",
+        );
+        assert!(
+            reviewer.prompt.contains(&*plan_file.to_string_lossy()),
+            "reviewer must be given the plan path",
+        );
+        assert!(
+            reviewer.prompt.contains(&*research_path.to_string_lossy()),
+            "reviewer must be given the research path",
+        );
+        assert!(
+            !reviewer.prompt.contains("# Plan: four distinct roles"),
+            "do not paste file bodies into the reviewer prompt",
+        );
+
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("research it with"),
+            "plan-writer template must not contain the web-research instruction",
+        );
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("WEB_SEARCH_TOOL"),
+            "plan-writer template must not contain the web-search tool instruction",
+        );
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("Inspect files"),
+            "plan-writer template must not contain the file-inspection instruction",
+        );
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("read/search/list"),
+            "plan-writer template must not tell the writer to read/search/list the tree",
+        );
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("SEARCH_TOOL"),
+            "plan-writer template must not name the tree search tool",
+        );
+        assert!(
+            !GOAL_PLANNER_PROMPT_TEMPLATE.contains("LIST_TOOL"),
+            "plan-writer template must not name the tree list tool",
+        );
+        assert!(
+            !plan_writer.prompt.contains("research it with"),
+            "rendered plan writer prompt must not contain the web-research instruction",
+        );
+        assert!(
+            !plan_writer.prompt.contains("Inspect files"),
+            "rendered plan writer prompt must not contain the file-inspection instruction",
+        );
+        assert!(
+            GOAL_RESEARCH_PROMPT_TEMPLATE.contains("research it with"),
+            "research template keeps the web-research instruction the plan writer dropped",
+        );
+        assert!(
+            GOAL_RECON_PROMPT_TEMPLATE.contains("Inspect files"),
+            "recon template keeps the file-inspection instruction the plan writer dropped",
+        );
+        assert!(
+            reviewer.prompt.contains(&*review_path.to_string_lossy()),
+            "reviewer must be given its own review path",
+        );
+
+        let _ = std::fs::remove_file(&plan_file);
+        let _ = std::fs::remove_file(&research_path);
+        let _ = std::fs::remove_file(&recon_path);
+        let _ = std::fs::remove_file(&review_path);
+    }
+
     // ── RoleSpawnOverride and spawn-and-retry-once wrapper ─────
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1448,7 +1925,11 @@ mod tests {
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
-                .spawn_planner("plan-id", role_prompt("prompt"))
+                .spawn_planner(
+                    "plan-id",
+                    GoalCreationRole::PlanWriter,
+                    role_prompt("prompt"),
+                )
                 .await;
         });
         let SubagentEvent::Spawn(request) = rx.recv().await.expect("spawn event") else {
@@ -1753,9 +2234,10 @@ mod tests {
             SubagentEvent, SubagentResult,
         };
         let plan_file = tmp_plan_file("retry-failopen");
-        let plan_for_coord = plan_file.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        // Fake coordinator: explicit-model spawn fails; the inherit retry (model None) writes the plan and succeeds
+        // Fake coordinator: explicit-model spawn fails. The inherit retry (model None)
+        // writes that role's backtick `.md` path. Writing only the plan file leaves
+        // the research file empty, and the runner fail-closes before the plan writer.
         let coord = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let SubagentEvent::Spawn(req) = ev else {
@@ -1768,7 +2250,18 @@ mod tests {
                         ..Default::default()
                     });
                 } else {
-                    let _ = tokio::fs::write(&plan_for_coord, b"# Plan\n").await;
+                    if let Some(path) = req
+                        .prompt
+                        .split('`')
+                        .skip(1)
+                        .step_by(2)
+                        .find(|token| token.ends_with(".md"))
+                    {
+                        if let Some(parent) = std::path::Path::new(path).parent() {
+                            let _ = tokio::fs::create_dir_all(parent).await;
+                        }
+                        let _ = tokio::fs::write(path, b"# Plan\n").await;
+                    }
                     let _ = req.result_tx.send(SubagentResult {
                         success: true,
                         output: std::sync::Arc::from("Done"),

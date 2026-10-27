@@ -23,6 +23,11 @@ fn plan_path_from_prompt(prompt: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The plan file is this role's only write. Research and recon name their own files.
+fn prompt_is_plan_writer(prompt: &str) -> bool {
+    prompt.contains("ROLE: plan writer.")
+}
+
 /// Spawn behaviour knobs for the planner-coordinator stub.
 enum SpawnBehaviour {
     /// Parse `{PLAN_FILE}` out of the prompt, write `body` there, then respond `Done`.
@@ -163,14 +168,20 @@ fn spawn_planner_coordinator_capturing(
                         cancelled,
                     } => {
                         let written = plan_written(&req, plan_path.as_deref(), body);
-                        SubagentResult {
-                            success: false,
-                            error: Some(message.clone()),
-                            cancelled: *cancelled,
-                            output: written.output,
-                            subagent_id: req.id.clone(),
-                            child_session_id: req.id.clone(),
-                            ..Default::default()
+                        // A repeating-sentence error on research never reaches a written plan.
+                        // Only the plan writer raises that error, after its file is on disk.
+                        if prompt_is_plan_writer(&req.prompt) {
+                            SubagentResult {
+                                success: false,
+                                error: Some(message.clone()),
+                                cancelled: *cancelled,
+                                output: written.output,
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
+                        } else {
+                            written
                         }
                     }
                     SpawnBehaviour::RuntimeThenWritePlan { message, body } => {
@@ -337,7 +348,8 @@ async fn send_now_restarts_planner_with_all_steering() {
                 .await
                 .expect("planner completion")
                 .unwrap();
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 3);
+            // Two cancelled research spawns, then one attempt of four roles.
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 6);
             let prompts = objectives.lock().unwrap();
             let objectives = prompts
                 .iter()
@@ -351,12 +363,16 @@ async fn send_now_restarts_planner_with_all_steering() {
                         .0
                 })
                 .collect::<Vec<_>>();
+            let steered = "do X\n\nUser steering:\nfirst\n\nsecond";
             assert_eq!(
                 objectives,
                 [
                     "do X",
                     "do X\n\nUser steering:\nfirst",
-                    "do X\n\nUser steering:\nfirst\n\nsecond",
+                    steered,
+                    steered,
+                    steered,
+                    steered,
                 ]
             );
 
@@ -420,7 +436,7 @@ async fn planner_success_stamps_plan_file_on_orchestration() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
             assert_eq!(
@@ -452,14 +468,18 @@ async fn planner_spawn_sets_harness_only_fork_context() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let forks = capture.fork_context.lock().unwrap().clone();
             let surfaces = capture.surface_completion.lock().unwrap().clone();
-            assert_eq!(forks, vec![true], "planner must request chat-prefix fork");
+            assert_eq!(
+                forks,
+                vec![true, true, true, true],
+                "each goal-creation role must request chat-prefix fork"
+            );
             assert_eq!(
                 surfaces,
-                vec![false],
-                "planner remains harness-internal (no idle reminder)"
+                vec![false, false, false, false],
+                "each goal-creation role remains harness-internal (no idle reminder)"
             );
         })
         .await;
@@ -498,12 +518,12 @@ async fn planner_fork_inherits_parent_model() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let models = capture.model.lock().unwrap().clone();
             assert_eq!(
                 models,
-                vec![None],
-                "planner fork must ignore the configured role model and inherit the parent (None)"
+                vec![None, None, None, None],
+                "each goal-creation fork must ignore a configured role model and inherit the parent (None)"
             );
         })
         .await;
@@ -561,9 +581,9 @@ async fn planner_snapshots_plan_baseline_once_and_does_not_overwrite() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn planner_records_own_harness_trace_turn_with_footer() {
-    // The planner subagent is represented by its OWN trace turn.
+    // The four goal-creation roles share one harness trace turn.
     // After `maybe_run_goal_planner`, the chat-state side buffer holds exactly one sealed harness trace turn.
-    // The result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover the planner subagent.
+    // Each result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover that role.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -579,25 +599,42 @@ async fn planner_records_own_harness_trace_turn_with_footer() {
             let [items] = turns.as_slice() else {
                 panic!("planner rides its own trace turn: {turns:?}");
             };
-            let [call, result] = items.as_slice() else {
-                panic!("synthetic task call + result pair: {items:?}");
-            };
-            assert!(
-                matches!(
-                    call,
-                    crate::sampling::ConversationItem::Assistant(a) if !a.tool_calls.is_empty()
-                ),
-                "first item is the synthetic task call",
+            let roles = [
+                "goal research specialist",
+                "goal recon specialist",
+                "goal plan writer",
+                "goal plan reviewer",
+            ];
+            assert_eq!(
+                items.len(),
+                roles.len() * 2,
+                "four role call/result pairs: {items:?}"
             );
-            let result_text = result.text_content();
-            assert!(
-                result_text.contains("<subagent_result>"),
-                "footer present for trace-viewer / subagent discovery: {result_text}",
-            );
-            assert!(
-                result_text.contains("subagent_id:"),
-                "subagent_id present in footer: {result_text}",
-            );
+            for (idx, role) in roles.iter().enumerate() {
+                let call = &items[idx * 2];
+                let result = &items[idx * 2 + 1];
+                match call {
+                    crate::sampling::ConversationItem::Assistant(assistant) => {
+                        assert!(
+                            assistant
+                                .tool_calls
+                                .iter()
+                                .any(|call| call.arguments.contains(role)),
+                            "trace pair {idx} must spawn {role}: {assistant:?}"
+                        );
+                    }
+                    other => panic!("trace pair {idx} must be a synthetic task call: {other:?}"),
+                }
+                let result_text = result.text_content();
+                assert!(
+                    result_text.contains("<subagent_result>"),
+                    "footer present for trace-viewer / subagent discovery: {result_text}",
+                );
+                assert!(
+                    result_text.contains("subagent_id:"),
+                    "subagent_id present in footer: {result_text}",
+                );
+            }
         })
         .await;
 }
@@ -823,7 +860,7 @@ async fn planner_repeating_sentence_stop_with_plan_file_does_not_pause_with_no_p
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
@@ -863,7 +900,7 @@ async fn planner_repeating_sentence_stop_without_plan_retries_then_publishes() {
 
             assert_eq!(
                 spawn_count.load(SeqOrd::SeqCst),
-                2,
+                5,
                 "repeating-sentence with no plan must retry inside maybe_run_goal_planner"
             );
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
@@ -1129,7 +1166,7 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
                 .clone();
 
             actor.maybe_run_goal_planner("do X").await;
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
 
             // Simulate the SubagentSpawned notification handler after the planner reports 12,000 cumulative tokens.
             let child_attempt = xai_message_delivery_core::AttemptId::mint(0x11).to_string();
@@ -1259,7 +1296,7 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 spawn_count.load(SeqOrd::SeqCst),
-                2,
+                5,
                 "retry must re-fire planner"
             );
             assert_eq!(snap.status, GoalStatus::Active);
@@ -1270,15 +1307,39 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             let plan_path = actor.goal_tracker.lock().plan_path();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
             let targets = plan_targets.lock().unwrap();
-            let [first, second] = targets.as_slice() else {
-                panic!("expected two plan targets: {targets:?}");
-            };
-            assert_ne!(first, second, "each attempt must use an isolated plan path");
-            assert!(targets.iter().all(|path| {
+            assert_eq!(
+                targets.len(),
+                5,
+                "failed research spawn plus four roles on the retry: {targets:?}"
+            );
+            let file_name = |path: &str| {
                 std::path::Path::new(path)
                     .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("plan-"))
-            }));
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let failed_name = file_name(&targets[0]);
+            assert!(
+                failed_name.starts_with("research-"),
+                "the failed attempt stops on research: {failed_name}"
+            );
+            let plan_names: Vec<String> = targets
+                .iter()
+                .map(|path| file_name(path))
+                .filter(|name| name.starts_with("plan-"))
+                .collect();
+            assert_eq!(
+                plan_names.len(),
+                1,
+                "only the retry reaches the plan writer: {targets:?}"
+            );
+            let failed_suffix = failed_name.strip_prefix("research").unwrap();
+            let retry_suffix = plan_names[0].strip_prefix("plan").unwrap();
+            assert_ne!(
+                failed_suffix, retry_suffix,
+                "each attempt must use an isolated plan path"
+            );
         })
         .await;
 }
@@ -1718,7 +1779,7 @@ async fn resume_after_planner_failure_succeeds_without_infra_recap() {
                 !reminder.contains("Previous state: Paused (infrastructure error)."),
                 "{reminder}"
             );
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 2);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 5);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert!(snap.plan_file.is_some());
             assert_eq!(

@@ -542,6 +542,11 @@ pub struct MouseScrollState {
     recorder: Option<ScrollLogRecorder>,
     /// Wheel/trackpad flush cadence (default 16ms; the event loop may override it from the environment).
     redraw_cadence: Duration,
+    /// Latest instant applied to a transition.
+    /// Wheel reports carry their arrival instant. Ticks sample `Instant::now()`.
+    /// A tick can run while a wheel report is still queued, so the arrival instant is older than the tick.
+    /// Later transitions stay at or after this instant, and `ts_ms` is that same instant.
+    last_applied_at: Instant,
 }
 
 impl MouseScrollState {
@@ -557,6 +562,7 @@ impl MouseScrollState {
             last_finalized: None,
             recorder: None,
             redraw_cadence: REDRAW_CADENCE,
+            last_applied_at: now,
         }
     }
 
@@ -581,6 +587,7 @@ impl MouseScrollState {
         direction: ScrollDirection,
         config: ScrollConfig,
     ) -> ScrollUpdate {
+        let now = self.monotonic_now(now);
         let direction = config.apply_direction(direction);
         let mut lines = 0;
 
@@ -655,6 +662,7 @@ impl MouseScrollState {
 
     /// Check whether an active stream has ended at a specific time (for tests).
     pub fn on_tick_at(&mut self, now: Instant) -> ScrollUpdate {
+        let now = self.monotonic_now(now);
         let mut lines = 0;
         if let Some(mut stream) = self.stream.take() {
             let gap = now.duration_since(stream.last);
@@ -916,7 +924,18 @@ impl Default for MouseScrollState {
             last_finalized: None,
             recorder: ScrollLogRecorder::from_env_at(now),
             redraw_cadence: REDRAW_CADENCE,
+            last_applied_at: now,
         }
+    }
+}
+
+impl MouseScrollState {
+    /// One clock for stream timing and the recorder's `ts_ms`.
+    /// Arrival time and `Instant::now()` are different samples. A later call must not move the timeline backwards.
+    fn monotonic_now(&mut self, now: Instant) -> Instant {
+        let now = now.max(self.last_applied_at);
+        self.last_applied_at = now;
+        now
     }
 }
 

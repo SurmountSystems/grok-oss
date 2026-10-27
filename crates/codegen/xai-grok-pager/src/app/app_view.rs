@@ -5628,7 +5628,8 @@ impl AppView {
                 *remaining -= 1;
             }
         }
-        needs_redraw |= self.tick_scroll();
+        // The scroll clock lives on the event-loop scroll arm, which stays idle while input is queued.
+        // Calling `tick_scroll` here stamped `Instant::now()` ahead of a queued wheel arrival, and the later row's `ts_ms` stepped backwards.
         self.update_status_line();
         needs_redraw |= self.status_line.take_changed();
         needs_redraw |= self.note_caret_blink_phase();
@@ -5668,7 +5669,8 @@ impl AppView {
         }
     }
     /// Flush pending scroll lines (stream gap detection, redraw cadence).
-    /// Without this, stale streams are never finalized after the user stops scrolling, and sub-line fractional remainders may not be flushed.
+    /// The event loop calls this from the scroll-clock arm, and only when the input queue is empty.
+    /// An animation tick must not call it: that tick samples `Instant::now()` while a queued wheel event still carries an earlier arrival instant, and the scroll log's `ts_ms` would step backwards.
     /// Returns true only when lines were dispatched, i.e. a draw would show real movement.
     pub(crate) fn tick_scroll(&mut self) -> bool {
         let mut needs_redraw = false;
