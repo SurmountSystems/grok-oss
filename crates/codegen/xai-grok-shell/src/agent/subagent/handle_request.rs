@@ -1757,7 +1757,9 @@ async fn run_shell_child_body(
         agent_message_sender,
         ctx.goal_enabled,
         ctx.background_workflows_enabled,
-        true,
+        // GitHub #236: L2 advertises native spawn_subagent. L3 does not.
+        // Passing true for every nested session would re-inject spawn on L3.
+        allow_nested_subagents,
         ctx.subagents_max_depth,
         ctx.workflow_max_concurrent_agents,
         ctx.media_gen_batch_limits,

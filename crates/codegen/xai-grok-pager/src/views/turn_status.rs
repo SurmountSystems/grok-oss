@@ -50,12 +50,13 @@ pub struct TurnStatusOutput {
     /// Hit area for the global pause / resume button, if rendered.
     pub pause_button: Option<Rect>,
     /// Hit area for the background-demote button, if rendered.
+    /// L1 blocking execute auto-backgrounds (GitHub #232), so this stays `None`.
     pub bg_button: Option<Rect>,
     /// Hit area for the still-running watcher cue (click opens the tasks pane).
     /// `None` on keyboard-only hosts.
     pub watching_cue: Option<Rect>,
 }
-/// Hover state for the turn-status row's mouse affordances (`[stop]`, `[↓]`, the still-running watcher cue).
+/// Hover state for the turn-status row's mouse affordances (`[stop]`, the still-running watcher cue).
 /// `Some(_)` renders them; `None` marks a keyboard-only host (minimal mode, no mouse capture) and suppresses all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MouseButtons {
@@ -63,7 +64,8 @@ pub struct MouseButtons {
     pub cancel_hovered: bool,
     /// Whether the mouse is over the `[pause]` / `[resume]` button.
     pub pause_hovered: bool,
-    /// Whether the mouse is over the `[↓]` send-to-background button.
+    /// Whether the mouse is over the send-to-background button.
+    /// Unused while L1 auto-backgrounds blocking execute (GitHub #232).
     pub bg_hovered: bool,
     /// Whether the mouse is over the still-running watcher cue.
     pub watching_hovered: bool,
@@ -216,6 +218,9 @@ pub struct TurnStatusArgs<'a> {
     pub is_bash_turn: bool,
     pub is_pending_user_input: bool,
     pub goal_verifying: bool,
+    /// Goal overlay is paused (`Paused (error)` and the other paused labels).
+    /// Composer must not keep `Responding...` with pause/stop as if that Goal turn were still live.
+    pub goal_paused: bool,
     pub watchers: Watchers,
     /// Parked on a sendable wait (`AgentView::renders_parked`).
     pub parked: bool,
@@ -243,12 +248,13 @@ pub fn render_turn_status(
         tick,
         drain_blocked,
         buttons,
-        has_running_execute,
+        has_running_execute: _,
         total_tokens,
         session_starting_since,
         is_bash_turn,
         is_pending_user_input,
         goal_verifying,
+        goal_paused,
         watchers,
         parked,
         flat_background,
@@ -256,10 +262,19 @@ pub fn render_turn_status(
         held_queue_top_sendable,
         global_paused,
     } = args;
+    let idle_for_paused_goal = AgentState::Idle;
+    let state = if goal_paused
+        && matches!(
+            state,
+            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+        ) {
+        &idle_for_paused_goal
+    } else {
+        state
+    };
     let show_buttons = buttons.is_some();
     let cancel_hovered = buttons.is_some_and(|b| b.cancel_hovered);
     let pause_hovered = buttons.is_some_and(|b| b.pause_hovered);
-    let bg_hovered = buttons.is_some_and(|b| b.bg_hovered);
     if area.height == 0 || area.width < 10 {
         return TurnStatusOutput::default();
     }
@@ -516,35 +531,21 @@ pub fn render_turn_status(
         _ => String::new(),
     };
     let turn_timer_width = turn_timer_str.width();
-    let show_bg = show_cancel
-        && has_running_execute
-        && matches!(
-            state,
-            AgentState::TurnRunning | AgentState::CommandRunning { .. }
-        );
-    let bg_str = if show_bg {
-        if bg_hovered {
-            " [send to bg]"
-        } else {
-            " [\u{2193}]"
-        }
-    } else {
-        ""
-    };
-    let bg_width = bg_str.width();
+    // GitHub #232: L1 blocking execute auto-backgrounds. send to bg is not
+    // an Operator hover control.
     let pause_str: &str = if show_pause {
-        pause_button_str(chrome.pause_is_resume, show_bg || turn_timer_width > 0)
+        pause_button_str(chrome.pause_is_resume, turn_timer_width > 0)
     } else {
         ""
     };
     let pause_width = pause_str.width();
     let cancel_str: &str = if show_cancel {
-        stop_button_str(show_bg || show_pause || turn_timer_width > 0)
+        stop_button_str(show_pause || turn_timer_width > 0)
     } else {
         ""
     };
     let cancel_width = cancel_str.width();
-    let right_width = turn_timer_width + bg_width + pause_width + cancel_width;
+    let right_width = turn_timer_width + pause_width + cancel_width;
     let spinner_str = if is_pending_user_input {
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
@@ -669,20 +670,7 @@ pub fn render_turn_status(
         buf.set_span(x, area.y, &span, turn_timer_width as u16);
         x += turn_timer_width as u16;
     }
-    let bg_button_rect = if show_bg && !bg_str.is_empty() {
-        let bg_x = x;
-        let bg_style = if bg_hovered {
-            right_style(theme.accent_running)
-        } else {
-            right_style(theme.gray)
-        };
-        let span = Span::styled(bg_str, bg_style);
-        buf.set_span(x, area.y, &span, bg_width as u16);
-        x += bg_width as u16;
-        Some(Rect::new(bg_x, area.y, bg_str.width() as u16, 1))
-    } else {
-        None
-    };
+    let bg_button_rect = None;
     // Pause / resume. Quiet white (`text_primary`) on hover, gray at rest.
     let pause_button_rect = if show_pause && !pause_str.is_empty() {
         let pause_x = x;
@@ -718,6 +706,15 @@ pub fn render_turn_status(
         watching_cue: None,
     }
 }
+/// The status row clips the tail, so an HTTP code has to lead the label.
+fn retry_model_request_label(attempt: u32, reason: &str) -> String {
+    let detail = format!("Retrying the model request (attempt {attempt}): {reason}");
+    match crate::app::error_display::parse_http_status(reason) {
+        Some(code) => format!("HTTP {code}: {detail}"),
+        None => detail,
+    }
+}
+
 /// Compute activity style, label, and whether it's a tool.
 fn compute_activity(
     theme: &Theme,
@@ -772,7 +769,7 @@ fn compute_activity(
             }),
         ) => (
             Style::default().fg(theme.warning),
-            format!("Retrying the model request (attempt {attempt}): {reason}"),
+            retry_model_request_label(*attempt, reason),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
@@ -1005,6 +1002,49 @@ mod tests {
         );
         assert_eq!(label, "Responding…");
     }
+    /// Operator contract: Goal header `Paused (error)` must not sit next to
+    /// composer `Responding...` with pause/stop as if the turn were still the live Goal.
+    #[test]
+    fn goal_paused_error_must_not_paint_composer_responding_with_pause_stop() {
+        let state = AgentState::TurnRunning;
+        let activity = Some(TurnActivity::Responding);
+        let args = TurnStatusArgs {
+            state: &state,
+            activity: &activity,
+            turn_elapsed: Some(Duration::from_secs(232)),
+            activity_started_at: None,
+            tick: 0,
+            drain_blocked: false,
+            buttons: Some(MouseButtons::default()),
+            has_running_execute: false,
+            total_tokens: None,
+            session_starting_since: None,
+            is_bash_turn: false,
+            is_pending_user_input: false,
+            goal_verifying: false,
+            goal_paused: true,
+            watchers: Watchers::default(),
+            parked: false,
+            flat_background: false,
+            held_queue: 0,
+            held_queue_top_sendable: false,
+            global_paused: false,
+        };
+        let (output, buf) = render_row(args, 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            !text.contains("Responding"),
+            "Goal Paused (error) must not keep composer Responding as if the Goal turn were still live, got {text:?}"
+        );
+        assert!(
+            !(text.contains("[pause]") && text.contains("[stop]")),
+            "Goal Paused (error) must not keep pause/stop as if the Goal turn were still live, got {text:?}"
+        );
+        assert!(
+            output.cancel_button.is_none(),
+            "paused Goal must not keep a live-turn [stop] hit target"
+        );
+    }
     #[test]
     fn retrying_chrome_names_the_model_request() {
         let theme = Theme::current();
@@ -1033,6 +1073,81 @@ mod tests {
             label.contains("transient error"),
             "retry chrome must name the cause, not hide it behind attempt N: {label}"
         );
+    }
+
+    /// Operator status row, 2026-10-25. The painted line was
+    /// `Retrying the model request (attempt 13): API error (s...` after the
+    /// row clipped. HTTP 500 has to be in the uncut prefix.
+    #[test]
+    fn retrying_http_500_line_contains_500_and_does_not_stop_at_api_error_s() {
+        let reason = "API error (status 500 Internal Server Error): error: Internal error during token generation";
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 13,
+                max_retries: 15,
+                reason: reason.into(),
+                error_type: None,
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            format!("HTTP 500: Retrying the model request (attempt 13): {reason}")
+        );
+        assert!(
+            label.contains("500"),
+            "retry label must include 500: {label}"
+        );
+        assert!(
+            !label.starts_with("API error (s"),
+            "retry label must not stop at API error (s: {label}"
+        );
+        assert!(!is_tool);
+        // Screenshot clip: about 54 columns of label, then the ellipsis.
+        // The old wording died at `API error (st`.
+        let clipped = truncate_str(&label, 55);
+        let visible = clipped.split('\u{2026}').next().unwrap_or(clipped.as_str());
+        assert!(
+            visible.contains("500"),
+            "HTTP 500 must sit in the uncut prefix, got {clipped:?}"
+        );
+        assert!(
+            !visible.contains("API error (s"),
+            "clipped retry line must not stop at API error (s, got {clipped:?}"
+        );
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 13,
+            max_retries: 15,
+            reason: reason.into(),
+            error_type: None,
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.turn_elapsed = Some(Duration::from_secs(2 * 3600 + 7 * 60));
+        args.total_tokens = Some(67_600);
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(17));
+        let text = render_row_text(args, 96);
+        let painted = text.split('\u{2026}').next().unwrap_or(text.as_str());
+        assert!(
+            painted.contains("500"),
+            "painted retry line must include 500 before the clip, got {text:?}"
+        );
+        assert!(
+            !(painted.contains("API error (s") && !painted.contains("500")),
+            "painted retry line must not stop at API error (s, got {text:?}"
+        );
+        if let Some(api_at) = painted.find("API error (s") {
+            let code_at = painted.find("500").expect("500 is in the painted prefix");
+            assert!(
+                code_at < api_at,
+                "HTTP 500 must sit before API error (s, got {text:?}"
+            );
+        }
     }
 
     /// HTTP 502 retry chrome already names the wait (`next try in 29s`).
@@ -1402,6 +1517,37 @@ mod tests {
             "family-switch compact must show the elapsed timer like /compact, got: {text:?}"
         );
     }
+    /// GitHub #232: L1 CommandRunning that can block the Operator box must not
+    /// paint `[send to bg]` or the hover arrow. Auto-background is the path.
+    #[test]
+    fn l1_command_running_does_not_paint_send_to_bg() {
+        let state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: Instant::now(),
+        };
+        let mut args = idle_args(Watchers::default());
+        args.state = &state;
+        args.has_running_execute = true;
+        args.turn_elapsed = Some(Duration::from_secs(3));
+        args.buttons = Some(MouseButtons {
+            bg_hovered: true,
+            ..MouseButtons::default()
+        });
+        let (output, buf) = render_row(args, 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            !text.contains("[send to bg]"),
+            "CommandRunning must not paint [send to bg] as an Operator control, got: {text:?}"
+        );
+        assert!(
+            !text.contains('\u{2193}'),
+            "CommandRunning must not paint the send-to-bg arrow, got: {text:?}"
+        );
+        assert!(
+            output.bg_button.is_none(),
+            "send to bg must not remain a hover hit target"
+        );
+    }
     #[test]
     fn format_hours() {
         assert_eq!(format_turn_timer(Duration::from_secs(3600)), "1h0m");
@@ -1452,6 +1598,7 @@ mod tests {
                 is_bash_turn: false,
                 is_pending_user_input: false,
                 goal_verifying: false,
+                goal_paused: false,
                 watchers: Watchers::default(),
                 parked: false,
                 flat_background: false,
@@ -1560,6 +1707,7 @@ mod tests {
             is_bash_turn: false,
             is_pending_user_input: false,
             goal_verifying: false,
+            goal_paused: false,
             watchers,
             parked: false,
             flat_background: false,

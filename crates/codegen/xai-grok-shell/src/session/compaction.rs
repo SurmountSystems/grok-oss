@@ -197,11 +197,30 @@ impl SessionActor {
         self.startup_hints.is_subagent && self.startup_hints.once_run
     }
 
-    /// L3 specialists and once-run nested roles never AUTO compact. They
-    /// summarize and stop (`EndChildWithoutCompact`). Ordinary L2 still AUTO
-    /// compact at 95% of the nested 200k window.
+    /// L3 specialists and once-run nested roles never AUTO compact.
+    /// Ordinary L2 still AUTO compacts at 95% of the nested 200k window
+    /// once the session is old enough. See [`Self::blocks_auto_compact_entry`].
     pub(crate) fn never_auto_compact(&self) -> bool {
         self.is_l3_session() || self.is_once_run_nested()
+    }
+
+    /// Nested sessions younger than this must not enter compaction.
+    pub(crate) const NESTED_COMPACT_MIN_AGE: std::time::Duration =
+        std::time::Duration::from_secs(60);
+
+    /// True when this session must not enter auto-compaction.
+    ///
+    /// An L3 must not enter at any age. A nested session younger than
+    /// [`Self::NESTED_COMPACT_MIN_AGE`] must not enter, even when the
+    /// sampling window is full. An ordinary L2 at least that old may still
+    /// enter when the window is full. L1 is not age-gated. Once-run nested
+    /// roles stay blocked at any age.
+    pub(crate) fn blocks_auto_compact_entry(&self) -> bool {
+        if self.never_auto_compact() {
+            return true;
+        }
+        self.startup_hints.is_subagent
+            && self.session_start.elapsed() < Self::NESTED_COMPACT_MIN_AGE
     }
 
     /// Sampling window this session may use.
@@ -276,8 +295,9 @@ impl SessionActor {
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
     /// is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
-        // L3 and once-run nested roles never AUTO compact.
-        if self.never_auto_compact() {
+        // L3 never enters auto-compact. A nested session younger than one
+        // minute does not enter either, even when the sampling window is full.
+        if self.blocks_auto_compact_entry() {
             return false;
         }
         if self.compaction.is_suppressed() {
@@ -2350,7 +2370,8 @@ impl SessionActor {
         }
     }
     /// Returns true when an ordinary session should compact after this sampling error.
-    /// An L3 or a once-run nested role returns false and must not CompactAndResubmit.
+    /// An L3, a once-run nested role, or a nested session younger than one
+    /// minute returns false and must not CompactAndResubmit.
     /// Missing model metadata is not a reason to skip: the overflow estimate uses
     /// the session sampling window. This is
     /// [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
@@ -2359,8 +2380,9 @@ impl SessionActor {
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
-        // L3 and once-run nested roles never AUTO compact. Do not CompactAndResubmit.
-        if self.never_auto_compact() {
+        // L3 never enters auto-compact. A nested session younger than one
+        // minute does not enter either, even when the sampling window is full.
+        if self.blocks_auto_compact_entry() {
             return false;
         }
         if self.compaction.is_suppressed() {
@@ -2518,10 +2540,14 @@ impl SessionActor {
 
     /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`
     /// (exact prior count plus a byte-estimate of items since last response) so
-    /// tool results are accounted for. Returns `None` when `is_flushing`.
+    /// tool results are accounted for. Returns `None` when `is_flushing`,
+    /// when the session is an L3, or when a nested session is younger than
+    /// one minute. An ordinary L2 at least that old may still return `Some`
+    /// when the sampling window is full.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
-        // L3 and once-run nested roles never AUTO compact.
-        if self.never_auto_compact() {
+        // L3 never enters auto-compact. A nested session younger than one
+        // minute does not enter either, even when the sampling window is full.
+        if self.blocks_auto_compact_entry() {
             return None;
         }
         if self
@@ -2586,8 +2612,9 @@ impl SessionActor {
     }
     /// Returns `Some` when tool call outputs have pushed the estimated token count past the context window, so pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
-        // L3 and once-run nested roles never AUTO compact.
-        if self.never_auto_compact() {
+        // L3 never enters auto-compact. A nested session younger than one
+        // minute does not enter either, even when the sampling window is full.
+        if self.blocks_auto_compact_entry() {
             return None;
         }
         if self.compaction.is_suppressed() {
@@ -2623,8 +2650,9 @@ impl SessionActor {
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
-        // L3 and once-run nested roles never AUTO compact.
-        if self.never_auto_compact() {
+        // L3 never enters auto-compact. A nested session younger than one
+        // minute does not enter either, even when the sampling window is full.
+        if self.blocks_auto_compact_entry() {
             return Ok(());
         }
         self.refresh_token_if_expired().await;

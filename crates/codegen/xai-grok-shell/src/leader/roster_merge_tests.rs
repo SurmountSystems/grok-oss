@@ -84,6 +84,7 @@ fn appends_rows_to_envelope_response_with_string_id() {
         json!("3|5"),
         &ExtMethodResult::success(RosterListResponse {
             sessions: vec![live_row("live")],
+            generation: 0,
         }),
     );
 
@@ -92,6 +93,11 @@ fn appends_rows_to_envelope_response_with_string_id() {
     assert_eq!(
         vec![json!("live"), json!("cursor-worker:bc-1")],
         session_ids(&out, &["result", "result", "sessions"])
+    );
+    assert_eq!(
+        Some(&json!(1)),
+        parsed(&out).pointer("/result/result/generation"),
+        "merged list carries the external roster generation"
     );
     assert_eq!(
         json!("cursor-worker"),
@@ -243,6 +249,7 @@ fn empty_roster_records_nothing_and_leaves_the_response_untouched() {
         json!("3|5"),
         &ExtMethodResult::success(RosterListResponse {
             sessions: vec![live_row("live")],
+            generation: 0,
         }),
     );
 
@@ -420,10 +427,11 @@ async fn notifier_emits_only_changed_rows_and_removals() {
 
 #[test]
 fn changed_notification_is_machine_wide_broadcast_shape() {
-    let line = changed_notification(vec![row("cursor-worker:bc-1")], Vec::new());
+    let line = changed_notification(vec![row("cursor-worker:bc-1")], Vec::new(), 4);
     let json = parsed(&line);
     assert_eq!(Some(&json!("2.0")), json.get("jsonrpc"));
     assert!(json.get("id").is_none());
     assert_eq!(Some(&json!("_x.ai/sessions/changed")), json.get("method"));
     assert!(json.pointer("/params/sessionId").is_none());
+    assert_eq!(Some(&json!(4)), json.pointer("/params/generation"));
 }

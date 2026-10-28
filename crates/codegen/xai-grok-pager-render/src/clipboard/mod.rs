@@ -83,7 +83,8 @@ pub struct ClipboardRoute {
     /// Emit an OSC 52 escape sequence toward the outer terminal.
     pub osc52: bool,
     /// Wrap OSC 52 in the tmux DCS passthrough envelope.
-    /// True only when tmux is the IMMEDIATE terminal (tmux-backed and not inside an editor `:terminal`).
+    /// True only when tmux is the IMMEDIATE local terminal (tmux-backed, not inside an editor `:terminal`, not SSH/ET).
+    /// Remote sessions emit plain OSC 52: Eternal Terminal does not unwrap `\x1bPtmux;`, and tmux drops DCS while `allow-passthrough` is off (the default).
     /// This flag is not a clipboard "leg" and is excluded from `Display`.
     pub osc52_tmux_passthrough: bool,
 }
@@ -138,7 +139,7 @@ struct ClipboardRouteOpts {
 /// Pure clipboard-route resolution (kill-switch / wrap-sink injected for tests).
 fn resolve_clipboard_route_with(ctx: &TerminalContext, opts: ClipboardRouteOpts) -> ClipboardRoute {
     let is_tmux = ctx.multiplexer == MultiplexerKind::Tmux;
-    // TMUX is the wrap signal: DCS passthrough is only correct when tmux is the immediate terminal.
+    // TMUX is the wrap signal: DCS passthrough is only correct when tmux is the immediate local terminal.
     let tmux_set = is_tmux
         || ctx
             .tmux_meta
@@ -158,9 +159,12 @@ fn resolve_clipboard_route_with(ctx: &TerminalContext, opts: ClipboardRouteOpts)
         native: true,
         tmux_buffer: is_tmux,
         osc52,
-        // Editor :terminal's immediate emulator is libvterm, not tmux, so don't wrap there
+        // Editor :terminal's immediate emulator is libvterm, not tmux, so don't wrap there.
+        // SSH / Eternal Terminal: tmux is often not the immediate PTY (et sits in front of grok-oss).
+        // Even when tmux is immediate on the remote, DCS wrap is dropped while allow-passthrough is off (tmux default).
+        // Plain OSC 52 is what tmux `set-clipboard` forwards to et -> ssh -> alacritty.
         // No point in tmux passthrough when OSC 52 itself is disabled.
-        osc52_tmux_passthrough: osc52 && tmux_set && ctx.embedded_editor.is_none(),
+        osc52_tmux_passthrough: osc52 && tmux_set && ctx.embedded_editor.is_none() && !ctx.is_ssh,
     }
 }
 
@@ -2132,7 +2136,7 @@ mod tests {
 
     #[cfg(test)]
     #[test]
-    fn remote_tmux_alacritty_still_routes_osc52_and_tmux_wrap() {
+    fn remote_tmux_alacritty_still_routes_osc52() {
         // Operator stack: grok-oss on surmount-1 inside Eternal Terminal and tmux,
         // tunneled to alacritty on horizon. arboard/wl-copy on the VPS is the wrong paste buffer.
         let env = crate::terminal::env_from(&[
@@ -2164,8 +2168,8 @@ mod tests {
             "OSC 52 must still be routed so copy tunnels et -> tmux -> ssh -> alacritty"
         );
         assert!(
-            route.osc52_tmux_passthrough,
-            "TMUX is set; wrap OSC 52 in the tmux DCS form"
+            !route.osc52_tmux_passthrough,
+            "DCS wrap is the live miss: et does not unwrap it, and tmux drops it when allow-passthrough is off"
         );
 
         let seq = route
@@ -2173,9 +2177,9 @@ mod tests {
             .expect("OSC 52 must emit to the TTY");
         assert_eq!(
             seq,
-            xai_grok_shared::clipboard::osc52_clipboard_sequence("hello", true)
+            xai_grok_shared::clipboard::osc52_clipboard_sequence("hello", false)
         );
-        assert_eq!(seq, b"\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\");
+        assert_eq!(seq, b"\x1b]52;c;aGVsbG8=\x07");
 
         let environment = ClipboardEnvironment {
             brand: ctx.brand,
@@ -2207,6 +2211,62 @@ mod tests {
             super::trust::resolve_copy_decision(&vps_native, "hello", environment),
             ClipboardFeedback::CopiedOscRemote
         );
+    }
+
+    /// Live miss after the OSC 52-to-/dev/tty plus tmux DCS deploy: copy through
+    /// surmount-1 grok-oss -> et -> tmux -> ssh -> fish -> starship -> alacritty
+    /// still did not reach the Operator paste buffer.
+    ///
+    /// DCS wrap (`\x1bPtmux;...`) is only understood by tmux as the immediate PTY.
+    /// Eternal Terminal does not unwrap it. tmux with default `allow-passthrough`
+    /// off drops it. Plain OSC 52 is what `set-clipboard` forwards outward.
+    #[cfg(test)]
+    #[test]
+    fn live_et_tmux_ssh_alacritty_emits_plain_osc52_not_tmux_dcs() {
+        let stacks = [
+            &[
+                ("TERM_PROGRAM", "alacritty"),
+                ("TERM", "alacritty"),
+                ("TMUX", "/tmp/tmux-1000/default,1,0"),
+                ("TMUX_PANE", "%0"),
+                ("ET_VERSION", "6.2.9"),
+            ][..],
+            &[
+                ("TERM_PROGRAM", "alacritty"),
+                ("TERM", "alacritty"),
+                ("TMUX", "/tmp/tmux-1000/default,1,0"),
+                ("TMUX_PANE", "%0"),
+                ("SSH_CONNECTION", "1.2.3.4 1234 5.6.7.8 22"),
+            ][..],
+        ];
+        for vars in stacks {
+            let env = crate::terminal::env_from(vars);
+            let ctx = crate::terminal::build_terminal_context_from_env(&env);
+            assert!(ctx.is_ssh, "live stack is remote: {vars:?}");
+            let route = resolve_clipboard_route_with(
+                &ctx,
+                ClipboardRouteOpts {
+                    no_osc52: false,
+                    wrap_sink: false,
+                },
+            );
+            assert!(route.osc52, "OSC 52 must still emit on {vars:?}");
+            assert!(
+                !route.osc52_tmux_passthrough,
+                "plain OSC 52, not tmux DCS, on {vars:?}"
+            );
+            let seq = route
+                .osc52_tty_sequence("hello")
+                .expect("OSC 52 must emit to the TTY");
+            assert_eq!(
+                seq, b"\x1b]52;c;aGVsbG8=\x07",
+                "TTY bytes must be plain OSC 52 on {vars:?}"
+            );
+            assert!(
+                !seq.starts_with(b"\x1bPtmux;"),
+                "tmux DCS wrap is the sequence the live stack still dropped"
+            );
+        }
     }
 
     #[test]
@@ -2252,6 +2312,19 @@ mod tests {
                 &plain_tmux_ctx(),
                 ClipboardRouteOpts {
                     no_osc52: true,
+                    wrap_sink: false
+                }
+            )
+            .osc52_tmux_passthrough
+        );
+        // remote tmux (SSH or ET): plain OSC 52, even though TMUX is set.
+        let mut remote_tmux = plain_tmux_ctx();
+        remote_tmux.is_ssh = true;
+        assert!(
+            !resolve_clipboard_route_with(
+                &remote_tmux,
+                ClipboardRouteOpts {
+                    no_osc52: false,
                     wrap_sink: false
                 }
             )

@@ -141,7 +141,14 @@ pub enum SessionEvent {
     /// Terminal context overflow, ideally unreachable since auto-compaction should shrink the conversation first.
     /// A safeguard for when it didn't (estimate drift vs the server's max_prompt_length, or compaction suppressed/failed).
     /// One actionable prompt, replacing the stacked CompactionFailed, RetryFailed, and TurnFailed banners.
-    ContextTooLarge,
+    /// `used` / `live` are this session's token counts when the shell named them
+    /// (`47689/12800`). Chrome must paint those counts. GitHub #233.
+    ContextTooLarge {
+        /// Tokens used when the session died over the live sampling window.
+        used: Option<u64>,
+        /// This session's live sampling window (not the model catalog).
+        live: Option<u64>,
+    },
     /// Session disk is full.
     DiskFull,
     /// Manual `/compact` command started. The invocation marker that pairs each `/compact` with its own outcome line.
@@ -382,7 +389,32 @@ fn sanitize_model_debug_text(text: &str) -> String {
     sanitized
 }
 
+/// Pull used/live token counts from the shell over-window death line.
+///
+/// `"Context is over this session's sampling window (47689/12800 tokens)."`
+pub(crate) fn parse_sampling_window_death_counts(message: &str) -> (Option<u64>, Option<u64>) {
+    let Some(tokens_idx) = message.find(" tokens") else {
+        return (None, None);
+    };
+    let before = &message[..tokens_idx];
+    let Some(open) = before.rfind('(') else {
+        return (None, None);
+    };
+    let pair = &before[open + 1..];
+    let mut parts = pair.split('/');
+    let used = parts.next().and_then(|s| s.trim().parse().ok());
+    let live = parts.next().and_then(|s| s.trim().parse().ok());
+    (used, live)
+}
+
 impl SessionEvent {
+    /// Terminal overflow from the shell over-window death line.
+    /// Parses used/live counts when the message names them (`47689/12800`).
+    pub fn context_too_large_from_message(message: &str) -> Self {
+        let (used, live) = parse_sampling_window_death_counts(message);
+        Self::ContextTooLarge { used, live }
+    }
+
     /// Format the event as a human-readable string.
     pub fn message(&self) -> String {
         match self {
@@ -541,11 +573,15 @@ impl SessionEvent {
                  your message."
                     .to_string()
             }
-            SessionEvent::ContextTooLarge => {
-                "This conversation is too large for the model's context window. \
+            SessionEvent::ContextTooLarge { used, live } => match (used, live) {
+                (Some(used), Some(live)) => format!(
+                    "Context is over this session's sampling window ({used}/{live} tokens). \
+                     Use /new to start a new session."
+                ),
+                _ => "This conversation is too large for the model's context window. \
                  Use /new to start a new session."
-                    .to_string()
-            }
+                    .to_string(),
+            },
             SessionEvent::DiskFull => {
                 xai_grok_shell::extensions::notification::DISK_FULL_USER_MESSAGE.to_string()
             }
@@ -627,7 +663,7 @@ impl SessionEvent {
         matches!(
             self,
             SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
+                | SessionEvent::ContextTooLarge { .. }
                 | SessionEvent::DiskFull
                 | SessionEvent::CompactionFailed { .. }
                 | SessionEvent::RequestFailed { .. }
@@ -1100,7 +1136,11 @@ mod tests {
 
     #[test]
     fn context_too_large_message_is_actionable() {
-        let msg = SessionEvent::ContextTooLarge.message();
+        let msg = SessionEvent::ContextTooLarge {
+            used: None,
+            live: None,
+        }
+        .message();
         assert!(
             msg.to_lowercase().contains("too large"),
             "must explain the conversation is too large: {msg}"
@@ -1111,9 +1151,45 @@ mod tests {
         );
     }
 
+    /// GitHub #233. Chrome the Operator can see must name the nested death
+    /// with used/live token counts (47689/12800), not a generic too-large line.
+    #[test]
+    fn context_too_large_names_used_and_live_sampling_window_counts() {
+        let msg = SessionEvent::ContextTooLarge {
+            used: Some(47_689),
+            live: Some(12_800),
+        }
+        .message();
+        assert!(msg.contains("47689"), "must name used tokens: {msg}");
+        assert!(
+            msg.contains("12800"),
+            "must name the live sampling window: {msg}"
+        );
+        assert!(
+            msg.contains("47689/12800"),
+            "must paint used/live as a pair: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("sampling window"),
+            "must name the live sampling window, not only the model catalog: {msg}"
+        );
+        assert!(
+            msg.contains("/new"),
+            "must offer /new as the recovery action: {msg}"
+        );
+        let parsed = parse_sampling_window_death_counts(
+            "Context is over this session's sampling window (47689/12800 tokens). \
+             Not retrying the same oversized model request.",
+        );
+        assert_eq!(parsed, (Some(47_689), Some(12_800)));
+    }
+
     #[test]
     fn context_too_large_has_warning_accent() {
-        let block = SessionEventBlock::new(SessionEvent::ContextTooLarge);
+        let block = SessionEventBlock::new(SessionEvent::ContextTooLarge {
+            used: None,
+            live: None,
+        });
         let theme = Theme::current();
         let accent = block.accent(&ctx());
         assert_eq!(

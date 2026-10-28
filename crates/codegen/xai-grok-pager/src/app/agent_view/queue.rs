@@ -301,10 +301,16 @@ impl AgentView {
             }
         }
         watchers.loops = self.session.scheduled_tasks.len();
+        let child_ids: std::collections::HashSet<&str> = self
+            .subagent_sessions
+            .values()
+            .map(|s| s.child_session_id.as_ref())
+            .collect();
         watchers.subagents = self
             .subagent_sessions
             .values()
             .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
+            .filter(|s| crate::app::subagent::is_l2_list_row(s, &child_ids))
             .count();
         watchers.workflows = self
             .workflow_runs

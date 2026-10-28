@@ -164,3 +164,31 @@ fn mid_text_goal_in_minimal_is_a_system_line() {
     assert!(toast_text(&app, id).is_none());
     assert_eq!(MID_TEXT_GOAL_NOTICE, last_system_text(&app, id));
 }
+
+/// Operator 2026-10-21: a blocking toast must not trap submit. Enter again
+/// sends the mention as ordinary text. It does not run `/goal`.
+#[test]
+fn mid_text_goal_enter_again_sends_anyway_as_ordinary_text() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    register_goal(&mut app, id);
+    test_agent_mut(&mut app, id).prompt.set_text(TESLA);
+
+    let first = dispatch(Action::SendPrompt(TESLA.to_owned()), &mut app);
+    assert_mid_text_goal_refused(&app, id, &first, TESLA);
+
+    let second = dispatch(Action::SendPrompt(TESLA.to_owned()), &mut app);
+
+    assert!(
+        toast_text(&app, id).is_none(),
+        "submit anyway must not toast again, got {:?}",
+        toast_text(&app, id)
+    );
+    assert!(
+        matches!(
+            second.as_slice(),
+            [Effect::SendPrompt { text, .. }] if text == TESLA
+        ),
+        "Enter again must send the raw prompt, not run /goal, got {second:?}"
+    );
+}

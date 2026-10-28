@@ -7,8 +7,15 @@ use crate::slash::command::SlashCommand;
 use crate::slash::registry::CommandRegistry;
 use crate::slash::{InlineSlashToken, scan_inline_slash_tokens};
 
-pub(crate) const MID_TEXT_GOAL_NOTICE: &str =
-    "Slash commands only work at the start of the message — put `/goal …` first.";
+pub(crate) const MID_TEXT_GOAL_NOTICE: &str = "Slash commands only work at the start of the message — put `/goal …` first. Enter again to send anyway as ordinary text.";
+
+/// Mention is not invoke. A sentence that contains `/plan` (or another skill slash)
+/// is ordinary Operator text, not a leading command.
+#[must_use]
+pub(crate) fn typed_text_is_slash_mention(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('/')
+}
 
 /// Skills and plugin skills are mentions; `/btw` hoists. Other builtins do not run mid-text.
 #[must_use]

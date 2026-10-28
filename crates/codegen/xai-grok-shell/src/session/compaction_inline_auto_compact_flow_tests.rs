@@ -208,6 +208,7 @@ async fn create_test_actor(
                 "/tmp/test-session",
             )),
         )),
+        goal_plan: parking_lot::Mutex::new(crate::session::goal_plan::GoalPlan::new()),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),
@@ -2326,9 +2327,17 @@ async fn goal_plan_writer_forked_parent_full_window_at_spawn_must_not_immediatel
         .await;
 }
 
+fn set_session_age_secs(actor: &mut SessionActor, secs: u64) {
+    actor.session_start = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(secs))
+        .expect("session age fits");
+}
+
 /// L2 nested sessions still AUTO compact at 95% of the live window.
-/// Nested catalog stays 200k. Live is 40% of that catalog (80k). Compact
-/// fires at 95% of live (76k). GitHub issue 221.
+/// Nested catalog stays 200k. Nested live is that same 200k cap, not 40%
+/// of it (80k). Compact fires at 95% of live (190k). GitHub issue 238 / 221.
+/// The session is at least 60 seconds old. A younger nested session must
+/// not enter compaction.
 #[tokio::test(flavor = "current_thread")]
 async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
     let local = tokio::task::LocalSet::new();
@@ -2337,7 +2346,7 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let mut under = create_test_actor(
-                75_999,
+                189_999,
                 200_000,
                 95,
                 gateway_tx.clone(),
@@ -2346,14 +2355,16 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
             .await;
             under.startup_hints.is_subagent = true;
             under.tool_context.subagent_depth = 1;
+            set_session_age_secs(&mut under, 60);
             assert!(
                 under.check_auto_compact_needed().await.is_none(),
-                "L2 under 95% of the nested 80k live window must not AUTO compact"
+                "L2 under 95% of the nested 200k live window must not AUTO compact"
             );
             let mut actor =
-                create_test_actor(76_000, 200_000, 95, gateway_tx, persistence_tx).await;
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.tool_context.subagent_depth = 1;
+            set_session_age_secs(&mut actor, 60);
             assert_eq!(
                 actor
                     .chat_state_handle
@@ -2368,11 +2379,73 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
             let trigger = actor.check_auto_compact_needed().await;
             assert!(
                 trigger.is_some(),
-                "L2 at 95% of the nested 80k live window must still AUTO compact"
+                "L2 at 95% of the nested 200k live window must still AUTO compact"
             );
             let info = trigger.expect("L2 AUTO trigger");
-            assert_eq!(info.context_window, 80_000);
-            assert_eq!(info.tokens_used, 76_000);
+            assert_eq!(info.context_window, 200_000);
+            assert_eq!(info.tokens_used, 190_000);
+        })
+        .await;
+}
+
+/// A nested session younger than 60 seconds must not enter compaction,
+/// even when the sampling window is full. An L3 must not enter at any age.
+/// An ordinary L2 at least 60 seconds old may still enter when the window
+/// is full. Calls `check_auto_compact_needed`.
+#[tokio::test(flavor = "current_thread")]
+async fn nested_session_under_60_seconds_and_l3_do_not_enter_compact() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (young_gateway, _) = mpsc::unbounded_channel();
+            let (young_persistence, _) = mpsc::unbounded_channel();
+            let mut young =
+                create_test_actor(200_000, 200_000, 95, young_gateway, young_persistence).await;
+            young.startup_hints.is_subagent = true;
+            young.tool_context.subagent_depth = 1;
+            set_session_age_secs(&mut young, 59);
+            assert!(
+                young.sampling_window_is_full().await,
+                "young nested session sampling window is full (200000/200000)"
+            );
+            assert!(
+                young.check_auto_compact_needed().await.is_none(),
+                "nested session younger than 60 seconds must not enter compact"
+            );
+
+            let (l3_gateway, _) = mpsc::unbounded_channel();
+            let (l3_persistence, _) = mpsc::unbounded_channel();
+            let mut l3 = create_test_actor(200_000, 200_000, 95, l3_gateway, l3_persistence).await;
+            l3.startup_hints.is_subagent = true;
+            l3.tool_context.subagent_depth = 2;
+            set_session_age_secs(&mut l3, 120);
+            assert!(l3.is_l3_session(), "depth 2 nested session is L3");
+            assert!(
+                l3.sampling_window_is_full().await,
+                "L3 sampling window is full (200000/200000)"
+            );
+            assert!(
+                l3.check_auto_compact_needed().await.is_none(),
+                "an L3 must not enter compact at any age"
+            );
+
+            let (l2_gateway, _) = mpsc::unbounded_channel();
+            let (l2_persistence, _) = mpsc::unbounded_channel();
+            let mut l2 = create_test_actor(200_000, 200_000, 95, l2_gateway, l2_persistence).await;
+            l2.startup_hints.is_subagent = true;
+            l2.startup_hints.once_run = false;
+            l2.tool_context.subagent_depth = 1;
+            set_session_age_secs(&mut l2, 60);
+            assert!(!l2.is_l3_session(), "ordinary L2 at depth 1 is not an L3");
+            assert!(
+                l2.sampling_window_is_full().await,
+                "L2 sampling window is full (200000/200000)"
+            );
+            let trigger = l2.check_auto_compact_needed().await;
+            let info = trigger
+                .expect("L2 at least 60 seconds old with a full sampling window may enter compact");
+            assert_eq!(info.tokens_used, 200_000);
+            assert_eq!(info.context_window, 200_000);
         })
         .await;
 }
@@ -2433,6 +2506,7 @@ async fn l2_and_l3_do_not_continue_past_200k_while_l1_keeps_the_catalog_500k_win
             let mut l2 = create_test_actor(200_000, 500_000, 95, l2_gateway, l2_persistence).await;
             l2.startup_hints.is_subagent = true;
             l2.tool_context.subagent_depth = 1;
+            set_session_age_secs(&mut l2, 60);
             assert_eq!(
                 l2.chat_state_handle
                     .get_sampling_config()
@@ -2480,6 +2554,7 @@ async fn l2_and_l3_do_not_continue_past_200k_while_l1_keeps_the_catalog_500k_win
             let mut l3 = create_test_actor(200_000, 500_000, 95, l3_gateway, l3_persistence).await;
             l3.startup_hints.is_subagent = true;
             l3.tool_context.subagent_depth = 2;
+            set_session_age_secs(&mut l3, 120);
             l3.compaction_at_tokens.set(Some(
                 xai_grok_sampling_types::CompactionAtTokens::Enabled(true),
             ));
@@ -2532,7 +2607,7 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
             actor.chat_state_handle.push_assistant_response(
                 ConversationItem::assistant("The specialist already said this sentence."),
             );
-            let user_text = "x".repeat(240_000);
+            let user_text = "x".repeat(560_000);
             actor
                 .chat_state_handle
                 .push_user_message_and_ack(ConversationItem::user(user_text))
@@ -2555,8 +2630,8 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
                 "painted total changed (painted {painted}, estimate {estimate})"
             );
             assert!(
-                estimate >= 80_000,
-                "estimate stayed under the nested 80k live window (painted {painted}, estimate {estimate})"
+                estimate >= 200_000,
+                "estimate stayed under the nested 200k live window (painted {painted}, estimate {estimate})"
             );
             assert!(
                 !actor.l3_nested_window_is_full().await,
@@ -2566,9 +2641,9 @@ async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_p
         .await;
 }
 
-/// Nested catalog stays 200k. Live is 80k. The coordinator may compact a
-/// specialist at 95% of that live window (76k). The specialist still must
-/// not compact-and-continue. GitHub issue 221.
+/// Nested catalog stays 200k. Nested live is that same 200k cap. The
+/// coordinator may compact a specialist at 95% of that live window (190k).
+/// The specialist still must not compact-and-continue. GitHub issue 238 / 221.
 #[tokio::test(flavor = "current_thread")]
 async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_cannot_compact_itself() {
     let local = tokio::task::LocalSet::new();
@@ -2577,7 +2652,7 @@ async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_canno
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let mut actor =
-                create_test_actor(76_000, 200_000, 95, gateway_tx, persistence_tx).await;
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.tool_context.subagent_depth = 2;
             assert_eq!(
@@ -2601,10 +2676,10 @@ async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_canno
             );
             let trigger = actor.compact_specialist_initiated_by_coordinator().await;
             let info = trigger.expect(
-                "the coordinator must be able to compact this specialist at 95% of 80k live",
+                "the coordinator must be able to compact this specialist at 95% of 200k live",
             );
-            assert_eq!(info.tokens_used, 76_000);
-            assert_eq!(info.context_window, 80_000);
+            assert_eq!(info.tokens_used, 190_000);
+            assert_eq!(info.context_window, 200_000);
         })
         .await;
 }

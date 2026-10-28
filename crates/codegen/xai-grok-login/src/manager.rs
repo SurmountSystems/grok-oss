@@ -1689,6 +1689,17 @@ impl AuthManager {
             }
         }
     }
+    /// Already-open L1 after a sibling login: re-read `auth.json` / keyring and
+    /// return the adopted wire-valid bearer. Not the expired process cache.
+    /// IPC `{authorized, permission_mode}` never carries this token.
+    pub fn reload_shared_store_bearer(&self) -> Option<String> {
+        self.force_reload_from_disk();
+        let _ = self.pick_up_sibling_token();
+        self.current_wire_valid()
+            .or_else(|| self.current())
+            .map(|auth| auth.key)
+            .filter(|key| !key.trim().is_empty())
+    }
     /// Check if a candidate auth has a different token than what's in memory.
     pub fn is_different_token(&self, candidate: &GrokAuth) -> bool {
         let current_key = self.inner.read().as_ref().map(|a| a.key.clone());

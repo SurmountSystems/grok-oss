@@ -743,6 +743,8 @@ pub(crate) async fn spawn_session_actor(
         Arc::new(parking_lot::Mutex::new(tracker))
     };
     let goal_was_restored = persisted_goal_mode.is_some();
+    let restored_goal_plan =
+        SessionActor::goal_plan_from_restored_orchestration(persisted_goal_mode.as_ref());
     let goal_tracker = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
         let tracker = if let Some(snapshot) = persisted_goal_mode {
@@ -2043,6 +2045,7 @@ pub(crate) async fn spawn_session_actor(
         }),
         goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
+        goal_plan: parking_lot::Mutex::new(restored_goal_plan),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_repeat_stop_retries: std::sync::atomic::AtomicU32::new(0),
@@ -3029,6 +3032,10 @@ enum MemoryStorageSelection {
     DisabledByConfig,
     UnavailableForEphemeralWorkspace,
 }
+/// Nested L2/L3 seed catalog 200k even when the model catalog is smaller
+/// (grok-4.6-build ~32k). Live sampling is then 200k, not 40% of 32k (12800)
+/// and not 40% of the 200k catalog (80k). L1 keeps the model catalog.
+/// GitHub #238 / #233 / #221.
 pub(super) fn seed_sampling_context_window(
     catalog: std::num::NonZeroU64,
     override_window: Option<std::num::NonZeroU64>,
@@ -3205,33 +3212,68 @@ mod seed_sampling_window_tests {
         );
         assert_eq!(
             session_sampling_window(seeded.get(), true),
-            80_000,
-            "nested live sampling is 40% of the 200k nested catalog"
+            200_000,
+            "nested live sampling is the 200k nested catalog cap, not 40% of 200k"
         );
     }
 
-    /// Nested L2/L3 live sampling is 40% of the nested catalog window.
-    /// GitHub issue 221.
+    /// Nested L2/L3 live sampling is the nested catalog cap (200k) for both
+    /// a 1M catalog and a 200k catalog. GitHub issue 238 / 221.
     #[test]
-    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+    fn nested_l2_and_l3_live_sampling_is_nested_catalog_cap() {
         let catalog_1m = std::num::NonZeroU64::new(1_000_000).expect("1M catalog");
         assert_eq!(
             session_sampling_window(catalog_1m.get(), true),
-            400_000,
-            "1M nested catalog → 400k live"
+            200_000,
+            "1M nested catalog → 200k live, not 400k"
         );
-        assert_eq!(nested_live_sampling_window(catalog_1m.get()), 400_000);
+        assert_eq!(nested_live_sampling_window(catalog_1m.get()), 200_000);
         let catalog_200k = std::num::NonZeroU64::new(200_000).expect("200k catalog");
         let seeded_200k = seed_sampling_context_window(catalog_200k, None, true);
         assert_eq!(seeded_200k.get(), 200_000, "200k nested catalog stays 200k");
         assert_eq!(
             session_sampling_window(seeded_200k.get(), true),
-            80_000,
-            "200k nested catalog → 80k live"
+            200_000,
+            "200k nested catalog → 200k live, not 80k"
         );
         let l1 = std::num::NonZeroU64::new(500_000).expect("L1 catalog");
         assert_eq!(seed_sampling_context_window(l1, None, false).get(), 500_000);
         assert_eq!(session_sampling_window(1_000_000, false), 1_000_000);
+    }
+
+    /// GitHub #238 / #233 / #221. Nested spawn with a grok-4.6-build 32k model
+    /// catalog still seeds nested catalog 200k so live is 200k. Do not apply
+    /// 40% to 32k (that death was 47689/12800) and do not leave 32k as live.
+    #[test]
+    fn nested_spawn_with_32k_model_catalog_seeds_200k_catalog_and_200k_live() {
+        let catalog = std::num::NonZeroU64::new(32_000).expect("32k grok-4.6-build catalog");
+        let seeded = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            seeded.get(),
+            200_000,
+            "nested spawn must seed catalog 200k, not the 32k model catalog"
+        );
+        assert_eq!(
+            session_sampling_window(seeded.get(), true),
+            200_000,
+            "nested live is 200k after the 200k catalog seed, not 80k"
+        );
+        assert_ne!(
+            nested_live_sampling_window(catalog.get()),
+            12_800,
+            "must not apply 40% to a catalog already under 200k"
+        );
+        assert_eq!(
+            nested_live_sampling_window(catalog.get()),
+            200_000,
+            "a raw 32k catalog still floors to nested live 200k, not 32k"
+        );
+        let l1 = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            l1.get(),
+            32_000,
+            "L1 keeps the model catalog; the 200k floor is nested-only"
+        );
     }
 }
 #[cfg(test)]

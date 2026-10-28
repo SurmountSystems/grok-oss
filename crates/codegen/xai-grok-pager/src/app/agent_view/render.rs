@@ -37,7 +37,9 @@ use std::time::Instant;
 /// Prompt box height. Focus does not change it. The box grows with the
 /// prompt and stops at the window height.
 /// Model wait and retry chrome for leftover rows under the last prompt.
-/// Thinking and a nested subagent wait stay off this row.
+/// Thinking and a nested subagent wait stay off this row. A finished
+/// assistant reply with no in-flight sample must not reach here as
+/// `Waiting(Model)` (GitHub #247).
 pub(super) fn leftover_viewport_wait_label(
     activity: &Option<crate::acp::tracker::TurnActivity>,
 ) -> Option<String> {
@@ -49,6 +51,40 @@ pub(super) fn leftover_viewport_wait_label(
         Some(TurnActivity::Retrying { .. }) => Some("Retrying the model request".to_string()),
         _ => None,
     }
+}
+
+/// The status row already paints `Waiting for the model…` (plus the timer).
+/// The leftover transcript line must not paint that same string on the same turn.
+pub(super) fn status_row_shows_model_wait(
+    status_row_visible: bool,
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+) -> bool {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    status_row_visible && matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model)))
+}
+
+pub(super) fn leftover_model_wait_is_duplicate(label: &str, status_shows_model_wait: bool) -> bool {
+    status_shows_model_wait && label.contains("Waiting for the model")
+}
+
+/// One turn, one `Waiting for the model` line. Status row wins when it is up.
+/// Leftover is the line only when the status row is not showing that wait.
+pub(super) fn compose_waiting_for_model_lines(
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+    status_shows_model_wait: bool,
+) -> Vec<String> {
+    use crate::acp::tracker::WaitingReason;
+    let mut lines = Vec::new();
+    if status_shows_model_wait {
+        lines.push(WaitingReason::Model.label());
+    }
+    if let Some(label) = leftover_viewport_wait_label(activity)
+        && label.contains("Waiting for the model")
+        && !leftover_model_wait_is_duplicate(&label, status_shows_model_wait)
+    {
+        lines.push(label);
+    }
+    lines
 }
 
 /// Paint `label` on the first empty row under the last occupied row.
@@ -648,6 +684,34 @@ fn l1_credits_chip_label(
     credits_label_when_included_period_is_not_next_request()
 }
 
+/// Header `tasks N/M`. Live Subagents win when that list is non-empty.
+/// Otherwise open todo-board rows fill the same chip (in progress, then
+/// pending) so the credits chip can sit between the context figure and
+/// tasks. Completed and cancelled rows do not count.
+fn status_row_task_counts(
+    subagent_running: usize,
+    subagent_listed: usize,
+    todos: &[xai_grok_shell::tools::TodoItem],
+) -> (usize, usize) {
+    if subagent_listed > 0 {
+        return (subagent_running, subagent_listed);
+    }
+    let mut running = 0usize;
+    let mut listed = 0usize;
+    for todo in todos {
+        match todo.status {
+            xai_grok_shell::tools::TodoStatus::InProgress => {
+                running += 1;
+                listed += 1;
+            }
+            xai_grok_shell::tools::TodoStatus::Pending => listed += 1,
+            xai_grok_shell::tools::TodoStatus::Completed
+            | xai_grok_shell::tools::TodoStatus::Cancelled => {}
+        }
+    }
+    (running, listed)
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
 /// Tests take `Default` and override only what they exercise.
@@ -1039,12 +1103,7 @@ impl AgentView {
                     selected_entry.is_some_and(|e| e.block.supports_fullscreen()),
                 )
             };
-        let can_demote = self.surface() == ViewSurface::Root
-            && self
-                .session
-                .tracker
-                .running_execute_tool_call_id()
-                .is_some();
+        let can_demote = false;
         let selected_can_kill = if self.surface() == ViewSurface::ChildTakeover {
             false
         } else if self.active_pane == ActivePane::Dock {
@@ -2068,10 +2127,19 @@ impl AgentView {
             };
             status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
-        let todo_counts = self.todo.counts();
-        let todo_total = todo_counts.total();
-        if todo_total > 0 {
-            let label = format!("tasks {}/{}", todo_counts.completed, todo_total);
+        let (subagent_running, subagent_listed) = if self.dock_on {
+            let rows = self.dock_subagent_rows();
+            (
+                rows.iter().filter(|(_, _, row)| row.spinning).count(),
+                rows.len(),
+            )
+        } else {
+            self.tasks.listed_subagent_counts()
+        };
+        let (task_running, task_listed) =
+            status_row_task_counts(subagent_running, subagent_listed, self.todo.todos());
+        if task_listed > 0 {
+            let label = format!("tasks {task_running}/{task_listed}");
             status.push(
                 "tasks",
                 Line::from(Span::styled(
@@ -2381,7 +2449,20 @@ impl AgentView {
             sticky_gap_row = sb_output.sticky_gap_row;
             if !self.global_work_paused && !in_dashboard_overlay {
                 let activity = self.resolve_turn_activity();
-                if let Some(label) = leftover_viewport_wait_label(&activity) {
+                let goal_verifying = self
+                    .goal_state
+                    .as_ref()
+                    .is_some_and(|g| g.verifying_completion);
+                let status_shows_model_wait = status_row_shows_model_wait(
+                    turn_status_height > 0
+                        && self.plan_loop_status_label().is_none()
+                        && !goal_verifying,
+                    &activity,
+                );
+                if let Some(label) = leftover_viewport_wait_label(&activity)
+                    && !self.painted_assistant_reply_without_in_flight_sample()
+                    && !leftover_model_wait_is_duplicate(&label, status_shows_model_wait)
+                {
                     let pad = HorizontalLayout::ACCENT.saturating_add(2);
                     let wait_area = Rect {
                         x: layout.scrollback_content.x.saturating_add(pad),
@@ -3003,6 +3084,10 @@ impl AgentView {
                         is_bash_turn: self.bash_turn,
                         is_pending_user_input,
                         goal_verifying,
+                        goal_paused: self
+                            .goal_state
+                            .as_ref()
+                            .is_some_and(|goal| goal.status.is_paused()),
                         watchers: turn_status_watchers,
                         parked: turn_status_parked,
                         flat_background: false,
@@ -5359,7 +5444,7 @@ impl AgentView {
         if self.show_goal_detail
             && let Some(ref goal) = self.goal_state
         {
-            let todos = self.todo.todos();
+            let todos = goal.progress_items.as_slice();
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
             let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens = self.live_standalone_subagent_tokens();
@@ -9676,8 +9761,9 @@ mod status_credits_meter_tests {
 }
 
 /// Header paint omits the 15-minute window, the 24-hour window, SuperGrok
-/// period, and behind linear burn. Branch, context figure, and task count
-/// stay when they are separate from that chip.
+/// period, and behind linear burn. Branch and context figure stay when they
+/// are separate from that chip. Header `tasks N/M` is the live Subagents
+/// list, not the todo board.
 #[cfg(test)]
 mod header_omits_uptime_and_supergrok_period_chip {
     use std::collections::BTreeMap;
@@ -9911,9 +9997,13 @@ mod header_omits_uptime_and_supergrok_period_chip {
             header.contains("400K / 500K"),
             "context window figure stays when it is separate from the uptime suffix:\n{header}"
         );
+        // Operator contract 2026-10-21: header `tasks N/M` matches the live
+        // Subagents list the Operator can see, not the todo board. This fixture
+        // has 190/200 todos and no live subagents, so the header must not paint
+        // that todo ratio as `tasks 190/200`.
         assert!(
-            header.contains("tasks 190/200"),
-            "task count stays when it is a separate widget:\n{header}"
+            !header.contains("tasks 190/200"),
+            "header tasks chip is the live Subagents list, not todo-board 190/200:\n{header}"
         );
     }
 
@@ -9947,6 +10037,527 @@ mod header_omits_uptime_and_supergrok_period_chip {
         assert!(
             !header.contains("128K"),
             "header must not use context_state.total as the only window when the model catalog window is set:\n{header}"
+        );
+    }
+}
+
+/// Operator contracts for header `tasks N/M` versus the live Subagents list,
+/// and dock `[clear]` dropping leftover ghost rows.
+#[cfg(test)]
+mod header_tasks_match_live_subagents_list {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::actions::ActionRegistry;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::sync::Arc;
+    use xai_grok_shell::tools::{TodoItem, TodoStatus};
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 220, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn header_line(text: &str) -> &str {
+        text.lines()
+            .find(|line| line.contains("tasks ") || line.contains("[L0]"))
+            .unwrap_or(text)
+    }
+
+    fn live_row(child: &str, desc: &str) -> crate::app::subagent::SubagentInfo {
+        let mut info = running_subagent_info(child);
+        info.description = Arc::from(desc);
+        info
+    }
+
+    fn ghost_row(child: &str, desc: &str) -> crate::app::subagent::SubagentInfo {
+        let mut info = live_row(child, desc);
+        let status: Arc<str> = Arc::from("completed");
+        info.status = Some(status.clone());
+        info.attempt.status = Some(status);
+        info
+    }
+
+    /// Occupancy snapshot restore: stale `is_running()` and no host terminal status.
+    fn occupancy_dead_row(child: &str, desc: &str) -> crate::app::subagent::SubagentInfo {
+        super::AgentView::live_nested_occupancy_row_for_tests(
+            child,
+            &format!("sa-{child}"),
+            desc,
+            Some("implementer"),
+        )
+    }
+
+    fn todo_board(completed: usize, total: usize) -> Vec<TodoItem> {
+        let mut todos = Vec::with_capacity(total);
+        for index in 0..completed {
+            todos.push(TodoItem {
+                content: format!("done {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            });
+        }
+        for index in 0..total.saturating_sub(completed) {
+            todos.push(TodoItem {
+                content: format!("open {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            });
+        }
+        todos
+    }
+
+    /// Operator contract: header `tasks N/M` must match the live Subagents list
+    /// count the Operator can see, not a stale thousands/hundreds registry or the
+    /// todo board. One live nested goal plan writer must not leave header tasks
+    /// at 330/347 or 370/400.
+    #[test]
+    fn one_live_nested_goal_plan_writer_must_not_leave_header_tasks_at_330_of_347() {
+        let mut agent = make_agent();
+        agent.todo.update_todos(todo_board(330, 347));
+        agent.subagent_sessions.insert(
+            "live-1".into(),
+            live_row("live-1", "live nested goal plan writer"),
+        );
+        let text = draw(&mut agent);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330/347") && !header.contains("tasks 370/400"),
+            "one live nested goal plan writer must not leave header tasks at 330/347 or 370/400:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 1/1"),
+            "header tasks N/M must match the live Subagents list of 1, got:\n{header}"
+        );
+    }
+
+    /// Operator contract: after dock `[clear]`, leftover finished/ghost subagent
+    /// rows must not keep header `tasks N/M` in the hundreds when the live
+    /// Subagents list is 1. Clear must actually clear those rows.
+    #[test]
+    fn dock_clear_drops_ghost_rows_and_header_tasks_match_live_subagents_list_of_one() {
+        let mut agent = make_agent();
+        agent.todo.update_todos(todo_board(330, 347));
+        for i in 0..330 {
+            let id = format!("ghost-{i}");
+            agent
+                .subagent_sessions
+                .insert(id.clone(), ghost_row(&id, &format!("ghost leftover {i}")));
+        }
+        agent.subagent_sessions.insert(
+            "live-1".into(),
+            live_row("live-1", "live nested goal plan writer"),
+        );
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            331,
+            "setup: dock lists 330 ghost leftover rows plus 1 live row"
+        );
+        let clear_area = Rect::new(0, 0, 80, 8);
+        assert!(
+            crate::views::dock::subagent_clear_rect(clear_area, &agent.dock_snapshot()).is_some(),
+            "dock [clear] must be offered for ghost running-looking leftover rows, not only !is_running() completed rows"
+        );
+        agent.clear_completed_subagent_rows();
+        let (_running, listed) = agent.tasks.listed_subagent_counts();
+        assert_eq!(
+            listed, 1,
+            "after dock [clear], the live Subagents list must be 1, not 330 leftover ghosts plus 1"
+        );
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            1,
+            "after dock [clear], the dock Subagents list the Operator can see must be 1, not 330 leftover ghosts plus 1"
+        );
+        let text = draw(&mut agent);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330/347") && !header.contains("tasks 331/331"),
+            "after dock [clear], header must not keep hundreds of leftover rows:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 1/1"),
+            "header tasks N/M must match the live Subagents list of 1 after [clear], got:\n{header}"
+        );
+    }
+
+    /// Operator contract: with the dock on (the Subagents list the Operator can
+    /// see), one live nested writer after `[clear]` must paint Subagents 1 and
+    /// header `tasks 1/1`, not `tasks 330/347` or `tasks 370/400`.
+    #[test]
+    fn dock_on_header_tasks_match_live_subagents_one_after_clear() {
+        crate::views::dock::set_enabled_for_test(true);
+        let mut agent = make_agent();
+        agent.todo.update_todos(todo_board(370, 400));
+        for i in 0..330 {
+            let id = format!("ghost-{i}");
+            agent
+                .subagent_sessions
+                .insert(id.clone(), ghost_row(&id, &format!("ghost leftover {i}")));
+        }
+        agent.subagent_sessions.insert(
+            "live-1".into(),
+            live_row("live-1", "live nested goal plan writer"),
+        );
+        agent.clear_completed_subagent_rows();
+        let text = draw(&mut agent);
+        crate::views::dock::set_enabled_for_test(false);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330/347") && !header.contains("tasks 370/400"),
+            "one live nested writer must not leave header tasks at 330/347 or 370/400:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 1/1"),
+            "header tasks N/M must match the live Subagents list of 1, got:\n{header}"
+        );
+        assert!(
+            text.contains("Subagents 1") || text.contains("Subagents  1"),
+            "dock Subagents count the Operator can see must be 1 after [clear], got:\n{text}"
+        );
+        assert!(
+            !text.contains("Subagents 331") && !text.contains("Subagents 330"),
+            "dock must not keep hundreds of leftover rows, got:\n{text}"
+        );
+    }
+
+    /// Operator: "clear doesn't clear many subagents... we had thousands but now
+    /// there's hundreds even though there aren't really."
+    /// Session `/clear` (the slash the Operator types) must clear leftover/ghost
+    /// Subagents rows in the SAME conversation so header tasks is the live list
+    /// (1 or 0), not hundreds. It must not only start `/new`.
+    #[test]
+    fn session_slash_clear_clears_ghost_subagents_in_the_same_conversation_so_header_tasks_is_the_live_list()
+     {
+        use crate::app::actions::Action;
+        use crate::app::bundle::BundleState;
+        use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+        use crate::slash::commands::builtin_commands;
+        use crate::slash::registry::CommandRegistry;
+        use agent_client_protocol as acp;
+
+        let reg = CommandRegistry::new(builtin_commands());
+        let cmd = reg
+            .get("clear")
+            .expect("session /clear (the slash the Operator types)");
+        assert_ne!(
+            cmd.name(),
+            "new",
+            "session /clear must not only start /new; leftover/ghost Subagents rows stay in the same conversation"
+        );
+
+        let bundle = BundleState {
+            has_cache: false,
+            version: String::new(),
+            personas: Vec::new(),
+            roles: Vec::new(),
+            agents: Vec::new(),
+            skills: Vec::new(),
+            persona_details: Vec::new(),
+            role_details: Vec::new(),
+        };
+        let models = crate::acp::model_state::ModelState::default();
+        let session_id = acp::SessionId::new("same-conversation");
+        let mut ctx = CommandExecCtx {
+            models: &models,
+            session_id: Some(&session_id),
+            bundle_state: &bundle,
+            screen_mode: crate::app::ScreenMode::Minimal,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        };
+        let result = cmd.run(&mut ctx, "");
+        assert!(
+            !matches!(result, CommandResult::Action(Action::NewSession)),
+            "session /clear must not only start /new, got {result:?}"
+        );
+        assert!(
+            matches!(
+                result,
+                CommandResult::Action(Action::ClearLeftoverSubagentRows)
+            ),
+            "session /clear must hide leftover/ghost Subagents rows on this conversation, got {result:?}"
+        );
+
+        let mut agent = make_agent();
+        agent.todo.update_todos(todo_board(330, 347));
+        for i in 0..330 {
+            let id = format!("ghost-{i}");
+            agent
+                .subagent_sessions
+                .insert(id.clone(), ghost_row(&id, &format!("ghost leftover {i}")));
+        }
+        agent.subagent_sessions.insert(
+            "live-1".into(),
+            live_row("live-1", "live nested goal plan writer"),
+        );
+        let agent_id_before = agent.session.id;
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            331,
+            "setup: 330 ghost leftover rows plus 1 live row in this conversation"
+        );
+        agent.clear_session_leftover_subagent_rows();
+        assert_eq!(
+            agent.session.id, agent_id_before,
+            "session /clear must stay in the same conversation, not start /new"
+        );
+        assert!(
+            agent.subagent_sessions.contains_key("live-1"),
+            "the live nested writer stays in the same conversation after /clear"
+        );
+        let (_running, listed) = agent.tasks.listed_subagent_counts();
+        assert_eq!(
+            listed, 1,
+            "after session /clear, header tasks must be the live list (1 or 0), not hundreds of leftover ghosts"
+        );
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            1,
+            "after session /clear, the live Subagents list must be 1, not hundreds"
+        );
+        let text = draw(&mut agent);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330/347")
+                && !header.contains("tasks 331/331")
+                && !header.contains("tasks 370/400"),
+            "session /clear must not leave header tasks in the hundreds in the same conversation:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 1/1"),
+            "header tasks N/M must match the live Subagents list of 1 after session /clear, got:\n{header}"
+        );
+    }
+
+    /// Operator: "we had thousands but now there's hundreds even though there
+    /// aren't really." Occupancy-dead rows with a stale `is_running()` bit and
+    /// no host terminal status must not keep header tasks in the hundreds after
+    /// session `/clear` when the live list is 1 or 0.
+    #[test]
+    fn session_slash_clear_hides_occupancy_dead_stale_running_rows_so_header_tasks_is_the_live_list()
+     {
+        let sample = occupancy_dead_row("occ-dead-0", "occupancy-dead leftover 0");
+        assert!(
+            sample.is_running(),
+            "occupancy-dead rows keep a stale is_running() bit"
+        );
+        assert!(
+            !sample.has_terminal_host_status(),
+            "occupancy-dead rows have no host terminal status"
+        );
+
+        let mut agent = make_agent();
+        agent.todo.update_todos(todo_board(330, 347));
+        for i in 0..330 {
+            let id = format!("occ-dead-{i}");
+            agent.subagent_sessions.insert(
+                id.clone(),
+                occupancy_dead_row(&id, &format!("occupancy-dead leftover {i}")),
+            );
+        }
+        agent.subagent_sessions.insert(
+            "live-1".into(),
+            live_row("live-1", "live nested goal plan writer"),
+        );
+        let agent_id_before = agent.session.id;
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            331,
+            "setup: 330 occupancy-dead stale-running rows plus 1 live row"
+        );
+        agent.clear_session_leftover_subagent_rows();
+        assert_eq!(
+            agent.session.id, agent_id_before,
+            "session /clear must stay in the same conversation, not start /new"
+        );
+        assert!(
+            agent.subagent_sessions.contains_key("live-1"),
+            "the live nested writer stays in the same conversation after /clear"
+        );
+        let (_running, listed) = agent.tasks.listed_subagent_counts();
+        assert_eq!(
+            listed, 1,
+            "after session /clear, occupancy-dead stale-running rows must not keep header tasks in the hundreds when the live list is 1"
+        );
+        assert_eq!(
+            agent.dock_subagent_rows().len(),
+            1,
+            "after session /clear, occupancy-dead stale-running rows must not stay on the live Subagents list"
+        );
+        let text = draw(&mut agent);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330/347")
+                && !header.contains("tasks 331/331")
+                && !header.contains("tasks 330/330")
+                && !header.contains("tasks 370/400"),
+            "session /clear must not leave header tasks in the hundreds of occupancy-dead rows:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 1/1"),
+            "header tasks N/M must match the live Subagents list of 1 after session /clear of occupancy-dead rows, got:\n{header}"
+        );
+
+        let mut empty_live = make_agent();
+        empty_live.todo.update_todos(todo_board(330, 347));
+        for i in 0..330 {
+            let id = format!("occ-dead-only-{i}");
+            empty_live.subagent_sessions.insert(
+                id.clone(),
+                occupancy_dead_row(&id, &format!("occupancy-dead leftover {i}")),
+            );
+        }
+        assert_eq!(
+            empty_live.dock_subagent_rows().len(),
+            330,
+            "setup: 330 occupancy-dead stale-running rows and no live writer"
+        );
+        empty_live.clear_session_leftover_subagent_rows();
+        let (_running, listed) = empty_live.tasks.listed_subagent_counts();
+        assert_eq!(
+            listed, 0,
+            "after session /clear, occupancy-dead stale-running rows must not keep header tasks in the hundreds when the live list is 0"
+        );
+        assert_eq!(
+            empty_live.dock_subagent_rows().len(),
+            0,
+            "after session /clear with no live writer, occupancy-dead rows must not stay"
+        );
+        let text = draw(&mut empty_live);
+        let header = header_line(&text);
+        assert!(
+            !header.contains("tasks 330")
+                && !header.contains("tasks 331")
+                && !header.contains("tasks 370/400"),
+            "session /clear must not leave header tasks in the hundreds when the live list is 0:\n{header}"
+        );
+    }
+}
+
+/// L1 does not leak L3 context into L1 transcript or L1 context scoping.
+#[cfg(test)]
+mod l1_does_not_leak_l3_context_draw_tests {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::actions::ActionRegistry;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::render::ScratchBuffer;
+    use agent_client_protocol as acp;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::sync::Arc;
+    use xai_grok_shell::session::ContextInfo;
+
+    const L3_A_TRANSCRIPT: &str = "L3_A_TRANSCRIPT";
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 220, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn l1_does_not_leak_l3_context_into_l1_transcript_or_context_scoping() {
+        const OWED: &str = "L1 does not leak L3 context into L1 transcript/context scoping.";
+        let mut l1 = make_agent();
+        l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+        l1.session.models.override_context_window(500_000);
+        l1.session_sampling_window = Some(500_000);
+        l1.context_state = Some(ContextInfo::from_notification(152_000, 500_000));
+
+        let mut l2_info = running_subagent_info("l2-a");
+        l2_info.description = Arc::from("Coordinate A");
+        l2_info.attempt.depth = Some(1);
+        l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+        l1.subagent_sessions.insert("l2-a".into(), l2_info);
+        l1.insert_subagent_view(
+            "l2-a".into(),
+            Box::new(make_agent()),
+            crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+        );
+
+        let mut l3 = make_agent();
+        l3.session.session_id = Some(acp::SessionId::new("l3-a"));
+        l3.scrollback
+            .push_block(RenderBlock::user_prompt(L3_A_TRANSCRIPT));
+        l3.context_state = Some(ContextInfo::from_notification(80_000, 200_000));
+        let mut l3_info = running_subagent_info("l3-a");
+        l3_info.description = Arc::from("Prove A");
+        l3_info.attempt.depth = Some(2);
+        l3_info.attempt.parent_session_id = Some(Arc::from("l2-a"));
+        l3_info.attempt.tokens_used = Some(80_000);
+        l3_info.attempt.context_window_tokens = Some(200_000);
+        l1.subagent_sessions.insert("l3-a".into(), l3_info);
+        l1.insert_test_child("l3-a".into(), Box::new(l3));
+
+        assert_eq!(
+            l1.context_state.as_ref().map(|ctx| ctx.used),
+            Some(152_000),
+            "{OWED} L1 context_state.used must stay the L1 figure."
+        );
+        let text = draw(&mut l1);
+        let has_l1_chip = text.contains("152K / 500K") || text.contains("152K/500K");
+        assert!(
+            has_l1_chip,
+            "{OWED} L1 draw must paint 152K / 500K or 152K/500K, got:\n{text}"
+        );
+        assert!(
+            !text.contains("80K") && !text.contains("200K /") && !text.contains("0K / 0K"),
+            "{OWED} L1 chip must not be an L3 window and must not paint 0:\n{text}"
+        );
+        assert!(
+            !text.contains(L3_A_TRANSCRIPT),
+            "{OWED} L1 floor must not paint L3_A_TRANSCRIPT:\n{text}"
         );
     }
 }
@@ -11271,6 +11882,58 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !leftover.contains(PLAN_REWRITE_WAIT_HEADING),
             "paint-precedence leftover Revising must not keep rewriting-wait heading:\n{leftover}"
+        );
+    }
+
+    /// Revising chrome is on during an in-flight Revise rewrite and is gone
+    /// after `exit_plan_mode` present. A first present does not keep Revising
+    /// for minutes. Idle Approve / Comment / Revise / Exit replace it.
+    #[test]
+    fn revising_chrome_is_on_during_in_flight_revise_rewrite_and_gone_after_exit_plan_mode_present()
+    {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_feedback_in_flight = None;
+        agent.plan_approval_view = None;
+        agent.session.state = AgentState::TurnRunning;
+        let first_write = draw_screen(&mut agent);
+        assert!(
+            !first_write.contains(PLAN_REVISING_STATUS),
+            "first plan.md write is not a Revise rewrite; Revising chrome must stay off:\n{first_write}"
+        );
+
+        park_exit_plan_mode(&mut agent, "# Rewrite me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+        let _ = agent.send_plan_feedback(None);
+        agent.session.state = AgentState::Idle;
+        let rewriting = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight == Some(PlanFeedbackInFlight::Revising),
+            "Revise must mark an in-flight rewrite"
+        );
+        assert!(
+            rewriting.contains(PLAN_REVISING_STATUS),
+            "Revising chrome is on during an in-flight Revise rewrite:\n{rewriting}"
+        );
+
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        agent.session.state = AgentState::Idle;
+        let presented = draw_screen(&mut agent);
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "exit_plan_mode present must clear Revising"
+        );
+        assert!(
+            !presented.contains(PLAN_REVISING_STATUS),
+            "Revising chrome is gone after exit_plan_mode present:\n{presented}"
+        );
+        assert!(
+            presented.contains("Plan ready. Side panel open"),
+            "present replaces Revising with the plan panel:\n{presented}"
+        );
+        assert!(
+            presented.contains("approve | comment | revise | exit"),
+            "idle Approve / Comment / Revise / Exit replace Revising after present:\n{presented}"
         );
     }
 }

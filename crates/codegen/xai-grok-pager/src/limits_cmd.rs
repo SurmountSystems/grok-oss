@@ -2806,6 +2806,43 @@ mod tests {
         assert!(report.console.is_live);
     }
 
+    /// Named machine flag: `grok-oss limits --json` stays pretty JSON.
+    #[test]
+    fn limits_cli_json_flag_emits_json() {
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: Some(bal(42.5)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            Some("personal"),
+            &[input],
+            true,
+            None,
+            ConsoleTeamPrepaidGap::MissingTeamId,
+            vec![],
+        );
+        let mut buf = Vec::new();
+        write_limits_output(&report, &snap, true, &mut buf).expect("write json");
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(
+            s.trim_start().starts_with('{'),
+            "limits --json must be a JSON object, got: {s}"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(s.trim()).expect("limits --json must parse as JSON");
+        assert!(v.is_object(), "limits --json object, got: {v}");
+        assert!(
+            s.contains("\"schemaVersion\""),
+            "pretty JSON keys stay quoted, not TOON: {s}"
+        );
+    }
+
     #[test]
     fn json_report_shape_and_no_secrets() {
         let input = PrincipalLimitsInput {

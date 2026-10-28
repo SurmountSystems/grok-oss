@@ -152,10 +152,14 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             format_duration(std::time::Duration::from_millis(run.live_elapsed_ms()))
         ));
     }
-    let mut subs: Vec<_> = agent
-        .subagent_sessions
-        .values()
+    let all: Vec<_> = agent.subagent_sessions.values().collect();
+    let child_ids: std::collections::HashSet<&str> =
+        all.iter().map(|s| s.child_session_id.as_ref()).collect();
+    let mut subs: Vec<_> = all
+        .iter()
+        .copied()
         .filter(|s| s.attempt.workflow_run_id.is_none())
+        .filter(|s| is_l2_list_row(s, &child_ids))
         .collect();
     subs.sort_by(|a, b| {
         b.is_running()
@@ -163,7 +167,6 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             .then(b.attempt.started_at.cmp(&a.attempt.started_at))
             .then(a.child_session_id.cmp(&b.child_session_id))
     });
-    let all: Vec<_> = agent.subagent_sessions.values().collect();
     for info in subs {
         let (type_label, mut desc) = format_subagent_label(info);
         let status = if info.attempt.pending_kill {

@@ -585,7 +585,8 @@ impl SessionActor {
     }
     /// Uses a kept selection once the catalog lists it, as after a resume without a catalog.
     /// Nested L2/L3 selections cannot raise the stored catalog above 200k.
-    /// Live sampling is 40% of that catalog.
+    /// Nested live sampling is that catalog cap (`NESTED_SESSION_CONTEXT_CAP`,
+    /// 200k). 40% of catalog is keep-near attention only.
     pub(super) async fn apply_supported_context_window_selection(&self) {
         self.clamp_stored_sampling_window_for_nested().await;
         let Some(loaded) = crate::session::handle::load_context_window_selection(

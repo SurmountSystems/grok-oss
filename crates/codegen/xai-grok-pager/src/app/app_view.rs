@@ -657,6 +657,9 @@ pub struct AppView {
     /// Populated from `x.ai/sessions/list` polls and `x.ai/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which gates roster rendering.
     pub leader_roster: Vec<crate::app::roster::RosterEntry>,
+    /// Highest applied stamped roster generation (`x.ai/sessions/changed` or `x.ai/sessions/list`).
+    /// `0` means no stamped event has been applied. An older non-zero generation is ignored.
+    pub leader_roster_generation: u64,
     /// Local on-disk session list (dormant/idle sessions) shown on the dashboard when NOT in leader mode.
     /// There is no live leader roster to poll outside leader mode.
     /// We fetch the same `x.ai/session/list` the resume picker uses and render those as idle rows.
@@ -970,6 +973,9 @@ pub struct AppView {
     pub auth_methods: Vec<acp::AuthMethod>,
     /// Authentication state for the welcome screen login flow.
     pub auth_state: AuthState,
+    /// Newest applied authorize IPC unix-ms stamp. Auth IPC only.
+    /// A `0` stamp is not an authorize: it does not enqueue and does not replace a stored stamp.
+    pub newest_applied_authorize_event_ms: u64,
     /// Set by `/logout` until the shell answers, while `auth_state` still reads `Done`
     pub logout_pending: bool,
     /// Folder-trust state for the welcome screen.
@@ -1573,6 +1579,7 @@ impl AppView {
             bootstrap_acp_commands,
             auth_methods: Vec::new(),
             auth_state: AuthState::Done,
+            newest_applied_authorize_event_ms: 0,
             logout_pending: false,
             trust_state: TrustState::Done,
             consent_state: crate::app::consent::ConsentState::Done,
@@ -1648,6 +1655,7 @@ impl AppView {
             auto_topup: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
+            leader_roster_generation: 0,
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
             workspace_membership: Default::default(),
@@ -1976,6 +1984,9 @@ impl AppView {
             .iter_mut()
             .find(|e| e.session_id == entry.session_id)
         {
+            if existing.last_change_unix_ms > entry.last_change_unix_ms {
+                return;
+            }
             *existing = entry;
         } else {
             self.leader_roster.push(entry);
@@ -2121,6 +2132,16 @@ impl AppView {
         }
         self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
+    }
+    /// Overlay wrap and main conversation wrap run once after a resize drag settles (or a key/mouse arrives).
+    /// SIGWINCH itself only arms live-resize skip via [`crate::app::agent_view::AgentView::note_terminal_resize`].
+    pub(crate) fn settle_live_resize_overlays(&mut self) {
+        for agent in self.agents.values_mut() {
+            agent.settle_live_resize_overlay();
+            for child in agent.subagent_views.values_mut() {
+                child.settle_live_resize_overlay();
+            }
+        }
     }
     /// Recompute the render-value compact flag from the user setting and terminal height (`views::agent::effective_compact`).
     /// Propagate it to the appearance fan-out and every agent's prompt widget when it changed.
@@ -5607,7 +5628,8 @@ impl AppView {
                 *remaining -= 1;
             }
         }
-        needs_redraw |= self.tick_scroll();
+        // The scroll clock lives on the event-loop scroll arm, which stays idle while input is queued.
+        // Calling `tick_scroll` here stamped `Instant::now()` ahead of a queued wheel arrival, and the later row's `ts_ms` stepped backwards.
         self.update_status_line();
         needs_redraw |= self.status_line.take_changed();
         needs_redraw |= self.note_caret_blink_phase();
@@ -5647,7 +5669,8 @@ impl AppView {
         }
     }
     /// Flush pending scroll lines (stream gap detection, redraw cadence).
-    /// Without this, stale streams are never finalized after the user stops scrolling, and sub-line fractional remainders may not be flushed.
+    /// The event loop calls this from the scroll-clock arm, and only when the input queue is empty.
+    /// An animation tick must not call it: that tick samples `Instant::now()` while a queued wheel event still carries an earlier arrival instant, and the scroll log's `ts_ms` would step backwards.
     /// Returns true only when lines were dispatched, i.e. a draw would show real movement.
     pub(crate) fn tick_scroll(&mut self) -> bool {
         let mut needs_redraw = false;
@@ -5944,7 +5967,7 @@ impl AppView {
     /// Stores any resulting escape sequences in `pending_notification_escapes`.
     /// Also clears the permission notification flag when no permissions remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
+        let (session_name, model, activity, has_perms, turn_elapsed, is_busy, spawn_description) =
             if let ActiveView::Agent(id) = self.active_view
                 && let Some(agent) = self.agents.get(&id)
             {
@@ -5962,9 +5985,21 @@ impl AppView {
                 let has_perms = !agent.permission_queue.is_empty();
                 let elapsed = if parked { None } else { agent.turn_elapsed() };
                 let is_busy = agent.session.state.is_busy() && !parked;
-                (name, model, activity, has_perms, elapsed, is_busy)
+                let spawn_description = agent
+                    .running_live_specialists()
+                    .map(|info| info.description.as_ref())
+                    .find(|d| !d.trim().is_empty());
+                (
+                    name,
+                    model,
+                    activity,
+                    has_perms,
+                    elapsed,
+                    is_busy,
+                    spawn_description,
+                )
             } else {
-                (None, None, None, false, None, false)
+                (None, None, None, false, None, false, None)
             };
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
@@ -5980,6 +6015,7 @@ impl AppView {
             turn_elapsed,
             is_busy,
             focused: self.notification_service.focus_tracker.is_focused(),
+            spawn_description,
         };
         if let Some(esc) = self.notification_service.on_tick(&title_state) {
             self.pending_notification_escapes

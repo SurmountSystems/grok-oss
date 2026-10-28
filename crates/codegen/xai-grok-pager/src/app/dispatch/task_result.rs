@@ -1,7 +1,8 @@
 //! Async task-result application: routes task results into state.
 use super::auth::{
     ensure_login_method, handle_auth_complete, handle_auth_url_ready, handle_mcp_auth_trigger_done,
-    handle_mcp_setup_submit_done, retry_nested_resume_after_missing_auth,
+    handle_mcp_setup_submit_done, handle_sibling_ipc_authorize,
+    retry_nested_resume_after_missing_auth,
 };
 use super::billing::{
     PAYWALL_AUTO_CHECK_TIMEOUT, apply_auto_topup, handle_billing_fetched,
@@ -750,8 +751,19 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             },
             query,
         ),
-        TaskResult::RosterLoaded { sessions } => {
-            app.leader_roster = sessions;
+        TaskResult::RosterLoaded {
+            sessions,
+            generation,
+        } => {
+            let stale = generation > 0 && generation < app.leader_roster_generation;
+            if !stale {
+                if generation > 0 {
+                    app.leader_roster_generation = generation;
+                }
+                for entry in sessions {
+                    app.upsert_roster_entry(entry);
+                }
+            }
             app.dashboard_sessions_loading = false;
             vec![]
         }
@@ -1181,6 +1193,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::AuthComplete { request_seq, meta } => {
             handle_auth_complete(app, request_seq, meta)
         }
+        TaskResult::SiblingIpcAuthorize {
+            authorized,
+            permission_mode,
+            event_ms,
+        } => handle_sibling_ipc_authorize(app, authorized, permission_mode, event_ms),
+        TaskResult::AuthorizeAskPublished => vec![],
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {
                 request_seq: current_seq,

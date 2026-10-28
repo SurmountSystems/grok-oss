@@ -190,6 +190,34 @@ fn enforce_profile_renders_the_design_order_with_every_path_as_a_param() {
     }
 }
 
+/// Operator 2026-10-23 / GitHub #245: the `$GROK_HOME/sessions` TreeExcept
+/// read deny must not kernel-deny a session compaction segment.
+#[test]
+fn sessions_tree_except_read_deny_carves_out_compaction_store() {
+    let mut policy = fixture_policy();
+    let sessions = PathBuf::from(format!("{HOME}/.grok/sessions"));
+    policy.read = ReadPolicy::AllExcept {
+        deny: vec![DenyEntry::TreeExcept {
+            tree: sessions,
+            except: PathBuf::from(format!("{HOME}/.grok/sessions/own")),
+        }],
+    };
+    let sbpl = render_enforce(&policy, &tag()).expect("render");
+    let deny_reads: Vec<&str> = sbpl
+        .profile
+        .lines()
+        .filter(|line| line.starts_with("(deny file-read*"))
+        .collect();
+    let tree_deny = deny_reads
+        .iter()
+        .find(|line| line.contains("require-all") && line.contains("require-not"))
+        .expect("sessions tree-except file-read deny");
+    assert!(
+        tree_deny.contains("compaction"),
+        "session compaction segment must be carved out of the read deny:\n{tree_deny}"
+    );
+}
+
 /// Each write root's `.git` node is a literal deny in the mandatory block (a temp root's
 /// `/private` alias included), never a subpath: a rename in or out of the node is refused and
 /// every write inside it stays under the root's allow.

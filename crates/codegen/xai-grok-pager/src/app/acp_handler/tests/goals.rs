@@ -696,3 +696,70 @@
             "terminal status drops the live block id (kept only as history)"
         );
     }
+
+    #[test]
+    fn test_goal_plan_persists_across_session_update() {
+        let mut app = make_app_with_agent("sess-A");
+        assert!(send_goal_update(&mut app, "g-keep", "active", 1_000));
+        send_workflow_update(&mut app, "wf", "deep-research", "active", false);
+        let goal = test_agent(&app, AgentId(0))
+            .goal_state
+            .as_ref()
+            .expect("goal must survive a non-goal session_update");
+        assert_eq!(goal.goal_id, "g-keep");
+    }
+
+    #[test]
+    fn test_goal_plan_persists_across_conversation_compaction() {
+        let mut app = make_app_with_agent("sess-A");
+        assert!(send_goal_update(&mut app, "g-keep", "active", 1_000));
+        dispatch_goal_update(
+            &mut app,
+            serde_json::json!({
+                "sessionUpdate": "auto_compact_completed",
+                "tokens_after": 100,
+                "elapsed_ms": 5,
+            }),
+        );
+        let goal = test_agent(&app, AgentId(0))
+            .goal_state
+            .as_ref()
+            .expect("goal must survive conversation compaction");
+        assert_eq!(goal.goal_id, "g-keep");
+    }
+
+    #[test]
+    fn test_goal_plan_survives_session_restore() {
+        let mut app = make_app_with_agent("sess-A");
+        assert!(send_goal_update(&mut app, "g-keep", "active", 1_000));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.begin_session_reload(1);
+            assert!(agent.finish_session_reload(1, true));
+        }
+        let goal = test_agent(&app, AgentId(0))
+            .goal_state
+            .as_ref()
+            .expect("goal must survive session restore");
+        assert_eq!(goal.goal_id, "g-keep");
+    }
+
+    #[test]
+    fn test_goal_plan_not_lost_on_restore_when_other_fields_change() {
+        let mut app = make_app_with_agent("sess-A");
+        assert!(send_goal_update(&mut app, "g-keep", "active", 1_000));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.begin_session_reload(1);
+            agent.last_applied_xai_event_seq = Some(99);
+            assert!(agent.finish_session_reload(1, true));
+        }
+        send_workflow_update(&mut app, "wf", "deep-research", "active", false);
+        let agent = test_agent(&app, AgentId(0));
+        assert_eq!(
+            agent.goal_state.as_ref().map(|g| g.goal_id.as_str()),
+            Some("g-keep"),
+            "goal must not be lost on restore when other fields change"
+        );
+        assert_eq!(agent.workflow_runs.len(), 1);
+    }

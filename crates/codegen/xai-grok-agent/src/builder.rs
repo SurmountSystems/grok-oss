@@ -986,6 +986,43 @@ impl AgentBuilder {
                 task_tc.description_override = Some(description);
             }
         }
+        // GitHub #236: nested L2 (Subagent audience + subagents_enabled) must
+        // advertise native spawn_subagent even when the child toolset omitted Task
+        // or discovery/hide_task stripped it. Task requires get_task_output and
+        // kill_task; inject those siblings too when missing. Do not inject
+        // wait_tasks. L3 passes subagents_enabled=false.
+        if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent
+            && self.subagents_enabled
+        {
+            let has_task = tool_config.tools.iter().any(|tc| {
+                tc.id == task_tool_id
+                    || tc.kind == Some(ToolKind::Task)
+                    || tc.name_override.as_deref() == Some("spawn_subagent")
+            });
+            if !has_task {
+                let mut injected = crate::config::task_tool_config();
+                injected.description_override = Some(CHILD_TASK_DESCRIPTION.to_string());
+                tool_config.tools.push(injected);
+                task_stripped = false;
+            }
+            let has_output = tool_config.tools.iter().any(|tc| {
+                tc.kind == Some(ToolKind::BackgroundTaskAction)
+                    || short_tool_name(&tc.id) == "get_task_output"
+            });
+            if !has_output {
+                tool_config
+                    .tools
+                    .push(crate::config::task_output_tool_config());
+            }
+            let has_kill = tool_config.tools.iter().any(|tc| {
+                tc.kind == Some(ToolKind::KillTaskAction) || short_tool_name(&tc.id) == "kill_task"
+            });
+            if !has_kill {
+                tool_config
+                    .tools
+                    .push(crate::config::kill_task_tool_config());
+            }
+        }
         let task_params = TaskParams {
             model_selection: self.task_model_selection,
             ..TaskParams::default()
@@ -1140,7 +1177,13 @@ impl AgentBuilder {
             offered.insert("selectable_subagent_types".into(), types);
             merge_tool_params(&mut tool_config, &["GrokBuild:task"], &offered);
         }
-        let hide_task = !general_purpose_spawnable(allowed_types, &self.subagent_toggle)
+        // GitHub #236: a nested L2 must keep the injected spawn_subagent. hide_task
+        // is for a parent that cannot spawn any type, not for depth-1 coordinators.
+        let nested_l2_keeps_spawn = self.prompt_audience
+            == crate::prompt::context::PromptAudience::Subagent
+            && self.subagents_enabled;
+        let hide_task = !nested_l2_keeps_spawn
+            && !general_purpose_spawnable(allowed_types, &self.subagent_toggle)
             && implicit.is_none()
             && selectable.is_empty();
         if allowed_types == Some(&[]) {
@@ -2214,8 +2257,106 @@ mod tests {
             unresolved_template_markers(&defs)
         );
     }
+    async fn nested_advertised_names(
+        definition: crate::config::AgentDefinition,
+        subagents_enabled: bool,
+    ) -> Vec<String> {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_prompt_audience(PromptAudience::Subagent)
+        .with_subagents_enabled(subagents_enabled)
+        .build()
+        .await
+        .expect("nested agent should build")
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|definition| definition.function.name)
+        .collect()
+    }
+    /// GitHub #236: an L2 spawned from L1 must advertise native spawn_subagent.
+    /// search_tool / use_tool are MCP discovery, not spawn.
+    #[tokio::test]
+    async fn l2_spawned_from_l1_advertises_native_spawn_subagent() {
+        let names =
+            nested_advertised_names(crate::config::AgentDefinition::general_purpose(), true).await;
+        assert!(
+            names.iter().any(|name| name == "spawn_subagent"),
+            "L2 must have native spawn_subagent so coordinators can start implementers; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "todo_write"),
+            "coordination tools stay; got {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "get_command_or_subagent_output"),
+            "wait stays; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "task"),
+            "the advertised name is spawn_subagent, not task: {names:?}"
+        );
+    }
+    /// GitHub #236: retain-only is not enough. Explore omits Task; L2 must still
+    /// advertise native spawn_subagent. use_tool spawn_subagent is not valid MCP.
+    #[tokio::test]
+    async fn l2_injects_native_spawn_subagent_when_child_toolset_omitted_it() {
+        let definition = crate::config::AgentDefinition::explore();
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(xai_grok_tools::types::tool::ToolKind::Task)),
+            "premise: explore omits Task"
+        );
+        let names = nested_advertised_names(definition, true).await;
+        assert!(
+            names.iter().any(|name| name == "spawn_subagent"),
+            "depth-1 injection must advertise native spawn_subagent; got {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "get_command_or_subagent_output"),
+            "injected spawn_subagent requires get_command_or_subagent_output; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "kill_command_or_subagent"),
+            "injected spawn_subagent requires kill_command_or_subagent; got {names:?}"
+        );
+    }
+    /// GitHub #236: L3 still cannot spawn. Depth stays 2. subagents_enabled is
+    /// false on that nested session (allow_nested_subagents from L2 spawn).
+    #[tokio::test]
+    async fn l3_subagent_audience_omits_native_spawn_subagent() {
+        let names =
+            nested_advertised_names(crate::config::AgentDefinition::general_purpose(), false).await;
+        assert!(
+            !names.iter().any(|name| name == "spawn_subagent"),
+            "an L3 still cannot spawn; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "todo_write"),
+            "L3 keeps todo_write; got {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "get_command_or_subagent_output"
+                    || name == "wait_commands_or_subagents"),
+            "L3 keeps wait/kill lifecycle with bash; got {names:?}"
+        );
+    }
     /// Write follows the edit tool and plan mode never reaches a child, whatever the built-in type's toolset.
-    /// Children are built at the default depth, so nested subagents stay disabled as in production.
+    /// This case does not enable nested spawn; GitHub #236 covers L2 spawn_subagent injection separately.
     #[tokio::test]
     async fn child_toolsets_inject_write_only_alongside_edit_and_never_plan_mode() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;

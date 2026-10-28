@@ -191,3 +191,51 @@ async fn repeating_sentence_stop_pauses_after_auto_retry_cap() {
         })
         .await;
 }
+
+/// #228 queued a continuation then the run loop still called `handle_turn_end`
+/// with `turn_succeeded=false`, which incremented the non-completing streak
+/// and would reset the repeat-stop cap on a later success path mix-up.
+/// Production now skips `handle_turn_end` on auto-retry.
+#[tokio::test(flavor = "current_thread")]
+async fn repeating_sentence_auto_retry_does_not_increment_non_completing_streak() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp, mut event_rx) = make_goal_actor_with_events().await;
+            start_test_goal(&actor);
+
+            actor
+                .apply_goal_turn_infra_then_maybe_turn_end(
+                    Some(repeating_sentence_turn_err_message()),
+                    false,
+                    false,
+                )
+                .await;
+
+            assert_eq!(
+                actor
+                    .goal_continuation_streak
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "auto-retry must not count as a non-completing turn"
+            );
+            assert_eq!(
+                actor
+                    .goal_repeat_stop_retries
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "the repeat-stop cap must still advance"
+            );
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active)
+            );
+            assert!(queued_goal_summary(&actor));
+            let slash = drain_agent_message_text(&mut event_rx);
+            assert!(
+                slash.iter().all(|text| !text.contains("/goal resume")),
+                "must not emit /goal resume on auto-retry, got {slash:?}"
+            );
+        })
+        .await;
+}

@@ -1,7 +1,7 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
     dispatch_cancel_login, dispatch_connecting_splash_timeout, dispatch_login, dispatch_logout,
-    dispatch_submit_auth_code, dispatch_switch_account,
+    dispatch_submit_auth_code, dispatch_switch_account, handle_sibling_ipc_authorize,
 };
 use super::billing::dispatch_open_supergrok_url;
 use super::ctx::{
@@ -1134,6 +1134,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowSpend => super::status::dispatch_show_spend(app),
         Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
         Action::ClearCompletedTodos => super::status::dispatch_clear_completed_todos(app),
+        Action::ClearLeftoverSubagentRows => {
+            super::status::dispatch_clear_leftover_subagent_rows(app)
+        }
         Action::AddSessionNote { text, tags } => {
             super::notes::dispatch_add_session_note(app, text, tags)
         }
@@ -1380,6 +1383,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::Login => dispatch_login(app),
+        Action::SiblingIpcAuthorize {
+            authorized,
+            permission_mode,
+            event_ms,
+        } => handle_sibling_ipc_authorize(app, authorized, permission_mode, event_ms),
         Action::ConnectingSplashTimeout => dispatch_connecting_splash_timeout(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),

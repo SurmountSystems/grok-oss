@@ -71,6 +71,20 @@ pub(crate) fn apply_reconstruct_turn_credentials(
     sampling: &mut xai_grok_sampler::SamplerConfig,
     ranked_auto_home: Option<&std::path::Path>,
 ) {
+    apply_reconstruct_turn_credentials_keeping_recovered(sampling, ranked_auto_home, None);
+}
+
+/// Same overlay as [`apply_reconstruct_turn_credentials`].
+/// `rejected_live_key` is the bearer a non-nested 401 already rejected.
+/// When `sampling.api_key` is a different wire-valid recovered bearer, a
+/// ranked `auth.json` primary equal to that rejected key must not replace it.
+/// The next non-nested send keeps the bearer recovery stored.
+pub(crate) fn apply_reconstruct_turn_credentials_keeping_recovered(
+    sampling: &mut xai_grok_sampler::SamplerConfig,
+    ranked_auto_home: Option<&std::path::Path>,
+    rejected_live_key: Option<&str>,
+) {
+    let recovered = sampling.api_key.clone();
     if let Some(home) = ranked_auto_home
         && xai_grok_config::resolve_configured_inference().is_none()
     {
@@ -82,6 +96,34 @@ pub(crate) fn apply_reconstruct_turn_credentials(
         );
     }
     crate::auth::limits_pins::apply_limits_pins_to_sampler_config(sampling);
+    restore_recovered_bearer_if_ranked_primary_is_rejected_live(
+        sampling,
+        recovered.as_deref(),
+        rejected_live_key,
+    );
+}
+
+/// Put the recovered bearer back when the overlay's `api_key` is the rejected live key.
+fn restore_recovered_bearer_if_ranked_primary_is_rejected_live(
+    sampling: &mut xai_grok_sampler::SamplerConfig,
+    recovered: Option<&str>,
+    rejected_live_key: Option<&str>,
+) {
+    let Some(rejected) = rejected_live_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    else {
+        return;
+    };
+    let Some(recovered) = recovered.map(str::trim).filter(|key| !key.is_empty()) else {
+        return;
+    };
+    if recovered == rejected {
+        return;
+    }
+    if sampling.api_key.as_deref().map(str::trim) == Some(rejected) {
+        sampling.api_key = Some(recovered.to_string());
+    }
 }
 
 /// SamplingClient stamps InheritedSessionBearerResolver as the sole auth

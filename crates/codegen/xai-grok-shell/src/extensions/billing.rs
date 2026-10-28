@@ -155,6 +155,10 @@ pub struct GetBillingParams {
     /// disk snapshot so `usagePct` 100 is not applied as included exhaust.
     #[serde(default)]
     pub force_refresh: bool,
+    /// Successful login only. Not `force_refresh`. The wire flag is
+    /// `login_immediate_included_period_limits_refresh`.
+    #[serde(default, alias = "login_immediate_included_period_limits_refresh")]
+    pub login_immediate_included_period_limits_refresh: bool,
 }
 
 /// Snapshot hub mode for `x.ai/billing`. Explicit collect/open is ForceRefresh.
@@ -187,13 +191,31 @@ pub fn force_refresh_from_billing_params(params_json: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse the login-only included-period flag. Not `force_refresh`, and not
+/// mapped through [`limits_snapshot_mode_for_get_billing`].
+pub fn login_immediate_included_period_limits_refresh_from_billing_params(
+    params_json: &str,
+) -> bool {
+    serde_json::from_str::<GetBillingParams>(params_json)
+        .map(|p| p.login_immediate_included_period_limits_refresh)
+        .unwrap_or(false)
+}
+
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/billing" => {
             tracing::info!("handling billing config request");
-            let force_refresh = force_refresh_from_billing_params(args.params.get());
-            handle_get_billing(agent, force_refresh).await
+            let params = args.params.get();
+            let force_refresh = force_refresh_from_billing_params(params);
+            let login_immediate_included_period_limits_refresh =
+                login_immediate_included_period_limits_refresh_from_billing_params(params);
+            handle_get_billing(
+                agent,
+                force_refresh,
+                login_immediate_included_period_limits_refresh,
+            )
+            .await
         }
         "x.ai/auto-topup-rule" => {
             tracing::info!("handling auto top-up rule request");
@@ -1323,7 +1345,11 @@ fn auto_use_included_limits_from_disk() -> bool {
     true
 }
 
-async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult {
+async fn handle_get_billing(
+    agent: &MvpAgent,
+    force_refresh: bool,
+    login_immediate_included_period_limits_refresh: bool,
+) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
         "Authentication required to fetch billing data",
@@ -1345,40 +1371,42 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
 
     // One flock leader fetches SuperGrok credits (active + siblings) and
     // Management meters. Followers apply the snapshot into remember maps.
-    let (role, doc) = match collect_billing_via_snapshot_hub(
-        &grok_home,
-        limits_snapshot_mode_for_get_billing(force_refresh),
-        now,
-        || {
-            let live_active = &live_active;
-            let live_active_err = &live_active_err;
-            let token = token.clone();
-            let user_id = user_id.clone();
-            let identity_for_fetch = identity_for_fetch.clone();
-            let home_for_fetch = home_for_fetch.clone();
-            let base_for_fetch = base_for_fetch.clone();
-            async move {
-                if should_clear_management_caches_on_billing_leader_fetch(
+    let mode = if login_immediate_included_period_limits_refresh {
+        crate::auth::LimitsSnapshotMode::LoginImmediateIncludedPeriodLimitsRefresh
+    } else {
+        limits_snapshot_mode_for_get_billing(force_refresh)
+    };
+    let (role, doc) = match collect_billing_via_snapshot_hub(&grok_home, mode, now, || {
+        let live_active = &live_active;
+        let live_active_err = &live_active_err;
+        let token = token.clone();
+        let user_id = user_id.clone();
+        let identity_for_fetch = identity_for_fetch.clone();
+        let home_for_fetch = home_for_fetch.clone();
+        let base_for_fetch = base_for_fetch.clone();
+        async move {
+            if !login_immediate_included_period_limits_refresh
+                && should_clear_management_caches_on_billing_leader_fetch(
                     force_refresh,
                     crate::auth::resolve_management_api_key_default().is_some(),
-                ) {
-                    crate::auth::clear_console_team_billing_meter_caches();
-                }
-                fetch_supergrok_credits_snapshot_document(
-                    &home_for_fetch,
-                    &base_for_fetch,
-                    Some((
-                        token.as_str(),
-                        user_id.as_str(),
-                        identity_for_fetch.as_str(),
-                    )),
-                    Some(live_active),
-                    Some(live_active_err),
                 )
-                .await
+            {
+                crate::auth::clear_console_team_billing_meter_caches();
             }
-        },
-    )
+            fetch_supergrok_credits_snapshot_document(
+                &home_for_fetch,
+                &base_for_fetch,
+                Some((
+                    token.as_str(),
+                    user_id.as_str(),
+                    identity_for_fetch.as_str(),
+                )),
+                Some(live_active),
+                Some(live_active_err),
+            )
+            .await
+        }
+    })
     .await
     {
         Ok(pair) => pair,

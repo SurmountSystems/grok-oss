@@ -87,6 +87,11 @@ pub(crate) fn top_level_activity(agent: &AgentView, state: RowState) -> Option<S
                 Some(sanitize(&format_activity_label(&activity)))
             } else if agent.session.loading_replay {
                 Some("Loading…".to_string())
+            } else if agent.session.state.is_turn_running() {
+                // GitHub #247: resolve_turn_activity is None after a painted
+                // reply with no in-flight sample, so leftover viewport chrome
+                // stays off. A live TurnRunning row still names that wait.
+                Some("Waiting for the model…".to_string())
             } else {
                 Some("Working".to_string())
             }

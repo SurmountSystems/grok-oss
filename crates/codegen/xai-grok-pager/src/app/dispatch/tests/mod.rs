@@ -7,6 +7,7 @@ mod global_pause;
 mod jump;
 mod mid_text_btw;
 mod mid_text_goal;
+mod mid_text_plan;
 mod modes;
 mod notes;
 mod permissions;
@@ -186,6 +187,7 @@ fn test_app() -> AppView {
             "Grok".to_string(),
         ))],
         auth_state: AuthState::Done,
+        newest_applied_authorize_event_ms: 0,
         logout_pending: false,
         trust_state: TrustState::Done,
         consent_state: crate::app::consent::ConsentState::Done,
@@ -335,6 +337,7 @@ fn test_app() -> AppView {
         auto_topup: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
+        leader_roster_generation: 0,
         dashboard_local_sessions: Vec::new(),
         dashboard_sessions_loading: false,
         workspace_membership: Default::default(),
@@ -461,6 +464,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         subagent_type: Arc::from("general-purpose"),
         finished: false,
         status: None,
+        from_occupancy_restore: false,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,

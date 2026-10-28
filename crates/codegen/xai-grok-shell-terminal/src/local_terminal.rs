@@ -90,10 +90,11 @@ fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
 impl AsyncTerminalRunner for LocalTerminalRunner {
     async fn run(&self, request: TerminalRunRequest) -> Result<TerminalRunResult, TerminalError> {
         // Build and spawn the command via the platform shell.
+        // Non-login `-c`. A login shell sources `/etc/profile`, and that startup text is merged into combined output.
         #[cfg(unix)]
         let mut cmd = {
             let mut c = Command::new(crate::default_shell_path());
-            c.arg("-lc").arg(&request.command);
+            c.arg("-c").arg(&request.command);
             c
         };
         #[cfg(not(unix))]

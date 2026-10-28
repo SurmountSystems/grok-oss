@@ -10,7 +10,8 @@
 //! Preview body, dock_open, comments) are additive schema v6. Official
 //! serving-path fingerprints (Chat Completions `system_fingerprint` and
 //! `GET /v1/language-models` id, fingerprint, version, created) are
-//! additive schema v7. Later Surmount-only durable state can keep adding
+//! additive schema v7. Per-job estimate versus actual (`job_cost`) is
+//! additive schema v8. Later Surmount-only durable state can keep adding
 //! tables via additive migrations.
 //!
 //! Open is multiproc-safe (busy timeout via journal helper) and **fail-open**
@@ -48,7 +49,7 @@ pub use session_ids::{SessionIdPair, ensure_session_ids_fail_open};
 pub use session_plans::prefer_sql_plan_body_fail_open;
 
 /// Current schema version stamped in `meta`.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Default filename under `$GROK_HOME`.
 pub const GROK_OSS_DB_FILE: &str = "grok_oss.db";
@@ -190,6 +191,9 @@ CREATE TABLE IF NOT EXISTS meta (
         }
         if version < 7 {
             serving_fingerprint::apply_schema_v7(self)?;
+        }
+        if version < 8 {
+            apply_schema_v8(self)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -340,6 +344,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_session_id_map_ulid
   ON session_id_map(session_ulid);
 "#;
 
+/// Per-job estimate versus actual (schema version 8). Additive only.
+/// Actuals are filled by `finish_job_cost` from `model_call_cost_for_sessions`.
+pub(crate) const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS job_cost (
+  job_ulid TEXT PRIMARY KEY,
+  job_kind TEXT NOT NULL,
+  session_ids_json TEXT NOT NULL,
+  estimate_input INTEGER,
+  estimate_output INTEGER,
+  estimate_wall_ms INTEGER,
+  estimate_nested_tokens INTEGER,
+  actual_input_plus_output INTEGER,
+  actual_input INTEGER,
+  actual_output INTEGER,
+  actual_cached INTEGER,
+  actual_reasoning INTEGER,
+  missing_event_ulids_json TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_cost_kind ON job_cost(job_kind);
+"#;
+
+/// Apply additive v8 `job_cost` without dropping prior tables.
+pub(crate) fn apply_schema_v8(store: &GrokOssStore) -> Result<()> {
+    store
+        .connection()
+        .execute_batch(SCHEMA_V8)
+        .context("apply schema v8 job_cost")?;
+    Ok(())
+}
+
 /// Helper: query_row optional without pulling rusqlite OptionalExtension everywhere.
 trait OptionalContext<T> {
     fn optional_context(self) -> Result<Option<T>>;
@@ -396,6 +433,7 @@ mod tests {
             "completion_system_fingerprint",
             "language_model_serving",
             "serving_fingerprint_flip",
+            "job_cost",
         ] {
             let n: i64 = store
                 .connection()
@@ -405,12 +443,12 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "fresh open must apply v2/v3/v4/v5/v6/v7 table {name}");
+            assert_eq!(
+                n, 1,
+                "fresh open must apply v2/v3/v4/v5/v6/v7/v8 table {name}"
+            );
         }
-        assert_eq!(
-            SCHEMA_VERSION, 7,
-            "serving fingerprints are additive schema v7"
-        );
+        assert_eq!(SCHEMA_VERSION, 8, "job_cost is additive schema v8");
     }
 
     #[test]
@@ -434,6 +472,7 @@ mod tests {
             "completion_system_fingerprint",
             "language_model_serving",
             "serving_fingerprint_flip",
+            "job_cost",
         ] {
             let n: i64 = s2
                 .connection()
@@ -639,10 +678,81 @@ CREATE TABLE IF NOT EXISTS meta (
     }
 
     #[test]
+    fn migrate_v7_file_to_v8_adds_job_cost() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grok_oss.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"#,
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.execute_batch(SCHEMA_V4).unwrap();
+            conn.execute_batch(SCHEMA_V5).unwrap();
+            conn.execute_batch(session_plans::SCHEMA_V6).unwrap();
+            conn.execute_batch(serving_fingerprint::SCHEMA_V7).unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '7')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = open_at(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let n: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='job_cost'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected job_cost after v7-to-v8 migrate");
+        for name in [
+            "local_usage_event",
+            "session_plans",
+            "completion_system_fingerprint",
+        ] {
+            let n: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "prior tables must stay ({name})");
+        }
+        let store2 = open_at(&path).unwrap();
+        assert_eq!(store2.schema_version().unwrap(), SCHEMA_VERSION);
+        let n2: i64 = store2
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='job_cost'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n2, 1, "v8 migrate must be idempotent on reopen");
+    }
+
+    #[test]
     fn no_secret_columns_in_schema() {
         // Guard: schema SQL must not mention secret-like columns.
-        let lower = format!("{SCHEMA_V1}\n{SCHEMA_V2}\n{SCHEMA_V3}\n{SCHEMA_V4}\n{SCHEMA_V5}")
-            .to_ascii_lowercase();
+        let lower = format!(
+            "{SCHEMA_V1}\n{SCHEMA_V2}\n{SCHEMA_V3}\n{SCHEMA_V4}\n{SCHEMA_V5}\n{}\n{}\n{SCHEMA_V8}",
+            session_plans::SCHEMA_V6,
+            serving_fingerprint::SCHEMA_V7,
+        )
+        .to_ascii_lowercase();
         for banned in [
             "api_key",
             "jwt",

@@ -38,6 +38,7 @@ pub(crate) mod storage;
 pub mod task;
 pub mod task_output;
 pub mod todo;
+pub mod token_report;
 pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
@@ -81,6 +82,10 @@ pub use send_subagent_message::{
 pub use task::{TaskTool, is_task_tool_id};
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
 pub use todo::TodoWriteTool;
+pub use token_report::{
+    TOKEN_REPORT_TOOL_NAME, TokenReportInput, TokenReportLive, TokenReportLiveSource,
+    TokenReportOutput, TokenReportTool,
+};
 pub use update_goal::{UPDATE_GOAL_TOOL_NAME, UpdateGoalTool};
 pub use video_gen::{
     IMAGE_TO_VIDEO_TOOL_NAME, IMAGINE_VIDEO_COMMAND_NAME, ImageToVideoTool,

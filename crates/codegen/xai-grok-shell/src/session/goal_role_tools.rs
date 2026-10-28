@@ -21,9 +21,9 @@ pub(crate) struct RoleToolNames {
     pub write: String,
     /// `{EXECUTE_TOOL}`: `ToolKind::Execute` (terminal/bash maps here).
     pub execute: String,
-    /// `{WEB_SEARCH_TOOL}`: `ToolKind::WebSearch` (planner template only).
+    /// `{WEB_SEARCH_TOOL}`: `ToolKind::WebSearch` (goal research template).
     pub web_search: String,
-    /// `{WEB_FETCH_TOOL}`: `ToolKind::WebFetch` (planner template only).
+    /// `{WEB_FETCH_TOOL}`: `ToolKind::WebFetch` (goal research template).
     pub web_fetch: String,
     /// `{TOOLSET_TOOLS}` block (verifier-only placeholder).
     /// Empty on the inherit path.

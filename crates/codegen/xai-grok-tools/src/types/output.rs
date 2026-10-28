@@ -102,9 +102,11 @@ impl MediaGenOutput {
             uploaded_url: Some(url),
         }
     }
-    /// Model-facing prose. `action` is the variant's lead-in
-    /// ("Image generated" / "Video generated" / "Image edited"); the trailing
-    /// guidance stops the model re-reading or narrating the result.
+    /// Model-facing structured result (TOON by default via
+    /// [`crate::util::toon::maybe_encode_for_llm_from_env`]). `action` is the
+    /// variant's lead-in ("Image generated" / "Video generated" / "Image
+    /// edited"); the trailing guidance stops the model re-reading or narrating
+    /// the result. Uploaded media stays free text.
     pub fn prompt_text(&self, action: &str) -> String {
         if let Some(url) = &self.uploaded_url {
             return format!(
@@ -115,13 +117,13 @@ impl MediaGenOutput {
         let message = format!(
             "{action} and saved to {path}. Do not read or re-display it, and do not describe how it appears to the user."
         );
-        serde_json::json!({
+        let value = serde_json::json!({
             "path": path,
             "filename": &self.filename,
             "session_folder": &self.session_folder,
             "message": message,
-        })
-        .to_string()
+        });
+        crate::util::toon::maybe_encode_for_llm_from_env(&value)
     }
 }
 use crate::implementations::grok_build::todo::{TodoItem, TodoState};
@@ -999,7 +1001,8 @@ impl ToolOutput {
             ToolOutput::Workflow(o) => o.message.clone(),
             // Structured Value → model text: TOON when policy says so (before any
             // downstream size caps on the rendered string). Free-text variants
-            // above are unchanged. Env: GROK_TOOL_RESULT_FORMAT=toon|json|auto.
+            // above are unchanged. Env: GROK_TOOL_RESULT_FORMAT=toon|json|auto
+            // (unset is toon).
             ToolOutput::Dynamic(v) => crate::util::toon::maybe_encode_for_llm_from_env(&v.value),
             // T5: pure structured JSON text blobs densify; free text unchanged.
             ToolOutput::Text(text) => crate::util::toon::densify_structured_text(&text.text),
@@ -1646,20 +1649,22 @@ mod tests {
             ),
         ];
         for (output, ty, path, filename, session_folder, message) in cases {
-            let prompt_json: serde_json::Value =
-                serde_json::from_str(&output.to_prompt_format()).unwrap();
-            assert_eq!(prompt_json.get("path").and_then(|v| v.as_str()), Some(path));
-            assert_eq!(
-                prompt_json.get("filename").and_then(|v| v.as_str()),
-                Some(filename)
+            let prompt = output.to_prompt_format();
+            assert!(
+                prompt.contains(path),
+                "prompt must name the saved path, got: {prompt}"
             );
-            assert_eq!(
-                prompt_json.get("session_folder").and_then(|v| v.as_str()),
-                Some(session_folder)
+            assert!(
+                prompt.contains(filename),
+                "prompt must name the filename, got: {prompt}"
             );
-            assert_eq!(
-                prompt_json.get("message").and_then(|v| v.as_str()),
-                Some(message)
+            assert!(
+                prompt.contains(session_folder),
+                "prompt must name the session folder, got: {prompt}"
+            );
+            assert!(
+                prompt.contains(message) || prompt.contains("Do not read or re-display"),
+                "prompt must keep the do-not-reread guidance, got: {prompt}"
             );
             let json = to_json(output);
             assert_eq!(json.get("type").and_then(|v| v.as_str()), Some(ty));
@@ -1700,6 +1705,28 @@ mod tests {
             panic!("unexpected variant");
         };
         assert_eq!(m, MediaGenOutput::uploaded(url.to_string()));
+    }
+    /// Local media gen prompt_text is agent-facing structured output; default is TOON.
+    #[test]
+    fn media_gen_prompt_default_is_toon() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]);
+
+        let output = ToolOutput::ImageGen(MediaGenOutput::new("/tmp/images/1.jpg".into()));
+        let prompt = output.to_prompt_format();
+        assert!(
+            !prompt.trim_start().starts_with('{'),
+            "media gen prompt must densify to TOON under default policy, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("path:") || prompt.contains("filename:"),
+            "TOON keys for saved media, got: {prompt}"
+        );
     }
     #[test]
     fn read_file_not_found_json() {
@@ -3120,7 +3147,7 @@ mod tests {
         let _lock = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // default auto
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // default Toon
 
         let value = json!({
             "matches": [
@@ -3164,6 +3191,39 @@ mod tests {
         assert_eq!(prompt, serde_json::to_string(&value).unwrap());
         assert!(prompt.starts_with('{'));
         assert!(!prompt.contains('\n'));
+    }
+
+    /// Nested object that is not tabular-eligible must be TOON under unset env.
+    #[test]
+    fn dynamic_to_prompt_default_is_toon_for_nontabular() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+        use crate::util::toon::{ToolResultFormat, is_tabular_eligible, maybe_encode_for_llm};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]);
+
+        let value = json!({"a": {"b": {"c": 1}}});
+        assert!(
+            !is_tabular_eligible(&value),
+            "fixture must not be tabular-eligible"
+        );
+        let auto = maybe_encode_for_llm(&value, ToolResultFormat::Auto);
+        assert!(
+            auto.trim_start().starts_with('{'),
+            "explicit Auto stays compact JSON for this nontabular shape, got: {auto}"
+        );
+        let prompt = ToolOutput::Dynamic(value.into()).to_prompt_format();
+        assert!(
+            !prompt.trim_start().starts_with('{'),
+            "unset env Dynamic must be TOON, not a JSON object start: {prompt}"
+        );
+        assert!(
+            prompt.contains("a:") || prompt.contains("c:"),
+            "TOON keys expected, got: {prompt}"
+        );
     }
 
     /// Free-text tool results are never rewritten by TOON policy.

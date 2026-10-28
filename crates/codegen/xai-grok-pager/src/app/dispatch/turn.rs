@@ -1100,6 +1100,15 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
     effects
 }
 
+fn take_l1_blocking_execute_auto_background(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Option<Effect> {
+    app.agents
+        .get_mut(&agent_id)
+        .and_then(AgentView::take_l1_blocking_auto_background)
+}
+
 pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -1107,27 +1116,29 @@ pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    if !agent.session.state.is_turn_running() {
-        return vec![];
+    // GitHub #243: Ctrl+B still sends a blocking nested agent to the
+    // background. Auto-background of L1 execute / nested wait is separate
+    // and must not delete this capability.
+    if agent.active_subagent.is_some() {
+        return agent
+            .take_send_blocking_subagent_to_background()
+            .into_iter()
+            .collect();
     }
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
-    };
-    let Some(tool_call_id) = agent
-        .session
-        .tracker
-        .running_execute_tool_call_id()
-        .map(|s| s.to_string())
-    else {
-        return vec![];
-    };
+    agent
+        .take_l1_blocking_auto_background()
+        .into_iter()
+        .collect()
+}
 
-    tracing::info!(tool_call_id = %tool_call_id, "Demoting execute tool to background");
-
-    vec![Effect::DemoteToBackground {
-        session_id,
-        tool_call_id,
-    }]
+/// GitHub #232: an L1 execute / CommandRunning that can block the Operator
+/// box auto-backgrounds. GitHub #243: a nested agent that is blocking L1
+/// also auto-backgrounds. send-to-background for blocking subagents stays.
+pub(crate) fn maybe_auto_background_l1_blocking_execute(app: &mut AppView) -> Vec<Effect> {
+    let ids: Vec<_> = app.agents.keys().copied().collect();
+    ids.into_iter()
+        .filter_map(|id| take_l1_blocking_execute_auto_background(app, id))
+        .collect()
 }
 
 // TaskResult handlers.

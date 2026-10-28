@@ -2,11 +2,12 @@
 name: what
 description: >
   Restate this session in four short complete American English thoughts
-  when the operator cannot parse agent chat. Follow Concise American
-  Technical English as specified in Surmount 0005_CATE.md. Use when the
-  user runs /what, says they do not understand, asks you to speak more
-  clearly, or asks what is going on in this session. Not /recap. Not
-  /finish. Not /reports. Not an apology.
+  only when the operator types the slash command /what. Follow Concise
+  American Technical English as specified in Surmount 0005_CATE.md.
+  Do not run this skill when they say they do not understand, ask you
+  to speak more clearly, or ask what is going on. Those are ordinary questions.
+  Answer them in normal sentences. Not /recap. Not /finish.
+  Not /reports. Not an apology.
 metadata:
   short-description: "Four complete English thoughts: work, truth, operator, next"
   argument-hint: "[optional focus]"
@@ -14,8 +15,13 @@ metadata:
 
 # What
 
-The operator cannot parse the last agent chat. Restate. Do not apologize.
-Do not write a file. Do not spawn.
+Run this skill only when the operator typed `/what`. Do not run it
+because a sentence sounds confused, annoyed, or like a status question.
+If they did not type `/what`, answer in normal sentences and do not use
+the four labels below.
+
+When they did type `/what`, restate. Do not apologize. Do not write a
+file. Do not spawn.
 
 This is a default Grok OSS skill. Grok installs it into
 `~/.grok/bundled/skills/what/` on startup. The live cache is not
@@ -73,9 +79,14 @@ Painted chrome and user-guide call the composer the Operator box.
   reports, and this restatement: probe this turn if stating which
   binary this window is. Do not reuse a leftover Grok Build version as
   grok-oss.
-- For a finished job's actual nested tokens, call the Rust function
+- Call the `token_report` tool for estimate versus actual wall and nested
+  tokens (human-readable table or TOON). Do not hand-write those markdown
+  tables. The tool reads L2-B live counters and SQLite. Pass session_ids
+  (the L2 and every nested L3, once each) and optional job_ulid. Agents do
+  not call ledger functions themselves. The tool uses
   `local_usage_events_for_session` in
-  `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`.
+  `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`
+  through `model_call_cost_for_sessions`.
   Do not use Python. Do not use bash. Do not use a `sqlite3` one-liner.
   The cost cell is `model_call_cost_for_sessions` (input + output), not `total_tokens`,
   and not the standing estimate.

@@ -167,6 +167,7 @@ pub(crate) fn test_app() -> AppView {
         bootstrap_acp_commands: Vec::new(),
         auth_methods: Vec::new(),
         auth_state: AuthState::Done,
+        newest_applied_authorize_event_ms: 0,
         logout_pending: false,
         trust_state: TrustState::Done,
         consent_state: crate::app::consent::ConsentState::Done,
@@ -318,6 +319,7 @@ pub(crate) fn test_app() -> AppView {
         auto_topup: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
+        leader_roster_generation: 0,
         dashboard_local_sessions: Vec::new(),
         dashboard_sessions_loading: false,
         workspace_membership: Default::default(),
@@ -2125,6 +2127,135 @@ fn resize_event_closes_tip_show_gate_until_redraw() {
     agent.note_terminal_size((120, 50));
     assert!(agent.show_ephemeral_tip(tip(), &mut counts));
     assert_eq!(counts.get("t_seen"), Some(&2));
+}
+/// GitHub #235: SIGWINCH must arm overlay live-resize skip. Settle (debounce / typing)
+/// clears it so the overlay wraps once, not on every drag step.
+#[test]
+fn resize_event_arms_overlay_live_resize_skip_until_settle() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "plan.md",
+                "# Plan\n\n- do the thing\n".to_owned(),
+                None,
+            )
+            .expect("markdown content should open");
+        assert!(
+            !viewer.live_resize_for_test(),
+            "a freshly opened overlay is not in a live resize"
+        );
+        agent.line_viewer = Some(viewer);
+    }
+    let _ = app.handle_input(&Event::Resize(120, 50));
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let viewer = agent.line_viewer.as_ref().expect("overlay still docked");
+        assert!(
+            viewer.live_resize_for_test(),
+            "SIGWINCH must skip overlay body rebuild until settle"
+        );
+    }
+    app.settle_live_resize_overlays();
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let viewer = agent.line_viewer.as_ref().expect("overlay still docked");
+        assert!(
+            !viewer.live_resize_for_test(),
+            "settle (debounce or typing) must allow one wrap at the final width"
+        );
+    }
+}
+/// GitHub #235: SIGWINCH must arm main conversation wrap skip, not only overlay skip.
+/// Operator: resizing a large conversation must not hitch on every SIGWINCH.
+/// Live draw path is `AgentView::draw` → `scrollback.prepare_layout` at the new width.
+#[test]
+fn resize_event_arms_conversation_wrap_skip_until_settle() {
+    use crate::scrollback::block::RenderBlock;
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let wrap_line =
+        "This conversation turn wraps across several columns when the window is dragged. "
+            .repeat(8);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        for i in 0..40 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(format!("q{i} {wrap_line}")));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("a{i} {wrap_line}")));
+        }
+        assert!(
+            agent.scrollback.len() >= 80,
+            "fixture must be a large conversation, got {} entries",
+            agent.scrollback.len()
+        );
+        assert!(
+            agent.scrollback.prepare_layout(80, 24),
+            "first layout must wrap the conversation body"
+        );
+        assert!(
+            !agent.scrollback.live_resize_for_test(),
+            "a freshly drawn conversation is not in a live resize"
+        );
+    }
+    let wraps = app
+        .agents
+        .get(&id)
+        .unwrap()
+        .scrollback
+        .width_wraps_for_test();
+    assert!(wraps >= 1, "first layout must count as a width wrap");
+    let _ = app.handle_input(&Event::Resize(120, 50));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(
+            agent.scrollback.live_resize_for_test(),
+            "SIGWINCH must skip conversation wrap until settle"
+        );
+        // Draw during the drag: AgentView::draw calls prepare_layout at the new width.
+        assert!(
+            !agent.scrollback.prepare_layout(120, 50),
+            "a mid-drag draw must not rebuild conversation wrap"
+        );
+        assert_eq!(
+            agent.scrollback.width_wraps_for_test(),
+            wraps,
+            "resizing a large conversation must not hitch on every SIGWINCH"
+        );
+        for width in [119u16, 110, 100, 90] {
+            assert!(
+                !agent.scrollback.prepare_layout(width, 50),
+                "further SIGWINCH draws must keep the last wrap"
+            );
+        }
+        assert_eq!(
+            agent.scrollback.width_wraps_for_test(),
+            wraps,
+            "a SIGWINCH stream must not wrap the conversation on every event"
+        );
+    }
+    app.settle_live_resize_overlays();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(
+            !agent.scrollback.live_resize_for_test(),
+            "settle (debounce or typing) must allow one wrap at the final width"
+        );
+        assert!(
+            agent.scrollback.prepare_layout(90, 50),
+            "exactly one conversation wrap after settle"
+        );
+        assert_eq!(
+            agent.scrollback.width_wraps_for_test(),
+            wraps + 1,
+            "settle must wrap the conversation body once, not once per SIGWINCH"
+        );
+    }
 }
 #[test]
 fn external_auth_provider_keeps_billing_off_after_auth_meta() {

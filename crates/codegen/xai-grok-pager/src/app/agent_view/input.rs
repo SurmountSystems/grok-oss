@@ -1476,13 +1476,9 @@ impl AgentView {
                 }
             }
             ActionId::SendToBackground => {
-                if self.surface() == ViewSurface::Root
-                    && self
-                        .session
-                        .tracker
-                        .running_execute_tool_call_id()
-                        .is_some()
-                {
+                // GitHub #243: keep send-to-background for blocking subagents.
+                // Do not delete Ctrl+B as a stand-in for auto-background.
+                if self.can_send_to_background() {
                     InputOutcome::Action(Action::DemoteToBackground)
                 } else {
                     InputOutcome::Changed

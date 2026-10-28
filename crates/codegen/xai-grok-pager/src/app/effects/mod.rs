@@ -229,6 +229,47 @@ pub(crate) fn execute(
                     TaskResult::PaywallCheckTick
                 });
         }
+        Effect::PublishAuthorizeAsk {
+            authorized,
+            permission_mode,
+            event_ms,
+        } => {
+            let grok_home = xai_grok_config::grok_home();
+            tasks.spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::util::config::publish_authorize_ask_socket(
+                        grok_home,
+                        &xai_grok_shell::util::config::AuthorizeAskDocument {
+                            authorized,
+                            permission_mode,
+                            event_ms,
+                        },
+                    )
+                })
+                .await;
+                TaskResult::AuthorizeAskPublished
+            });
+        }
+        Effect::AskSiblingAuthorize { delay_ms } => {
+            let grok_home = xai_grok_config::grok_home();
+            tasks.spawn(async move {
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                let doc = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::util::config::ask_live_authorized_session(grok_home)
+                })
+                .await
+                .ok()
+                .flatten();
+                let event_ms = doc.as_ref().map(|d| d.event_ms).unwrap_or(0);
+                TaskResult::SiblingIpcAuthorize {
+                    authorized: doc.as_ref().is_some_and(|d| d.authorized),
+                    permission_mode: doc.map(|d| d.permission_mode).unwrap_or_default(),
+                    event_ms,
+                }
+            });
+        }
         Effect::ScheduleGateVerifyTimeout { generation } => {
             tasks
                 .spawn(async move {
@@ -891,6 +932,7 @@ pub(crate) fn execute(
                                 Some(r) => {
                                     TaskResult::RosterLoaded {
                                         sessions: r.sessions,
+                                        generation: r.generation,
                                     }
                                 }
                                 None => {
@@ -5203,6 +5245,53 @@ pub(crate) fn execute(
                         nonce,
                     }
                 });
+        }
+        Effect::FetchIncludedPeriodLimitsOnLogin { nonce } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                use xai_grok_shell::extensions::billing::BillingConfigResponse;
+                let req = acp::ExtRequest::new(
+                    "x.ai/billing",
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "login_immediate_included_period_limits_refresh": true,
+                    }))
+                    .expect("serialize billing params")
+                    .into(),
+                );
+                let resp = match acp_send(req, &tx).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        return TaskResult::AppBillingError {
+                            error: sanitize_user_error(&format!("{e}")),
+                            nonce,
+                        };
+                    }
+                };
+                let wrapper: serde_json::Value =
+                    serde_json::from_str(resp.0.get()).unwrap_or_default();
+                let result = wrapper.get("result").unwrap_or(&wrapper);
+                let billing = match serde_json::from_value::<BillingConfigResponse>(result.clone())
+                {
+                    Ok(billing) => billing,
+                    Err(e) => {
+                        return TaskResult::AppBillingError {
+                            error: format!("Parse error: {e}"),
+                            nonce,
+                        };
+                    }
+                };
+                let balance = billing.config.map(credit_balance_from_config);
+                let autotopup = if has_prepaid_credits(balance.as_ref()) {
+                    fetch_auto_topup_info(&tx).await
+                } else {
+                    crate::views::credit_bar::AutoTopupFetch::Cleared
+                };
+                TaskResult::AppBillingFetched {
+                    balance,
+                    autotopup,
+                    nonce,
+                }
+            });
         }
         Effect::DebounceSuggestions { agent_id, generation } => {
             tasks

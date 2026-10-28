@@ -4844,6 +4844,97 @@ fn operator_message_does_not_paint_injected_workspace_rules() {
     tracker.handle_update(user_message(&wrap_without_query_tags), &replay, &mut sb);
     assert_typed_plus_chip(&sb);
 }
+
+fn count_user_prompts_with_text(sb: &ScrollbackState, text: &str) -> usize {
+    (0..sb.len())
+        .filter(|&i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::UserPrompt(b)) => {
+                b.text.split_whitespace().eq(text.split_whitespace())
+            }
+            _ => false,
+        })
+        .count()
+}
+
+fn model_facing_wrap_with_image_chip(typed: &str) -> String {
+    format!(
+        "{typed}\n\n\
+         <always_applied_workspace_rules>\n\
+         # AGENTS.md\n\
+         Never paint workspace rules in the Operator transcript.\n\
+         </always_applied_workspace_rules>\n\n\
+         <image_files>\n\
+         /tmp/assets/image-1.jpg\n\
+         </image_files>\n\n\
+         <user_query>\n\
+         {typed}\n\
+         </user_query>"
+    )
+}
+
+/// GitHub #248: one Enter with an image attachment paints one Operator line.
+/// Local paint plus the live/wrap UserMessageChunk echo must not leave two
+/// identical Operator-green rows (`... [Image #1]`).
+#[test]
+fn already_painted_operator_line_is_not_duplicated_by_image_user_echo() {
+    let typed = "You've taken nearly 30 minutes to respond... [Image #1]";
+    let wrap = model_facing_wrap_with_image_chip(typed);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    sb.push_block(RenderBlock::user_prompt(typed));
+    assert_eq!(count_user_prompts_with_text(&sb, typed), 1);
+
+    assert!(
+        !tracker.handle_update(user_message(&wrap), &meta(), &mut sb),
+        "the wrap echo of an already-painted Operator line must not add a second UserPrompt"
+    );
+    assert_eq!(
+        count_user_prompts_with_text(&sb, typed),
+        1,
+        "one Enter with an image must paint exactly one Operator line; scrollback={:?}",
+        (0..sb.len())
+            .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+                Some(RenderBlock::UserPrompt(b)) => Some(b.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+/// GitHub #248: `expect_user_echo` skips only the first UserMessageChunk.
+/// An image send then echoes the typed chip and a model-facing wrap as two
+/// chunks. The second chunk must not paint a duplicate Operator line.
+#[test]
+fn image_user_echo_second_chunk_must_not_paint_a_second_operator_line() {
+    let typed = "You've taken nearly 30 minutes to respond... [Image #1]";
+    let wrap = model_facing_wrap_with_image_chip(typed);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    sb.push_block(RenderBlock::user_prompt(typed));
+    tracker.expect_user_echo();
+
+    assert!(
+        !tracker.handle_update(user_message(typed), &meta(), &mut sb),
+        "the first echo is the skip_next_user_echo chunk"
+    );
+    assert_eq!(count_user_prompts_with_text(&sb, typed), 1);
+    assert!(
+        !tracker.handle_update(user_message(&wrap), &meta(), &mut sb),
+        "the wrap chunk after skip_next_user_echo is consumed must not paint a second Operator line"
+    );
+    assert_eq!(
+        count_user_prompts_with_text(&sb, typed),
+        1,
+        "typed chip plus wrap echo is still one Operator line; got {:?}",
+        (0..sb.len())
+            .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+                Some(RenderBlock::UserPrompt(b)) => Some(b.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
 fn user_message_with_chunk_meta(text: &str, chunk_meta: acp::Meta) -> acp::SessionUpdate {
     acp::SessionUpdate::UserMessageChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(

@@ -17,6 +17,7 @@ use crate::scrollback::render::ScratchBuffer;
 use crate::theme::Theme;
 use crate::views::agent;
 use crate::views::shortcuts_bar::PendingHint;
+use crate::views::tasks_pane::TaskEntryId;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -130,16 +131,17 @@ impl AgentView {
         let target = from_row
             .filter(|sid| sid != &l2_sid && self.subagent_views.contains_key(sid))
             .or_else(|| {
-                let mut running: Vec<String> = self
-                    .subagent_sessions
-                    .iter()
-                    .filter(|(id, info)| {
-                        info.is_running()
-                            && info.attempt.parent_session_id.as_deref() == Some(l2_sid.as_str())
-                            && self.subagent_views.contains_key(id.as_str())
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
+                let mut running: Vec<String> = crate::app::subagent::l3_rows_for_l2(
+                    self.subagent_sessions.values(),
+                    l2_sid.as_str(),
+                )
+                .into_iter()
+                .filter(|info| {
+                    self.subagent_views
+                        .contains_key(info.child_session_id.as_ref())
+                })
+                .map(|info| info.child_session_id.to_string())
+                .collect();
                 if running.len() == 1 {
                     running.pop()
                 } else {
@@ -160,17 +162,15 @@ impl AgentView {
         if !self.subagent_views.contains_key(l2_sid) {
             return false;
         }
-        let mut running: Vec<String> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(id, info)| {
-                info.is_running()
-                    && info.attempt.workflow_run_id.is_none()
-                    && info.attempt.parent_session_id.as_deref() == Some(l2_sid)
-                    && self.subagent_views.contains_key(id.as_str())
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
+        let mut running: Vec<String> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), l2_sid)
+                .into_iter()
+                .filter(|info| {
+                    self.subagent_views
+                        .contains_key(info.child_session_id.as_ref())
+                })
+                .map(|info| info.child_session_id.to_string())
+                .collect();
         running.sort();
         let Some(target) = running.into_iter().next() else {
             return false;
@@ -280,6 +280,7 @@ impl AgentView {
         use unicode_width::UnicodeWidthStr;
         self.hit_overlay_nested_status.clear();
         self.overlay_nested_status_child_sid = None;
+        self.tasks.view_button_rects.clear();
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let compact = appearance.prompt.compact;
@@ -311,7 +312,7 @@ impl AgentView {
         };
         let title_y = frame.title_row.y;
         let _title_row = frame.title_row;
-        let inner = frame.content;
+        let mut inner = frame.content;
         let _border_style = Style::default().fg(border_color);
         // Copy the row fields before the overlay mirror. `badge` used to borrow the
         // session map through the mutable specialist call below.
@@ -386,6 +387,11 @@ impl AgentView {
             )
         };
         let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
+        if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
+            // Title wait chrome calls resolve_turn_activity on this child.
+            // Set the overlay flag before that so L3s are not L1-filtered.
+            child_view.tasks.set_overlay_l2_session_id(Some(child_sid));
+        }
         let mut activity_label: Option<String> = if is_running {
             self.subagent_views
                 .get(child_sid)
@@ -530,10 +536,24 @@ impl AgentView {
         let mut child_cursor = None;
         let mut child_post_flush = None;
         self.paint_opened_l3_context(child_sid);
+        // One-task empty-description wait: title already paints
+        // `Waiting on 1 task...`. Keep a dedicated waiting row strictly
+        // below that title so `[↗]` is not collapsed onto the title cell.
+        let reserved_wait_row =
+            reserved_one_task_wait_row(self, child_sid, activity_label.as_deref(), title_y, inner);
+        if reserved_wait_row.is_some() {
+            inner.y = inner.y.saturating_add(1);
+            inner.height = inner.height.saturating_sub(1);
+        }
+        let l1_composer_band = self.l1_composer_band_for_running_hidden_takeover(child_sid, inner);
+        if let Some(band) = l1_composer_band {
+            inner.height = inner.height.saturating_sub(band.height);
+        }
         if inner.width > 5
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
+            child_view.tasks.set_overlay_l2_session_id(Some(child_sid));
             // Row clocks only on the L2 window, not every nested draw.
             // A known L3 specialist leaves the flag off. An overlay with no
             // registry row keeps the flag so that window can still show clocks.
@@ -563,52 +583,166 @@ impl AgentView {
             child_cursor = cursor;
             child_post_flush = post_flush;
         }
-        self.record_overlay_specialist_status_hit(buf, area, child_sid);
+        self.record_overlay_specialist_status_hit(buf, area, child_sid, reserved_wait_row);
         self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
+        if let Some(band) = l1_composer_band {
+            self.paint_l1_composer_under_takeover(buf, band);
+        }
         (child_cursor, child_post_flush)
+    }
+
+    /// Registry row still running, and the open view has no composer route.
+    /// That is the specialist case where the takeover would otherwise be the only typer.
+    fn running_hidden_specialist(&self, child_sid: &str) -> bool {
+        let hidden = self
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::Hidden);
+        hidden
+            && self
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| info.is_running())
+    }
+
+    /// Plain typing keys are not takeover input while that specialist runs.
+    /// Bare `q` stays on the close path. Ctrl+B is not a text key.
+    fn plain_key_reaches_l1_while_hidden_specialist_runs(
+        &self,
+        key: Option<&crossterm::event::KeyEvent>,
+        child_sid: &str,
+    ) -> bool {
+        let Some(key) = key else {
+            return false;
+        };
+        if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
+            return false;
+        }
+        if !crate::input::key::is_text_input_key(key) {
+            return false;
+        }
+        self.running_hidden_specialist(child_sid)
+    }
+
+    /// One row under the child, inside the frame, only while the L1 composer
+    /// would otherwise be absent. The child keeps `inner.height > 3`.
+    fn l1_composer_band_for_running_hidden_takeover(
+        &self,
+        child_sid: &str,
+        inner: Rect,
+    ) -> Option<Rect> {
+        if !self.running_hidden_specialist(child_sid) {
+            return None;
+        }
+        let height: u16 = 1;
+        if inner.width < 4 || inner.height <= 3u16.saturating_add(height) {
+            return None;
+        }
+        Some(Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(inner.height).saturating_sub(height),
+            width: inner.width,
+            height,
+        })
+    }
+
+    fn paint_l1_composer_under_takeover(&mut self, buf: &mut Buffer, band: Rect) {
+        use crate::views::prompt_widget::{PromptBg, PromptStyle};
+        let style = PromptStyle {
+            focused: true,
+            show_prefix: true,
+            vpad_top: 0,
+            chrome: false,
+            chrome_pad_left: 0,
+            chrome_pad_right: 0,
+            bg: PromptBg::Default,
+            accent_color_override: None,
+            border_color_override: None,
+            prefix_override: None,
+            placeholder_override: None,
+            placeholder_when_focused: false,
+            hide_idle_placeholder: true,
+            compact: true,
+            show_accent_line: false,
+            show_borders: false,
+            title: None,
+            title_reserve_right: 0,
+            image_preview: false,
+        };
+        let _ = self.prompt.draw(buf, band, None, &style, None, None);
     }
 
     /// The specialist status the L2 overlay just painted is a click target.
     /// A left click opens that L3 session view.
-    /// `Waiting on 1 task...` wins when that row is painted, including when a
-    /// description phrase is also on screen. The hit is the lowest row of
-    /// that phrase, plus the open-arrow control painted on that row. An
-    /// unlabeled `Waiting on task output…` title and a bottom `1 subagent
-    /// still running` cue for this one-task wait are rewritten to the same
-    /// phrase so the lower row is the control. A description phrase stays
-    /// the target when the waiting row is not painted.
+    /// `Waiting on 1 task...` wins when that row is painted and the specialist
+    /// description is empty. The hit is the lowest row of that phrase, plus
+    /// the open-arrow control painted on that row. That waiting row is
+    /// strictly below the takeover title: title y and waiting y are not
+    /// the same cell. An unlabeled `Waiting on task output…` title and a
+    /// bottom `1 subagent still running` cue for this one-task wait are
+    /// rewritten to the same phrase so the lower row is the control. When
+    /// those cues are missing, a reserved row under the title still paints
+    /// the phrase and hosts `[↗]`. Named L3 specialist rows also paint that
+    /// same enlarge/open-arrow; activating it opens that L3. Each named row
+    /// gets its own arrow and hit. One shared sid is not enough when two
+    /// named L3 rows are on screen. A waiting-row-only arrow is not the
+    /// L3-row control. Wait chrome that already paints
+    /// `{description}: {last tool}` keeps that tool name; the arrow does
+    /// not share glyphs with it (`[↗]ad_file` from `read_file`). Live wait
+    /// chrome clamps a long description (`{prefix}…: {tool}`); the named
+    /// path must still find that painted prefix so a normal-width L2
+    /// overlay shows the enlarge/open-arrow. When the specialist list also
+    /// paints a dedicated prefix, wait-chrome last-tool still hosts `[↗]`
+    /// on the row that names `read_file`, and the named row keeps its own.
     fn record_overlay_specialist_status_hit(
         &mut self,
         buf: &mut Buffer,
         area: Rect,
         child_sid: &str,
+        reserved_wait_row: Option<Rect>,
     ) {
-        let mut specialists: Vec<(String, String, std::time::Instant)> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(_, info)| {
-                info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-            })
-            .map(|(id, info)| {
-                (
-                    id.clone(),
-                    info.description.trim().to_string(),
-                    info.attempt.started_at,
-                )
-            })
-            .collect();
+        let mut specialists: Vec<(String, String, std::time::Instant)> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), child_sid)
+                .into_iter()
+                .map(|info| {
+                    (
+                        info.child_session_id.to_string(),
+                        info.description.trim().to_string(),
+                        info.attempt.started_at,
+                    )
+                })
+                .collect();
         specialists.sort_by_key(|(_, _, started)| *started);
         if specialists.len() == 1 {
             paint_one_task_wait_over_phrase(buf, area, WAITING_ON_TASK_OUTPUT);
+            if let Some(row) = reserved_wait_row {
+                paint_waiting_phrase_on_row(buf, row);
+            }
             if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
                 paint_one_task_wait_over_still_running(buf, area);
-                if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
-                    && let Some((id, _, _)) = specialists.first()
+                if let Some(mut rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                    && let Some((id, phrase, _)) = specialists.first()
+                    && phrase.is_empty()
                 {
-                    let hit = paint_waiting_row_open_arrow(buf, area, rect);
-                    self.hit_overlay_nested_status.set(Some(hit));
-                    self.overlay_nested_status_child_sid = Some(id.clone());
-                    return;
+                    if let Some(title) = painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                        && rect.y <= title.y
+                    {
+                        if let Some(row) = reserved_wait_row.filter(|row| row.y > title.y) {
+                            paint_waiting_phrase_on_row(buf, row);
+                            if let Some(forced) =
+                                painted_phrase_rect_on_row(buf, area, row.y, WAITING_ON_ONE_TASK)
+                            {
+                                rect = forced;
+                            }
+                        }
+                    }
+                    if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                        .is_some_and(|title| rect.y > title.y)
+                    {
+                        let hit = paint_waiting_row_open_arrow(buf, area, rect);
+                        self.record_overlay_nested_status_hit(id.clone(), hit);
+                        return;
+                    }
                 }
             }
         }
@@ -616,31 +750,118 @@ impl AgentView {
             if phrase.is_empty() {
                 continue;
             }
-            let Some(rect) = painted_phrase_rect(buf, area, &phrase) else {
-                continue;
-            };
-            self.hit_overlay_nested_status.set(Some(rect));
+            let mut rects = Vec::new();
+            // Wait-chrome `{prefix}…: {tool}` wins for overlay hit paint when
+            // the specialist list also painted a dedicated prefix. The named
+            // test looks at the `read_file` wait-chrome row, not the list.
+            if let Some(rect) = painted_last_tool_wait_chrome_phrase_rect(buf, area, &phrase) {
+                rects.push(rect);
+            }
+            if let Some(rect) = painted_specialist_phrase_rect(buf, area, &phrase)
+                && !rects.iter().any(|existing| existing.y == rect.y)
+            {
+                rects.push(rect);
+            }
+            for rect in rects {
+                let hit = paint_waiting_row_open_arrow(buf, area, rect);
+                self.record_overlay_nested_status_hit(id.clone(), hit);
+            }
+        }
+    }
+
+    /// One named L3 row, or the empty-description one-task wait, is a
+    /// click target that opens that child. The first painted row also
+    /// fills the single overlay status hit so older one-row tests still
+    /// read `hit_overlay_nested_status`. Later named rows keep their
+    /// own rect in `view_button_rects`.
+    fn record_overlay_nested_status_hit(&mut self, id: String, hit: Rect) {
+        self.tasks
+            .view_button_rects
+            .push((TaskEntryId::Agent(id.clone()), hit));
+        if self.overlay_nested_status_child_sid.is_none() {
+            self.hit_overlay_nested_status.set(Some(hit));
             self.overlay_nested_status_child_sid = Some(id);
-            return;
+        }
+    }
+
+    /// Left-click target for an overlay L3 open-arrow. The live L2 overlay
+    /// tasks pane paints `[↗]` on the child view. Those hits open that L3
+    /// on this view. Per-row overlay hits still win over the single status
+    /// sid so two named specialists do not share the first painted sid.
+    fn overlay_nested_open_sid_at(&self, column: u16, row: u16) -> Option<String> {
+        let point = (column, row).into();
+        // Live L2 overlay: the inner tasks pane `[↗]` is the control the
+        // Operator clicks. It lives on the child view, not on L1 hits.
+        if let Some(child_sid) = self.active_subagent.as_deref()
+            && let Some(child) = self.subagent_views.get(child_sid)
+        {
+            for (id, rect) in &child.tasks.view_button_rects {
+                if rect.contains(point)
+                    && let TaskEntryId::Agent(sid) = id
+                {
+                    // Native chip stores TaskEntry.subagent_id (sa-l3-first),
+                    // not the L1 view key (l3-first). Match registry key,
+                    // subagent_id, or child_session_id, then pick the id that
+                    // is actually in subagent_views. Skip the L2 floor.
+                    if self.subagent_views.contains_key(sid) && sid.as_str() != child_sid {
+                        return Some(sid.clone());
+                    }
+                    let native_sid = sid.as_str();
+                    let resolved = self
+                        .subagent_sessions
+                        .iter()
+                        .find(|(key, info)| {
+                            key.as_str() == native_sid
+                                || info.subagent_id.as_ref() == native_sid
+                                || info.child_session_id.as_ref() == native_sid
+                        })
+                        .and_then(|(key, info)| {
+                            [
+                                info.child_session_id.as_ref(),
+                                key.as_str(),
+                                native_sid,
+                                info.subagent_id.as_ref(),
+                            ]
+                            .into_iter()
+                            .find(|id| self.subagent_views.contains_key(*id))
+                            .map(str::to_owned)
+                        });
+                    if let Some(view_sid) = resolved
+                        && view_sid != child_sid
+                    {
+                        return Some(view_sid);
+                    }
+                }
+            }
+        }
+        for (id, rect) in &self.tasks.view_button_rects {
+            if rect.contains(point)
+                && let TaskEntryId::Agent(sid) = id
+            {
+                return Some(sid.clone());
+            }
+        }
+        if self.hit_overlay_nested_status.contains(column, row) {
+            self.overlay_nested_status_child_sid.clone()
+        } else {
+            None
         }
     }
 
     /// Parent-registry L3 rows are invisible to the L2 view's wait chrome.
     /// Mirror them for this draw so the overlay names the live specialist.
     fn mirror_parented_specialists_for_overlay(&mut self, child_sid: &str) -> Vec<String> {
-        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> = self
-            .subagent_sessions
-            .iter()
-            .filter(|(id, info)| {
-                info.is_running()
-                    && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-                    && self
-                        .subagent_views
-                        .get(child_sid)
-                        .is_some_and(|child| !child.subagent_sessions.contains_key(id.as_str()))
-            })
-            .map(|(id, info)| (id.clone(), info.clone()))
-            .collect();
+        let already_on_child: std::collections::HashSet<String> = self
+            .subagent_views
+            .get(child_sid)
+            .map(|child| child.subagent_sessions.keys().cloned().collect())
+            .unwrap_or_default();
+        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> =
+            crate::app::subagent::l3_rows_for_l2(self.subagent_sessions.values(), child_sid)
+                .into_iter()
+                .filter(|info| !already_on_child.contains(info.child_session_id.as_ref()))
+                .map(|info| (info.child_session_id.to_string(), info.clone()))
+                .collect();
         let Some(child) = self.subagent_views.get_mut(child_sid) else {
             return Vec::new();
         };
@@ -661,6 +882,18 @@ impl AgentView {
         }
     }
 
+    /// Test helper: ids `mirror_parented_specialists_for_overlay` would copy.
+    /// Drops them again so the child map is unchanged. Does not change list behavior.
+    #[cfg(test)]
+    pub(crate) fn mirrored_overlay_specialist_ids_for_test(
+        &mut self,
+        child_sid: &str,
+    ) -> Vec<String> {
+        let keys = self.mirror_parented_specialists_for_overlay(child_sid);
+        self.drop_mirrored_overlay_specialists(child_sid, &keys);
+        keys
+    }
+
     /// Idle child still listed as running: frame close cancels that row.
     fn completed_listed_overlay_kill_id(&self) -> Option<String> {
         let sid = self.active_subagent.as_deref()?;
@@ -677,9 +910,11 @@ impl AgentView {
         }
         Some(info.subagent_id.to_string())
     }
-    /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
-    /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
-    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, idle-quote, forward + filter.
+    /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise input goes to the
+    /// child view, except a plain typing key while a hidden-route specialist is still running: that key returns
+    /// `None` so the L1 prompt inserts it in this turn. `q`/`Esc` from bare scrollback still close the view.
+    /// Ctrl+Q always bubbles to the global quit. Ctrl+B still forwards so send-to-background can emit.
+    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, plain L1 key, idle-quote, forward + filter.
     pub(super) fn intercept_takeover_input(
         &mut self,
         ev: &Event,
@@ -715,10 +950,7 @@ impl AgentView {
         }
         if let Event::Mouse(mouse) = ev
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self
-                .hit_overlay_nested_status
-                .contains(mouse.column, mouse.row)
-            && let Some(sid) = self.overlay_nested_status_child_sid.clone()
+            && let Some(sid) = self.overlay_nested_open_sid_at(mouse.column, mouse.row)
             && self.subagent_views.contains_key(&sid)
         {
             let open_is_l2_floor = self
@@ -790,6 +1022,9 @@ impl AgentView {
                 }
             }
         }
+        if self.plain_key_reaches_l1_while_hidden_specialist_runs(key, &child_sid) {
+            return None;
+        }
         let child_quote = key.and_then(|key| {
             self.subagent_views
                 .get_mut(&child_sid)
@@ -837,12 +1072,62 @@ const WAITING_ON_TASK_OUTPUT: &str = "Waiting on task output…";
 const ONE_SUBAGENT_STILL_RUNNING: &str = "1 subagent still running";
 
 fn overlay_nested_specialist_count(view: &AgentView, child_sid: &str) -> usize {
-    view.subagent_sessions
-        .values()
-        .filter(|info| {
-            info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
-        })
-        .count()
+    crate::app::subagent::l3_rows_for_l2(view.subagent_sessions.values(), child_sid).len()
+}
+
+/// One empty-description L3 wait keeps the title phrase and needs a
+/// waiting row strictly below that title for `[↗]`. The reserved row is
+/// the first inner content row (below the title border). None when the
+/// title is not that phrase, the specialist is named, or inner is too
+/// short to give the child a row after the steal.
+fn reserved_one_task_wait_row(
+    view: &AgentView,
+    child_sid: &str,
+    activity: Option<&str>,
+    title_y: u16,
+    inner: Rect,
+) -> Option<Rect> {
+    if activity != Some(WAITING_ON_ONE_TASK) {
+        return None;
+    }
+    if inner.height <= 4 || inner.y <= title_y {
+        return None;
+    }
+    let specialists =
+        crate::app::subagent::l3_rows_for_l2(view.subagent_sessions.values(), child_sid);
+    if specialists.len() != 1 {
+        return None;
+    }
+    if !specialists
+        .first()
+        .is_some_and(|info| info.description.trim().is_empty())
+    {
+        return None;
+    }
+    Some(Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    })
+}
+
+/// Paint `Waiting on 1 task...` on `row` when that row does not already
+/// carry the phrase. Used for the reserved waiting row below the title.
+fn paint_waiting_phrase_on_row(buf: &mut Buffer, row: Rect) {
+    if row.height == 0 || row.width == 0 {
+        return;
+    }
+    if painted_phrase_rect_on_row(buf, row, row.y, WAITING_ON_ONE_TASK).is_some() {
+        return;
+    }
+    let theme = Theme::current();
+    buf.set_span_safe(
+        row.x,
+        row.y,
+        &Span::styled(WAITING_ON_ONE_TASK, Style::default().fg(theme.gray)),
+        row.width,
+    );
 }
 
 /// A one-task wait's bottom status still says `1 subagent still running`.
@@ -853,9 +1138,15 @@ fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
     paint_one_task_wait_over_phrase(buf, area, ONE_SUBAGENT_STILL_RUNNING);
 }
 
-/// Paint `[↗]` on the one-task wait row so the waited L3 is an open control.
-/// The hit covers the waiting phrase and that arrow. Do not overwrite the
-/// waiting phrase when the row is too short for the arrow.
+/// Paint `[↗]` as an open control for an overlay phrase.
+/// Named L3 rows and the one-task wait row get the arrow after the phrase.
+/// Wait chrome that already paints `{description}: {tool}` keeps that last
+/// tool; the arrow sits in the blank gap left of the description so the
+/// two do not share glyphs (`[↗]ad_file` from `read_file`). A clamped
+/// `{prefix}…: {tool}` row is the same last-tool chrome. When that left
+/// gap is the spinner, the arrow sits after the tool or over the spinner
+/// so a normal-width L2 overlay still shows the button. The hit covers
+/// the phrase and that arrow.
 fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> Rect {
     let arrow = crate::glyphs::enlarge_button();
     let arrow_w: u16 = 3;
@@ -864,12 +1155,23 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
         return phrase;
     }
     let after_phrase = phrase.x.saturating_add(phrase.width);
-    let arrow_x = if after_phrase.saturating_add(1).saturating_add(arrow_w) <= right {
+    let arrow_x = if phrase_followed_by_last_tool_sep(buf, phrase) {
+        match open_arrow_x_left_of_last_tool(buf, area, phrase, arrow_w)
+            .or_else(|| open_arrow_x_after_last_tool(buf, area, phrase, arrow_w))
+            .or_else(|| open_arrow_x_over_spinner(area, phrase, arrow_w))
+        {
+            Some(x) => x,
+            None => return phrase,
+        }
+    } else if after_phrase.saturating_add(1).saturating_add(arrow_w) <= right {
         after_phrase.saturating_add(1)
     } else if after_phrase.saturating_add(arrow_w) <= right {
         after_phrase
     } else {
-        return phrase;
+        match open_arrow_x_over_spinner(area, phrase, arrow_w) {
+            Some(x) => x,
+            None => return phrase,
+        }
     };
     let theme = Theme::current();
     buf.set_span_safe(
@@ -878,8 +1180,235 @@ fn paint_waiting_row_open_arrow(buf: &mut Buffer, area: Rect, phrase: Rect) -> R
         &Span::styled(arrow, Style::default().fg(theme.gray)),
         arrow_w,
     );
-    let hit_end = arrow_x.saturating_add(arrow_w);
-    Rect::new(phrase.x, phrase.y, hit_end.saturating_sub(phrase.x), 1)
+    let hit_x = arrow_x.min(phrase.x);
+    let hit_end = after_phrase.max(arrow_x.saturating_add(arrow_w));
+    Rect::new(hit_x, phrase.y, hit_end.saturating_sub(hit_x), 1)
+}
+
+/// `{description}: {tool}` wait chrome, including a clamped
+/// `{prefix}…: {tool}` subject. The colon is the last-tool separator,
+/// not room for `[↗]`.
+fn phrase_followed_by_last_tool_sep(buf: &Buffer, phrase: Rect) -> bool {
+    if phrase.height == 0 {
+        return false;
+    }
+    let y = phrase.y;
+    let mut x = phrase.x.saturating_add(phrase.width);
+    x = skip_ellipsis_cells(buf, x, y);
+    buf.cell((x, y)).is_some_and(|cell| cell.symbol() == ":")
+}
+
+fn cells_are_blank(buf: &Buffer, x: u16, y: u16, width: u16) -> bool {
+    (0..width).all(|i| {
+        buf.cell((x.saturating_add(i), y)).is_none_or(|cell| {
+            let symbol = cell.symbol();
+            symbol.is_empty() || symbol == " "
+        })
+    })
+}
+
+/// Sit `[↗]` in the blank gap left of `{description}: {tool}` so the last
+/// tool stays whole. None when that gap is too short or already painted.
+fn open_arrow_x_left_of_last_tool(
+    buf: &Buffer,
+    area: Rect,
+    phrase: Rect,
+    arrow_w: u16,
+) -> Option<u16> {
+    let gap: u16 = 1;
+    let left_room = phrase.x.saturating_sub(area.x);
+    let candidate = if left_room >= arrow_w.saturating_add(gap) {
+        phrase.x.saturating_sub(arrow_w.saturating_add(gap))
+    } else if left_room >= arrow_w {
+        phrase.x.saturating_sub(arrow_w)
+    } else {
+        return None;
+    };
+    (candidate >= area.x && cells_are_blank(buf, candidate, phrase.y, arrow_w)).then_some(candidate)
+}
+
+fn is_ellipsis_symbol(symbol: &str) -> bool {
+    symbol == "\u{2026}"
+}
+
+/// Skip a painted truncation ellipsis (`…` or `. . .`) so `{prefix}…: {tool}`
+/// still reads as last-tool chrome.
+fn skip_ellipsis_cells(buf: &Buffer, mut x: u16, y: u16) -> u16 {
+    if buf
+        .cell((x, y))
+        .is_some_and(|cell| is_ellipsis_symbol(cell.symbol()))
+    {
+        return x.saturating_add(1);
+    }
+    let dots = (0..3).all(|i| {
+        buf.cell((x.saturating_add(i), y))
+            .is_some_and(|cell| cell.symbol() == ".")
+    });
+    if dots {
+        x = x.saturating_add(3);
+    }
+    x
+}
+
+/// Sit `[↗]` after `{desc}: {tool}` (and a trailing ellipsis) when the left
+/// gap is the spinner. None when that run would leave the row.
+fn open_arrow_x_after_last_tool(
+    buf: &Buffer,
+    area: Rect,
+    phrase: Rect,
+    arrow_w: u16,
+) -> Option<u16> {
+    let y = phrase.y;
+    let right = area.x.saturating_add(area.width);
+    let mut x = skip_ellipsis_cells(buf, phrase.x.saturating_add(phrase.width), y);
+    if !buf.cell((x, y)).is_some_and(|cell| cell.symbol() == ":") {
+        return None;
+    }
+    x = x.saturating_add(1);
+    if buf.cell((x, y)).is_some_and(|cell| cell.symbol() == " ") {
+        x = x.saturating_add(1);
+    }
+    while x < right {
+        let symbol = buf
+            .cell((x, y))
+            .map(|cell| cell.symbol().to_owned())
+            .unwrap_or_default();
+        if symbol.is_empty() || symbol == " " || is_ellipsis_symbol(&symbol) {
+            break;
+        }
+        x = x.saturating_add(1);
+    }
+    x = skip_ellipsis_cells(buf, x, y);
+    let with_gap = x.saturating_add(1);
+    if with_gap.saturating_add(arrow_w) <= right && cells_are_blank(buf, with_gap, y, arrow_w) {
+        return Some(with_gap);
+    }
+    if x.saturating_add(arrow_w) <= right && cells_are_blank(buf, x, y, arrow_w) {
+        return Some(x);
+    }
+    None
+}
+
+/// Last resort on a packed wait row: paint `[↗]` over the spinner left of
+/// the phrase so a normal-width overlay still shows the button. Does not
+/// sit on the phrase (the last-tool name stays whole).
+fn open_arrow_x_over_spinner(area: Rect, phrase: Rect, arrow_w: u16) -> Option<u16> {
+    let candidate = phrase.x.saturating_sub(arrow_w);
+    (candidate >= area.x && candidate.saturating_add(arrow_w) <= phrase.x).then_some(candidate)
+}
+
+/// Painted specialist phrase, including a clamped wait-chrome prefix when
+/// the full description is not on screen. Prefers a dedicated L3-row run,
+/// then last-tool chrome.
+fn painted_specialist_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    painted_specialist_phrase_matching(buf, area, phrase, false)
+}
+
+/// Last-tool wait chrome (`{prefix}…: {tool}`), including a clamped prefix
+/// when the full description is not on screen. Dedicated specialist-list
+/// rows are skipped so wait chrome still hosts `[↗]` when both exist.
+fn painted_last_tool_wait_chrome_phrase_rect(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+) -> Option<Rect> {
+    painted_specialist_phrase_matching(buf, area, phrase, true)
+}
+
+fn painted_specialist_phrase_matching(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+    last_tool_only: bool,
+) -> Option<Rect> {
+    let phrase = phrase.trim();
+    if phrase.is_empty() {
+        return None;
+    }
+    if let Some(rect) = painted_open_control_phrase_rect_kind(buf, area, phrase, last_tool_only) {
+        return Some(rect);
+    }
+    let clamped = crate::acp::tracker::clamp_activity_subject(phrase);
+    if clamped != phrase
+        && let Some(rect) =
+            painted_open_control_phrase_rect_kind(buf, area, &clamped, last_tool_only)
+    {
+        return Some(rect);
+    }
+    let chars: Vec<char> = phrase.chars().collect();
+    let min = 8.min(chars.len());
+    if min == 0 {
+        return None;
+    }
+    for len in (min..chars.len()).rev() {
+        let Some(prefix_chars) = chars.get(..len) else {
+            continue;
+        };
+        let prefix: String = prefix_chars.iter().copied().collect();
+        if let Some(rect) =
+            painted_open_control_phrase_rect_kind(buf, area, &prefix, last_tool_only)
+        {
+            return Some(rect);
+        }
+    }
+    None
+}
+
+/// First dedicated L3-row paint of `phrase` (not `{desc}: {tool}` wait
+/// chrome) unless `last_tool_only`. Last-tool-only skips specialist-list
+/// rows so wait chrome still hosts `[↗]`. Otherwise falls back to the
+/// first last-tool occurrence so that row can still host an open arrow
+/// left of the tool name.
+fn painted_open_control_phrase_rect_kind(
+    buf: &Buffer,
+    area: Rect,
+    phrase: &str,
+    last_tool_only: bool,
+) -> Option<Rect> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let bottom = area.y.saturating_add(area.height);
+    let right = area.x.saturating_add(area.width);
+    let mut last_tool_fallback = None;
+    for y in area.y..bottom {
+        let symbols: Vec<String> = (area.x..right)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            let end = start + glyphs.len();
+            if symbols.get(start..end) != Some(glyphs.as_slice()) {
+                continue;
+            }
+            let width = u16::try_from(glyphs.len()).unwrap_or(u16::MAX);
+            let x = area
+                .x
+                .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
+            let rect = Rect::new(x, y, width, 1);
+            if phrase_followed_by_last_tool_sep(buf, rect) {
+                if last_tool_only {
+                    return Some(rect);
+                }
+                if last_tool_fallback.is_none() {
+                    last_tool_fallback = Some(rect);
+                }
+                break;
+            }
+            if last_tool_only {
+                break;
+            }
+            return Some(rect);
+        }
+    }
+    if last_tool_only {
+        None
+    } else {
+        last_tool_fallback
+    }
 }
 
 /// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the

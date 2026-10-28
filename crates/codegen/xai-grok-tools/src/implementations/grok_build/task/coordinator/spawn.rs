@@ -386,7 +386,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             id.clone(),
             PendingChild {
                 started_at: since,
-                cancellation: request.cancel_token.clone(),
+                // Same `CancellationToken::child_token` as `start_child`: finishing a
+                // role that never started must not cancel the caller's parent token.
+                cancellation: request.cancel_token.child_token(),
                 spawn_reply,
                 foreground_deadline: None,
                 handle_only: request.run_in_background,

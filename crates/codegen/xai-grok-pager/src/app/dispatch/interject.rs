@@ -278,6 +278,7 @@ mod tests {
     use super::*;
     use crate::app::actions::Action;
     use crate::app::agent::AgentId;
+    use crate::app::agent_view::AgentView;
     use crate::app::app_view::{InputOutcome, PendingAction};
     use crate::app::dispatch::router::dispatch;
     use crate::app::dispatch::tests::test_app_with_agent;
@@ -561,6 +562,120 @@ mod tests {
         assert!(
             app.agents[&id].session.state.is_turn_running(),
             "current turn must keep running"
+        );
+    }
+
+    fn count_operator_lines_with_text(agent: &AgentView, text: &str) -> usize {
+        (0..agent.scrollback.len())
+            .filter(|&i| match agent.scrollback.entry(i).map(|e| &e.block) {
+                Some(RenderBlock::UserPrompt(b)) => {
+                    b.text.split_whitespace().eq(text.split_whitespace())
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// GitHub #248: one Enter with an image attachment paints one Operator line.
+    /// Mid-turn Enter interjects a local UserPrompt. The live wrap UserMessageChunk
+    /// echo must not paint a second identical Operator-green row. The composer
+    /// must not still hold that body (prompt input is not doubled).
+    #[test]
+    fn enter_with_image_while_turn_running_paints_exactly_one_operator_line() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let typed = "You've taken nearly 30 minutes to respond...";
+        let img = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![1, 2, 3],
+            mime_type: "image/png".into(),
+        });
+        let submitted = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(typed);
+            agent.prompt.insert_image(img).unwrap();
+            let submitted = agent.prompt.text().to_string();
+            assert!(
+                submitted.contains("[Image #1]"),
+                "the composer must carry the image chip; got {submitted:?}"
+            );
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => (submitted, action),
+                other => panic!("mid-turn Enter with an image must submit, got {other:?}"),
+            }
+        };
+        let (submitted, action) = submitted;
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text.split_whitespace().eq(submitted.split_whitespace())),
+            "bare Enter is soft interject via SendPrompt, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert!(
+                text.split_whitespace().eq(submitted.split_whitespace()),
+                "interject text must be the composer body including the image chip; got {text:?}"
+            ),
+            other => panic!("expected SendInterject this turn, got {other:?}"),
+        }
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that interjects, the composer must not still hold that body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        assert_eq!(
+            count_operator_lines_with_text(&app.agents[&id], &submitted),
+            1,
+            "local interject paint must be exactly one Operator line"
+        );
+
+        let wrap = format!(
+            "{submitted}\n\n\
+             <always_applied_workspace_rules>\n\
+             # AGENTS.md\n\
+             Never paint workspace rules in the Operator transcript.\n\
+             </always_applied_workspace_rules>\n\n\
+             <image_files>\n\
+             /tmp/assets/image-1.jpg\n\
+             </image_files>\n\n\
+             <user_query>\n\
+             {submitted}\n\
+             </user_query>"
+        );
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            let echo = acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new(wrap)),
+            ));
+            let _ = agent.session.handle_update(
+                echo,
+                &NotificationMeta::default(),
+                &mut agent.scrollback,
+            );
+        }
+        assert_eq!(
+            count_operator_lines_with_text(&app.agents[&id], &submitted),
+            1,
+            "one Enter with an image must paint exactly one Operator line after the wrap echo; humans={:?}",
+            (0..app.agents[&id].scrollback.len())
+                .filter_map(
+                    |i| match app.agents[&id].scrollback.entry(i).map(|e| &e.block) {
+                        Some(RenderBlock::UserPrompt(b)) => Some(b.text.clone()),
+                        _ => None,
+                    }
+                )
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "prompt input must not be doubled after the echo; got {:?}",
+            app.agents[&id].prompt.text()
         );
     }
 
@@ -994,6 +1109,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             finished: false,
             status: None,
+            from_occupancy_restore: false,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,

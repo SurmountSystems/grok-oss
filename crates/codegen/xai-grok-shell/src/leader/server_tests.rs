@@ -4552,6 +4552,7 @@ async fn roster_merge_round_trips_namespaced_ids_and_broadcasts_changes() {
     let body: serde_json::Value = serde_json::from_str(
         ExtMethodResult::success(RosterListResponse {
             sessions: vec![live],
+            generation: 0,
         })
         .to_ext_response()
         .unwrap()
@@ -4591,7 +4592,7 @@ async fn roster_merge_round_trips_namespaced_ids_and_broadcasts_changes() {
     );
 
     response_tx
-        .send(changed_notification(vec![cursor_row], Vec::new()))
+        .send(changed_notification(vec![cursor_row], Vec::new(), 0))
         .unwrap();
     for (name, reader) in [("A", &mut reader_a), ("B", &mut reader_b)] {
         let got = next_acp_payload(reader).await;

@@ -1803,6 +1803,16 @@ pub(crate) async fn persist_permission_mode_and_notify(
     {
         notify_permission_mode(config_str, session_id, tx).await;
     }
+    // Live sibling grok-oss windows ask this socket instead of a fresh authorize.
+    // Not leader.sock. The document is authorized + permission_mode + event_ms, never a token.
+    let _ = xai_grok_shell::util::config::publish_authorize_ask_socket(
+        xai_grok_config::grok_home(),
+        &xai_grok_shell::util::config::AuthorizeAskDocument {
+            authorized: true,
+            permission_mode: config_str.to_string(),
+            event_ms: xai_grok_shell::util::config::authorize_ask_event_ms(),
+        },
+    );
     route_permission_mode_result(disk_outcome, persist, config_str)
 }
 pub(crate) async fn notify_permission_mode(

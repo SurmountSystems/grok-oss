@@ -39,6 +39,36 @@ const _: () = assert!(
     RESIZE_DEBOUNCE.as_millis() < crate::app::app_view::SLOW_TICK_INTERVAL.as_millis(),
     "the debounced draw must record the new width before the forced re-run reads it"
 );
+/// Draw cadence during a live resize (GitHub #235).
+/// Skip paints while the debounce is armed so overlay markdown and scrollback wrap
+/// are not rebuilt on every SIGWINCH. `iterm2_erase` is the one cheap paint that
+/// hides smeared iTerm2 pixels on the first drag event.
+/// That erase paint still calls `scrollback.prepare_layout`; live-resize skip keeps
+/// the last conversation wrap until settle (not overlay-only).
+/// Typing/mouse clear the debounce and paint immediately (no spin that blocks typing).
+pub(crate) fn should_paint_during_live_resize(
+    resize_debounce_pending: bool,
+    iterm2_erase: bool,
+) -> bool {
+    iterm2_erase || !resize_debounce_pending
+}
+/// Consecutive SIGWINCH reports keep only the latest size.
+/// A drag dumps dozens into the input buffer; handling each one is cheap, but later
+/// draws must not rebuild wrap N times.
+pub(crate) fn coalesce_consecutive_resizes(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
+    let mut out: Vec<TimedInputEvent> = Vec::with_capacity(events.len());
+    for ev in events {
+        if matches!(ev.event, Event::Resize(_, _))
+            && let Some(last) = out.last_mut()
+            && matches!(last.event, Event::Resize(_, _))
+        {
+            *last = ev;
+            continue;
+        }
+        out.push(ev);
+    }
+    out
+}
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimedInputEvent {
     pub(super) event: Event,
@@ -2284,6 +2314,17 @@ pub(crate) async fn run(
                     break;
                 }
 
+                // GitHub #243: auto-background any agent that is blocking the
+                // L1 context so the Operator can type. send-to-background
+                // (Ctrl+B) stays; this is the automatic path.
+                let auto_bg = dispatch::maybe_auto_background_l1_blocking_execute(&mut app);
+                if !auto_bg.is_empty() {
+                    if process_effects(auto_bg, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                }
+
                 // Unacknowledged-prompt recovery
                 if let Some(effs) =
                     dispatch::reconcile_overdue_prompt_acks(&mut app, &ack_deadlines)
@@ -2316,6 +2357,7 @@ pub(crate) async fn run(
             // Gated: an overdue deadline must not paint an intermediate size while a resize event waits
             _ = resize_debounce, if input_rx.is_empty() => {
                 resize_debounce_at = None;
+                app.settle_live_resize_overlays();
                 presenter.request(false);
                 schedule_tick(&mut animation_tick_at, &app, tick_interval);
             }
@@ -2380,11 +2422,15 @@ pub(crate) async fn run(
 
                 if state_changed {
                     schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                    resize_debounce_at = None;
-                    // Cap paint rate so terminal input isn't starved during heavy ACP streaming
-                    let now = Instant::now();
-                    if presenter.request_throttled(now, min_draw_interval) {
-                        app.update_notifications();
+                    // ACP tokens must not cancel a live-resize debounce. Clearing it here
+                    // painted wrap on every SIGWINCH during a streaming turn (GitHub #235).
+                    if resize_debounce_at.is_none() {
+                        let now = Instant::now();
+                        if presenter.request_throttled(now, min_draw_interval) {
+                            app.update_notifications();
+                        }
+                    } else {
+                        presenter.request(false);
                     }
                 }
             }
@@ -2521,6 +2567,7 @@ pub(crate) async fn run(
                         // Refocus heal wins over the resize debounce
                         // A coalesced same-size resize wouldn't autoresize-clear, so clear and fully repaint now
                         resize_debounce_at = None;
+                        app.settle_live_resize_overlays();
                         presenter.request(true);
                     } else if result.resize_only && !tip_shown {
                         // Debounce: schedule a single draw after the size stabilizes.
@@ -2528,15 +2575,18 @@ pub(crate) async fn run(
                         resize_debounce_at = Some(Instant::now() + RESIZE_DEBOUNCE);
                         // One immediate draw repaints the (now hidden) preview cells — the erase on iTerm2, which smears committed pixels during a drag (see resize_hides_prompt_preview).
                         // Ownership then clears, so later drag events fall back to pure debounce.
+                        // Overlay markdown and conversation wrap still skip (`note_live_resize`) on this erase paint.
                         if crate::terminal::overlay::has_committed_owner()
                             && crate::terminal::image::prompt_preview_graphics_protocol()
                                 == crate::terminal::image::GraphicsProtocol::ITerm2
                         {
                             presenter.request(false);
+                            presenter.present_if_dirty(&mut app, terminal);
                         }
                     } else {
                         // Non-resize change (or a shown tip): draw immediately (picks up any pending resize too)
                         resize_debounce_at = None;
+                        app.settle_live_resize_overlays();
                         presenter.request(false);
                     }
                 }
@@ -3043,7 +3093,9 @@ pub(crate) async fn run(
                 break;
             }
         }
-        presenter.present_if_dirty(&mut app, terminal);
+        if should_paint_during_live_resize(resize_debounce_at.is_some(), false) {
+            presenter.present_if_dirty(&mut app, terminal);
+        }
         schedule_tick(&mut animation_tick_at, &app, tick_interval);
     }
     flush_pending_stall(&mut stall_rollup);
@@ -3148,7 +3200,7 @@ fn after_task_complete_dispatch(
     app: &AppView,
     animation_tick_at: &mut Option<Instant>,
     tick_interval: Duration,
-    resize_debounce_at: &mut Option<Instant>,
+    _resize_debounce_at: &mut Option<Instant>,
     billing_poll_at: &mut Option<Instant>,
     billing_poll_interval: Duration,
     gate_poll_at: &mut Option<Instant>,
@@ -3156,7 +3208,9 @@ fn after_task_complete_dispatch(
     presenter: &mut Presenter,
 ) {
     schedule_tick(animation_tick_at, app, tick_interval);
-    *resize_debounce_at = None;
+    // Leave the resize debounce armed. Clearing it here painted wrap mid-drag
+    // whenever a JoinSet task finished (GitHub #235). Dirty still latches; the
+    // gated present at loop end waits for settle.
     if app.billing_poll_wanted && billing_poll_at.is_none() {
         *billing_poll_at = Some(Instant::now() + billing_poll_interval);
     } else if !app.billing_poll_wanted {
@@ -3353,6 +3407,7 @@ async fn drain_and_process(
     }
     let coalesced = csi_filter.filter(coalesced);
     let coalesced = x10_filter.filter(coalesced);
+    let coalesced = coalesce_consecutive_resizes(coalesced);
     let coalesced = coalesced
         .into_iter()
         .map(|event| normalize_input_event(event, live_input_started_at))
@@ -5774,6 +5829,88 @@ mod tests {
         assert!(matches!(nth(&result, 0).event, Event::Resize(80, 24)));
         assert_eq!(nth(&result, 1).event, Event::Paste("a\nb".to_string()));
         assert!(matches!(nth(&result, 2).event, Event::Resize(100, 30)));
+    }
+    /// GitHub #235: a drag dumps a SIGWINCH burst. Keep the latest size, not N wraps.
+    #[test]
+    fn coalesce_consecutive_resizes_keeps_latest_size() {
+        let events = (0..20u16)
+            .map(|i| TimedInputEvent::now(Event::Resize(80 + i, 24 + i)))
+            .collect::<Vec<_>>();
+        let result = coalesce_consecutive_resizes(events);
+        assert_eq!(result.len(), 1, "a resize burst is one event");
+        assert!(
+            matches!(nth(&result, 0).event, Event::Resize(99, 43)),
+            "the surviving event is the last size, not the first"
+        );
+    }
+    /// A key between resizes is typing. It must not be dropped, and it must cancel
+    /// coalescing so the key still reaches handle_input (no spin that blocks typing).
+    #[test]
+    fn coalesce_consecutive_resizes_does_not_drop_keys() {
+        let events = vec![
+            TimedInputEvent::now(Event::Resize(80, 24)),
+            TimedInputEvent::now(Event::Resize(90, 24)),
+            press(KeyCode::Char('x')),
+            TimedInputEvent::now(Event::Resize(100, 30)),
+            TimedInputEvent::now(Event::Resize(110, 30)),
+        ];
+        let result = coalesce_consecutive_resizes(events);
+        assert_eq!(result.len(), 3);
+        assert!(matches!(nth(&result, 0).event, Event::Resize(90, 24)));
+        assert!(matches!(
+            nth(&result, 1).event,
+            Event::Key(key) if key.code == KeyCode::Char('x')
+        ));
+        assert!(matches!(nth(&result, 2).event, Event::Resize(110, 30)));
+    }
+    /// Draw cadence during live resize: skip paints while debounce is armed.
+    /// iTerm2 erase is the one exception. Typing clears debounce (pending=false).
+    #[test]
+    fn live_resize_draw_cadence_skips_paints_except_iterm2_erase_and_typing() {
+        assert!(
+            !should_paint_during_live_resize(true, false),
+            "mid-drag paints hitch wrap"
+        );
+        assert!(
+            should_paint_during_live_resize(true, true),
+            "iTerm2 erase still paints once"
+        );
+        assert!(
+            should_paint_during_live_resize(false, false),
+            "typing/settle must paint immediately"
+        );
+        assert!(
+            should_paint_during_live_resize(false, true),
+            "erase after settle still paints"
+        );
+    }
+    /// Operator contract (GitHub #235): resizing a large conversation must not hitch
+    /// on every SIGWINCH. A burst is one size; mid-drag paints stay skipped.
+    /// Conversation wrap skip (`scrollback.prepare_layout`) is the other half:
+    /// iTerm2 erase may paint, wrap waits for settle.
+    #[test]
+    fn live_resize_does_not_hitch_large_conversation_on_every_sigwinch() {
+        let events = (0..20u16)
+            .map(|i| TimedInputEvent::now(Event::Resize(80 + i, 24)))
+            .collect::<Vec<_>>();
+        let result = coalesce_consecutive_resizes(events);
+        assert_eq!(
+            result.len(),
+            1,
+            "a SIGWINCH burst is one event, not one wrap per event"
+        );
+        assert!(
+            matches!(nth(&result, 0).event, Event::Resize(99, 24)),
+            "the surviving event is the last size"
+        );
+        assert!(
+            !should_paint_during_live_resize(true, false),
+            "mid-drag paints hitch conversation wrap"
+        );
+        assert!(
+            should_paint_during_live_resize(false, false),
+            "typing/settle must paint immediately so wrap runs once after settle"
+        );
     }
     #[test]
     fn coalesce_ctrl_key_breaks_run() {

@@ -146,6 +146,10 @@ pub struct SubagentInfo {
     pub finished: bool,
     /// Terminal status when the host has exited, for example "completed".
     pub status: Option<Arc<str>>,
+    /// Occupancy snapshot restore stores `finished: false` and no host
+    /// terminal status. Session `/clear` hides those leftover rows. A later
+    /// ACP spawn clears this bit so a still-running nested writer stays.
+    pub(crate) from_occupancy_restore: bool,
     pub attempt: SubagentAttemptInfo,
     pub(crate) completed_attempt_tokens: u64,
     pub(crate) sealed_attempt_tokens: HashMap<SubagentAttemptKey, u64>,
@@ -291,6 +295,8 @@ impl SubagentInfo {
                     info.finished = false;
                     info.status = None;
                 }
+                // ACP spawn or progress confirms this host is live work.
+                info.from_occupancy_restore = false;
                 info.attempt = attempt;
                 info
             }
@@ -301,6 +307,7 @@ impl SubagentInfo {
                 subagent_type: Arc::from(child.subagent_type),
                 finished: false,
                 status: None,
+                from_occupancy_restore: false,
                 attempt,
                 completed_attempt_tokens: 0,
                 sealed_attempt_tokens: HashMap::new(),
@@ -342,6 +349,27 @@ impl SubagentInfo {
         }
         self.attempt.status.as_deref().is_some_and(completed)
             || self.status.as_deref().is_some_and(completed)
+    }
+
+    /// Host already reported a terminal status (`completed` / `failed` / `cancelled`).
+    /// A stale `is_running()` bit must not keep that leftover row on the live list.
+    pub(crate) fn has_terminal_host_status(&self) -> bool {
+        fn terminal(status: &str) -> bool {
+            status.eq_ignore_ascii_case("completed")
+                || status.eq_ignore_ascii_case("failed")
+                || status.eq_ignore_ascii_case("cancelled")
+                || status.eq_ignore_ascii_case("canceled")
+        }
+        self.attempt.status.as_deref().is_some_and(terminal)
+            || self.status.as_deref().is_some_and(terminal)
+    }
+
+    /// Dock `[clear]` and session `/clear` hide leftover finished rows,
+    /// ghost running-looking rows whose host already reported a terminal
+    /// status, and occupancy-dead stale-running rows with no host terminal
+    /// status. A live row that was not occupancy-restored stays.
+    pub(crate) fn should_hide_on_dock_clear(&self) -> bool {
+        !self.is_running() || self.has_terminal_host_status() || self.from_occupancy_restore
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -720,6 +748,7 @@ pub(crate) mod test_support {
             subagent_type: "explore".into(),
             finished: false,
             status: None,
+            from_occupancy_restore: false,
             attempt: super::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
@@ -1360,10 +1389,12 @@ pub(crate) fn overlay_child_is_l2_coordinator(
     is_l2_list_row(info, &child_ids)
 }
 
-/// How many live L3 specialists an L2 is using.
+/// Live L3 rows whose parent is this L2.
 ///
-/// Counts running, non-workflow rows whose parent session is this L2.
-pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+/// Running, non-workflow specialists spawned by `l2_child_session_id`.
+/// Overlay mirror, overlay wait count, and the L2 tasks list use this so
+/// L2-A never lists L2-B's specialists.
+pub(crate) fn l3_rows_for_l2<'a, I>(infos: I, l2_child_session_id: &str) -> Vec<&'a SubagentInfo>
 where
     I: IntoIterator<Item = &'a SubagentInfo>,
 {
@@ -1374,7 +1405,17 @@ where
                 && info.attempt.workflow_run_id.is_none()
                 && info.attempt.parent_session_id.as_deref() == Some(l2_child_session_id)
         })
-        .count()
+        .collect()
+}
+
+/// How many live L3 specialists an L2 is using.
+///
+/// Counts running, non-workflow rows whose parent session is this L2.
+pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    l3_rows_for_l2(infos, l2_child_session_id).len()
 }
 
 /// L2 row suffix: how many L3 specialists that coordinator is using.

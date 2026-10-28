@@ -7,7 +7,7 @@ use xai_grok_sampling_types::{ConversationRequest, ConversationResponse, Samplin
 
 use crate::actor::request_task::CompletionResult;
 use crate::commands::SamplerCommand;
-use crate::config::SamplerConfig;
+use crate::config::{SamplerConfig, SharedBearerResolver};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
@@ -39,6 +39,10 @@ pub struct SamplerHandle {
     cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
     /// Spawn-time or last restamped JWT. Shared across clones.
     live_api_key: Arc<RwLock<Option<String>>>,
+    /// Same Arc as the actor config. `set_api_key` restamps it immediately so
+    /// recoveredBearer POST does not wait on the mailbox.
+    bearer_resolver: Option<SharedBearerResolver>,
+    session_bearer_resolver: Option<SharedBearerResolver>,
 }
 
 impl SamplerHandle {
@@ -52,6 +56,27 @@ impl SamplerHandle {
             live_api_key: Arc::new(RwLock::new(
                 live_api_key.filter(|key| !key.trim().is_empty()),
             )),
+            bearer_resolver: None,
+            session_bearer_resolver: None,
+        }
+    }
+
+    pub(crate) fn with_resolvers(
+        mut self,
+        bearer_resolver: Option<SharedBearerResolver>,
+        session_bearer_resolver: Option<SharedBearerResolver>,
+    ) -> Self {
+        self.bearer_resolver = bearer_resolver;
+        self.session_bearer_resolver = session_bearer_resolver;
+        self
+    }
+
+    fn restamp_handle_resolvers(&self, api_key: Option<String>) {
+        if let Some(resolver) = &self.bearer_resolver {
+            resolver.restamp_inherited_fallback(api_key.clone());
+        }
+        if let Some(resolver) = &self.session_bearer_resolver {
+            resolver.restamp_inherited_fallback(api_key);
         }
     }
 
@@ -146,8 +171,10 @@ impl SamplerHandle {
 
     /// Nested resume after login: restamp the inherit resolver fallback with the recovered parent sampler JWT.
     /// Writing `SamplerConfig.api_key` alone is not enough: nested POST Authorization comes from the resolver.
+    /// The handle restamps the shared resolver immediately so AuthComplete POST does not wait on the actor mailbox.
     pub fn set_api_key(&self, api_key: Option<String>) {
         self.replace_live_api_key(api_key.clone());
+        self.restamp_handle_resolvers(api_key.clone());
         let _ = self.cmd_tx.send(SamplerCommand::SetApiKey { api_key });
     }
 
@@ -288,6 +315,47 @@ mod tests {
             handle.current_api_key().await.as_deref(),
             Some("live-parent-jwt"),
             "closed actor mailbox must still return the spawn JWT"
+        );
+    }
+
+    /// AuthComplete POST after login must not wait on the actor mailbox.
+    /// `set_api_key` restamps the shared inherit resolver immediately.
+    #[test]
+    fn set_api_key_restamps_inherit_resolver_without_waiting_on_the_actor() {
+        use crate::config::BearerResolver;
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct RestampCell(Mutex<Option<String>>);
+        impl BearerResolver for RestampCell {
+            fn current_bearer(&self) -> Option<String> {
+                self.0
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                    .filter(|key| !key.trim().is_empty())
+            }
+            fn restamp_inherited_fallback(&self, jwt: Option<String>) {
+                if let Ok(mut guard) = self.0.lock() {
+                    *guard = jwt.filter(|key| !key.trim().is_empty());
+                }
+            }
+        }
+
+        let resolver = std::sync::Arc::new(RestampCell(Mutex::new(Some("spawn-time-jwt".into()))));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let handle = SamplerHandle::new(cmd_tx, Some("spawn-time-jwt".into()))
+            .with_resolvers(Some(resolver.clone()), None);
+        handle.set_api_key(Some("live-parent-jwt".into()));
+        assert_eq!(
+            handle.live_api_key().as_deref(),
+            Some("live-parent-jwt"),
+            "set_api_key must update live_api_key without waiting on the actor"
+        );
+        assert_eq!(
+            resolver.current_bearer().as_deref(),
+            Some("live-parent-jwt"),
+            "set_api_key must restamp the inherit resolver immediately so recoveredBearer POST does not wait on the mailbox"
         );
     }
 }

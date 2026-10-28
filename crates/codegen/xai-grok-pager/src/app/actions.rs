@@ -709,6 +709,14 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// A sibling grok-oss process published live `{authorized, permission_mode, event_ms}` on `authorize_ask.sock`.
+    /// Already-open L1 reloads the shared store and resends. Never tokens. Not inherit-on-startup.
+    /// `event_ms` is a unix millisecond stamp. It is not a token.
+    SiblingIpcAuthorize {
+        authorized: bool,
+        permission_mode: String,
+        event_ms: u64,
+    },
     /// Connecting... splash wait ended with no auth URL. Show a real auth error; do not wait on last-session restore.
     ConnectingSplashTimeout,
     /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
@@ -772,6 +780,9 @@ pub enum Action {
     ShowLimitsJson,
     /// Clear completed/cancelled todos from the live board.
     ClearCompletedTodos,
+    /// Session `/clear`: hide leftover/ghost Subagents rows on this conversation.
+    /// Not `/new`.
+    ClearLeftoverSubagentRows,
     /// Store an operator mid-session note (`/note <text>`).
     AddSessionNote {
         text: String,
@@ -2255,6 +2266,15 @@ pub enum Effect {
     CreditLimitRecheck { agent_id: AgentId },
     /// Schedule a 5s timer that fires `TaskResult::PaywallCheckTick`.
     SchedulePaywallCheck,
+    /// Publish `{authorized, permission_mode, event_ms}` on `$GROK_HOME/authorize_ask.sock`. Never tokens.
+    /// `event_ms` is a unix millisecond stamp. It is not a token.
+    PublishAuthorizeAsk {
+        authorized: bool,
+        permission_mode: String,
+        event_ms: u64,
+    },
+    /// Ask a live sibling over `authorize_ask.sock`. Already-open L1 applies the document.
+    AskSiblingAuthorize { delay_ms: u64 },
     /// Schedule `TaskResult::GateVerifyTimeout { generation }` after [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
     /// [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
     ScheduleGateVerifyTimeout { generation: u64 },
@@ -2377,6 +2397,13 @@ pub enum Effect {
     /// Used on startup to populate the welcome-screen credit warning, and by the dashboard's `/usage` modal.
     FetchAppBilling {
         /// Usage-modal fetch generation (`0` means a background refresh that settles no modal).
+        nonce: u64,
+    },
+    /// Successful login only. Asks for the included SuperGrok period limits
+    /// percent immediately. Sends `login_immediate_included_period_limits_refresh`,
+    /// not `{}`. Welcome login has no agent, so this is not `FetchBilling`.
+    FetchIncludedPeriodLimitsOnLogin {
+        /// Same nonce rule as [`Self::FetchAppBilling`]: `0` settles no modal.
         nonce: u64,
     },
     /// Fetch per-session token/cost via `x.ai/session/usage` (auth-agnostic).
@@ -2724,6 +2751,8 @@ pub enum TaskResult {
     /// Leader session roster loaded via `x.ai/sessions/list`.
     RosterLoaded {
         sessions: Vec<crate::app::roster::RosterEntry>,
+        /// `0` means the sender did not stamp the list.
+        generation: u64,
     },
     /// Leader session roster fetch failed (silent; no error modal).
     RosterFailed {
@@ -2892,6 +2921,15 @@ pub enum TaskResult {
         request_seq: u64,
         meta: Option<serde_json::Value>,
     },
+    /// Sibling live authorize document from `$GROK_HOME/authorize_ask.sock`. Never tokens.
+    /// `event_ms` is copied from the document. A missing socket stays `0`.
+    SiblingIpcAuthorize {
+        authorized: bool,
+        permission_mode: String,
+        event_ms: u64,
+    },
+    /// Fire-and-forget publish of `{authorized, permission_mode}` finished.
+    AuthorizeAskPublished,
     /// Authentication failed.
     AuthFailed {
         request_seq: u64,

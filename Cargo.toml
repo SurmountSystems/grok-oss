@@ -1,22 +1,8 @@
 # Auto-generated workspace root. Prefer editing per-crate Cargo.toml files.
-
-[patch.crates-io]
-# crates.io 0.10.0 / 0.10.1 yanked (SSE2 UB). 0.10.2 is not on the delayed
-# index. Official git tag, not a grok-oss path copy. rand 0.10.x needs
-# ChaCha12Rng. Do not cargo update against crates.io to skip the wait.
-# Official tag chacha20-v0.10.2. Cargo allows only one of tag or rev; rev is the lock commit.
-chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers", rev = "6b236b758a0279f64d777797514813b2cb572c8b" }
-# Official tag v/0.23.46. menhera-cooldown still lists 0.23.45. RUSTSEC-2026-0346
-# through 0349. Do not cargo update against crates.io to skip the wait.
-# See https://github.com/rustls/rustls/releases/tag/v%2F0.23.46 (accessed: 2026-10-15).
-rustls = { git = "https://github.com/rustls/rustls", tag = "v/0.23.46" }
-# Official tag v0.1.15. menhera-cooldown still lists through 0.1.13.
-# 0.1.11 through 0.1.14 depend on zip 8.6 (RUSTSEC-2026-0367/0368/0369).
-# 0.1.15 is the first office_oxide that depends on zip 9. Do not cargo
-# update against crates.io to skip the wait. Do not vendor a path copy.
-# See https://github.com/yfedoseev/office_oxide/releases/tag/v0.1.15
-# (accessed: 2026-10-20).
-office_oxide = { git = "https://github.com/yfedoseev/office_oxide", tag = "v0.1.15" }
+# The 7-day menhera index lists rustls 0.23.46, office_oxide 0.1.15, and
+# chacha20 0.10.2, so those are registry deps, not git pins. Yanked chacha20
+# 0.10.0 and 0.10.1 stay absent. Do not cargo update against crates.io to
+# skip the wait. Do not vendor a path copy.
 
 [workspace]
 resolver = "2"
@@ -245,8 +231,10 @@ obfstr = "0.4"
 # 0.1.15 is the first office_oxide that depends on zip 9. 0.1.12/0.1.13 put
 # defined_names on DocumentIR; 0.1.14 moved that field onto Metadata so
 # DocumentIR is { metadata, sections } again. This tree has no DocumentIR
-# initializer. pdf_oxide 0.3.78 is not a current workspace dep. Git patch
-# above: menhera-cooldown still lists through 0.1.13. Do not vendor a path copy.
+# initializer. pdf_oxide 0.3.78 is not a current workspace dep. The 7-day
+# menhera index lists 0.1.15, so this is a registry dep, not a git pin.
+# Do not vendor a path copy. Do not cargo update against crates.io to skip
+# the wait.
 office_oxide = "0.1.15"
 once_cell = "1"
 opentelemetry = "0.32"

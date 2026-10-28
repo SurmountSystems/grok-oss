@@ -302,6 +302,20 @@ pub(crate) fn record_model_call(
         api_duration_ms,
         cost_usd_ticks,
     );
+    crate::token_economy::live::record_completed_model_call(
+        crate::token_economy::live::LiveTokenLedger::process(),
+        &crate::token_economy::live::CompletedModelCall {
+            event_ulid: record.event_ulid.clone(),
+            session_id: record.session_id.clone(),
+            work_ulid: record.work_ulid.clone(),
+            turn_type: record.turn_type.clone(),
+            agent_kind: record.agent_kind.clone(),
+            input_tokens: record.input_tokens.unwrap_or(0),
+            output_tokens: record.output_tokens.unwrap_or(0),
+            cached_tokens: record.cached_tokens.unwrap_or(0),
+            reasoning_tokens: record.reasoning_tokens.unwrap_or(0),
+        },
+    );
     append_usage_record(session_dir, &record);
 }
 
@@ -631,5 +645,31 @@ mod tests {
         assert_eq!(v["model_id"], "mid");
         assert_eq!(v["cost_usd_ticks"], 77);
         assert_eq!(v["api_duration_ms"], 9);
+    }
+
+    #[test]
+    fn record_model_call_updates_process_live_token_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = format!("sess-live-wire-{}", xai_grok_tools::util::ulid::mint());
+        record_model_call(
+            dir.path(),
+            UsageIdentity::main(),
+            &session_id,
+            None,
+            Some("m".into()),
+            &sample_usage(),
+            None,
+            None,
+        );
+        let ledger = crate::token_economy::live::LiveTokenLedger::process();
+        use crate::token_economy::live::{TokenSlot, live_cost, live_slot};
+        assert_eq!(live_slot(ledger, &session_id, TokenSlot::Input), 1_000);
+        assert_eq!(live_slot(ledger, &session_id, TokenSlot::Output), 50);
+        assert_eq!(live_slot(ledger, &session_id, TokenSlot::Cached), 200);
+        assert_eq!(live_slot(ledger, &session_id, TokenSlot::Reasoning), 10);
+        assert_eq!(live_cost(ledger, &[&session_id]), Some(1_050));
+        assert_ne!(live_cost(ledger, &[&session_id]), Some(1_050 + 200));
+        assert_ne!(live_cost(ledger, &[&session_id]), Some(1_050 + 10));
+        assert_ne!(live_cost(ledger, &[&session_id]), Some(12_000));
     }
 }

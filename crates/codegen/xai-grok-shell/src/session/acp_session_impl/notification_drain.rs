@@ -39,6 +39,55 @@ fn promote_implement_sentence_to_front(pending: &mut std::collections::VecDeque<
     pending.push_front(item);
 }
 
+fn input_item_is_human_intent(item: &InputItem) -> bool {
+    item.input_origin.policy().authority.is_human_intent()
+}
+
+/// Continue-interrupted / rebuild resume must not sit on a cancelled nested
+/// auto-wake (`task_wake`) until `queued_user_promotion`. That hold painted
+/// Waiting for the model for minutes with no POST (GitHub #246, 311599 ms).
+fn promote_human_intent_ahead_of_auto_wake(pending: &mut std::collections::VecDeque<InputItem>) {
+    let Some(index) = pending.iter().position(input_item_is_human_intent) else {
+        return;
+    };
+    if index == 0 {
+        return;
+    }
+    if !pending
+        .iter()
+        .take(index)
+        .all(|item| item.input_origin.as_prompt_origin().is_auto_wake())
+    {
+        return;
+    }
+    let Some(item) = pending.remove(index) else {
+        return;
+    };
+    pending.push_front(item);
+}
+
+fn abort_running_auto_wake_for_queued_human(state: &mut State) {
+    promote_human_intent_ahead_of_auto_wake(&mut state.pending_inputs);
+    if !state.pending_inputs.iter().any(input_item_is_human_intent) {
+        return;
+    }
+    let running_is_wake = state.running_task.as_ref().is_some_and(|task| {
+        crate::session::PromptOrigin::from_prompt_id(&task.prompt_id).is_auto_wake()
+    });
+    if !running_is_wake {
+        return;
+    }
+    let Some(task) = state.running_task.take() else {
+        return;
+    };
+    let wake_id = task.prompt_id.clone();
+    task.abort();
+    let dropped = state.sweep_pending_inputs(|item| item.prompt_id == wake_id);
+    for item in dropped {
+        SessionActor::respond_removed_prompt(item.respond_to);
+    }
+}
+
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
     #[expect(
@@ -160,6 +209,7 @@ impl SessionActor {
             // `running_task` is the restored parked turn unless its prompt
             // id is this sentence (that task is the sampler call).
             promote_implement_sentence_to_front(&mut state.pending_inputs);
+            abort_running_auto_wake_for_queued_human(&mut state);
             let resume_sentence_queued = state
                 .pending_inputs
                 .front()
@@ -303,6 +353,7 @@ impl SessionActor {
         // Re-check after the await gap. A pager SendPrompt uses a uuid, and
         // the implement sentence may sit behind another queued row.
         promote_implement_sentence_to_front(&mut state.pending_inputs);
+        abort_running_auto_wake_for_queued_human(&mut state);
         let resume_sentence_queued = state
             .pending_inputs
             .front()

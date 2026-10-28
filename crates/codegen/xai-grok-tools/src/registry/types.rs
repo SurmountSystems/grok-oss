@@ -25,8 +25,16 @@ use parking_lot::{Mutex, RwLock};
 // These files are not `pub mod` on `grok_build`. Register them from here.
 #[path = "../implementations/grok_build/implement_memory/mod.rs"]
 mod implement_memory;
+#[path = "../implementations/grok_build/json_query/mod.rs"]
+mod json_query;
 #[path = "../implementations/grok_build/json_to_toon/mod.rs"]
 mod json_to_toon;
+#[path = "../implementations/grok_build/path_probe/mod.rs"]
+mod path_probe;
+#[path = "../implementations/grok_build/session_reader/mod.rs"]
+mod session_reader;
+#[path = "../implementations/grok_build/session_usage/mod.rs"]
+mod session_usage;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -752,7 +760,12 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::disable_ascii_scrub::DisableAsciiScrubTool>();
         b.register::<json_to_toon::JsonToToonTool>();
         b.register::<implement_memory::ImplementMemoryTool>();
+        b.register::<path_probe::PathProbeTool>();
+        b.register::<json_query::JsonQueryTool>();
+        b.register::<session_usage::SessionUsageTool>();
+        b.register::<session_reader::SessionReaderTool>();
         b.register::<grok_build::PlanValidateTool>();
+        b.register::<grok_build::TokenReportTool>();
         register_all(&mut b);
         b.register_with_params::<
                 grok_build::AskUserQuestionTool,

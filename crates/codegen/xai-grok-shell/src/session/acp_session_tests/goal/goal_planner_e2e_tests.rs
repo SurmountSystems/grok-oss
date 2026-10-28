@@ -6,8 +6,16 @@ use super::*;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
+use xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
+use xai_grok_tools::implementations::grok_build::task::coordinator::{
+    ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, CoordinatorConfig,
+    SendBoxFuture, StartedChild, SubagentCoordinator, SubagentProgress,
+};
+use xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
 use xai_grok_tools::implementations::grok_build::task::types::{
-    SubagentCancelTarget, SubagentEvent, SubagentResult, SubagentSpawnRequest,
+    SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent, SubagentOwner, SubagentRequest,
+    SubagentResult, SubagentSpawnRequest, SubagentValidateTypeOutcome,
 };
 
 /// Pull the planner's plan-file path from the prompt by its backtick-quoted `.md` token.
@@ -20,6 +28,11 @@ fn plan_path_from_prompt(prompt: &str) -> Option<String> {
         .step_by(2)
         .find(|token| token.ends_with(".md"))
         .map(str::to_owned)
+}
+
+/// The plan file is this role's only write. Research and recon name their own files.
+fn prompt_is_plan_writer(prompt: &str) -> bool {
+    prompt.contains("ROLE: plan writer.")
 }
 
 /// Spawn behaviour knobs for the planner-coordinator stub.
@@ -36,6 +49,12 @@ enum SpawnBehaviour {
     NoWriteThenDone,
     /// Reply with subagent runtime failure.
     Runtime { message: String, cancelled: bool },
+    /// Write `{PLAN_FILE}` then reply with subagent runtime failure (repeating-sentence / cancel-after-write).
+    WritePlanThenRuntime {
+        body: &'static [u8],
+        message: String,
+        cancelled: bool,
+    },
     /// First spawn fails with `Runtime { message, cancelled: false }`; every later spawn behaves as `WritePlanThenDone`.
     RuntimeThenWritePlan {
         message: String,
@@ -150,6 +169,28 @@ fn spawn_planner_coordinator_capturing(
                         child_session_id: req.id.clone(),
                         ..Default::default()
                     },
+                    SpawnBehaviour::WritePlanThenRuntime {
+                        body,
+                        message,
+                        cancelled,
+                    } => {
+                        let written = plan_written(&req, plan_path.as_deref(), body);
+                        // A repeating-sentence error on research never reaches a written plan.
+                        // Only the plan writer raises that error, after its file is on disk.
+                        if prompt_is_plan_writer(&req.prompt) {
+                            SubagentResult {
+                                success: false,
+                                error: Some(message.clone()),
+                                cancelled: *cancelled,
+                                output: written.output,
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
+                        } else {
+                            written
+                        }
+                    }
                     SpawnBehaviour::RuntimeThenWritePlan { message, body } => {
                         if count_task.load(SeqOrd::SeqCst) == 1 {
                             SubagentResult {
@@ -314,7 +355,8 @@ async fn send_now_restarts_planner_with_all_steering() {
                 .await
                 .expect("planner completion")
                 .unwrap();
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 3);
+            // Two cancelled research spawns, then one attempt of four roles.
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 6);
             let prompts = objectives.lock().unwrap();
             let objectives = prompts
                 .iter()
@@ -328,12 +370,16 @@ async fn send_now_restarts_planner_with_all_steering() {
                         .0
                 })
                 .collect::<Vec<_>>();
+            let steered = "do X\n\nUser steering:\nfirst\n\nsecond";
             assert_eq!(
                 objectives,
                 [
                     "do X",
                     "do X\n\nUser steering:\nfirst",
-                    "do X\n\nUser steering:\nfirst\n\nsecond",
+                    steered,
+                    steered,
+                    steered,
+                    steered,
                 ]
             );
 
@@ -397,7 +443,7 @@ async fn planner_success_stamps_plan_file_on_orchestration() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
             assert_eq!(
@@ -411,6 +457,364 @@ async fn planner_success_stamps_plan_file_on_orchestration() {
                 crate::session::goal_tracker::GoalStatus::Active,
                 "success must NOT pause the goal",
             );
+        })
+        .await;
+}
+
+const THIS_RUN_PLAN: &str = "# Plan: writer output for this run\n";
+const OLDER_PLAN: &str = "# Plan: older goal from yesterday\n";
+const RESEARCH_NOTES: &str = "research notes for this run\n";
+const PLANNER_TOKEN_LINK_CHECK: &str = "planner token link check";
+
+#[derive(Clone)]
+struct GoalRoleHandoff {
+    description: String,
+    planner_token: CancellationToken,
+    child_token: CancellationToken,
+    wrote: String,
+    terminal: &'static str,
+}
+
+struct GoalRoleRunner {
+    handoff: StdArc<std::sync::Mutex<Vec<GoalRoleHandoff>>>,
+    link_entered: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+struct GoalRoleControl;
+
+impl ChildControl for GoalRoleControl {
+    type ProgressFuture = std::future::Ready<SubagentProgress>;
+
+    fn progress(&self) -> Self::ProgressFuture {
+        std::future::ready(SubagentProgress::default())
+    }
+
+    fn cancel(&self) {}
+}
+
+fn role_body(description: &str) -> &'static str {
+    match description {
+        "goal research specialist" => RESEARCH_NOTES,
+        "goal recon specialist" => "recon notes for this run\n",
+        "goal plan writer" => THIS_RUN_PLAN,
+        "goal plan reviewer" => "review notes for this run\n",
+        _ => "",
+    }
+}
+
+fn goal_role_output(
+    request: &SubagentRequest,
+    success: bool,
+    cancelled: bool,
+    output: &str,
+) -> ChildRunOutput<()> {
+    ChildRunOutput {
+        result: SubagentResult {
+            success,
+            output: StdArc::from(output),
+            cancelled,
+            error: (!success).then(|| "parent planner token cancelled".to_string()),
+            subagent_id: request.id.clone(),
+            child_session_id: request.id.clone(),
+            ..Default::default()
+        },
+        completion_data: (),
+        snapshot_ref: None,
+    }
+}
+
+impl ChildRunner for GoalRoleRunner {
+    type Control = GoalRoleControl;
+    type RootControl = NoRootControl;
+    type CompletionData = ();
+    type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+    type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
+    type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
+
+    fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
+        let handoff = StdArc::clone(&self.handoff);
+        let link_entered = self.link_entered.clone();
+        Box::pin(async move {
+            let ChildRunRequest {
+                request,
+                cancellation,
+                reporter,
+                ..
+            } = run;
+            let promoted = reporter
+                .started(StartedChild {
+                    child_session_id: request.id.clone(),
+                    persona: None,
+                    resumed_from: None,
+                    child_cwd: String::new(),
+                    worktree_path: None,
+                    effective_model_id: "grok-test".to_owned(),
+                    definition_background: false,
+                    control: GoalRoleControl,
+                })
+                .await;
+            if !promoted {
+                return goal_role_output(&request, false, true, "not started");
+            }
+            if request.description == PLANNER_TOKEN_LINK_CHECK {
+                let _ = link_entered.send(());
+                cancellation.cancelled().await;
+                return goal_role_output(&request, false, true, "cancelled");
+            }
+            assert!(
+                !request.cancel_token.is_cancelled(),
+                "planner token already cancelled before {}",
+                request.description
+            );
+            let body = role_body(&request.description);
+            assert!(
+                !body.is_empty(),
+                "unexpected goal role {}",
+                request.description
+            );
+            let path = plan_path_from_prompt(&request.prompt).unwrap_or_else(|| {
+                panic!("role {} prompt named no markdown path", request.description)
+            });
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|err| {
+                    panic!("create {}: {err}", parent.display());
+                });
+            }
+            std::fs::write(&path, body).unwrap_or_else(|err| panic!("write {path}: {err}"));
+            handoff.lock().expect("handoff").push(GoalRoleHandoff {
+                description: request.description.clone(),
+                planner_token: request.cancel_token.clone(),
+                child_token: cancellation.clone(),
+                wrote: path,
+                terminal: "Done",
+            });
+            goal_role_output(&request, true, false, "Done")
+        })
+    }
+
+    fn validate_type(&self, _: String, _: String) -> Self::ValidateFuture {
+        Box::pin(std::future::ready(SubagentValidateTypeOutcome::Ok))
+    }
+
+    fn describe_type(&self, _: String, _: Option<String>, _: String) -> Self::DescribeFuture {
+        Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
+    }
+
+    fn supports_wake(&self) -> bool {
+        false
+    }
+
+    fn on_completed(&self, _: ChildCompletion<()>, terminal_published: Box<dyn FnOnce() + Send>) {
+        terminal_published();
+    }
+}
+
+fn planner_token_link_request(parent: CancellationToken) -> SubagentRequest {
+    SubagentRequest {
+        id: "planner-token-link-check".into(),
+        prompt: "hold until the planner token cancels".into(),
+        description: PLANNER_TOKEN_LINK_CHECK.into(),
+        subagent_type: "general-purpose".into(),
+        parent_session_id: "parent".into(),
+        parent_prompt_id: None,
+        resume_from: None,
+        cwd: None,
+        runtime_overrides: Default::default(),
+        run_in_background: false,
+        surface_completion: false,
+        await_to_completion: true,
+        fork_context: false,
+        owner: SubagentOwner::Task,
+        implement_loop_effort: None,
+        cancel_token: parent,
+        spawn_root: Default::default(),
+        tool_call_id: None,
+    }
+}
+
+fn event_count(log: &str, ty: &str) -> usize {
+    log.lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("type")
+                        .and_then(|kind| kind.as_str())
+                        .map(|kind| kind == ty)
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// Research returns `Done` and a non-empty research file. `finish_child` on the real
+/// coordinator must not cancel the planner token later roles still hold. The same
+/// attempt then requests recon, the plan writer, and the plan reviewer. The writer's
+/// plan is published to `goal/plan.md`. The goal does not pause with
+/// `No plan was produced. Retry with /goal resume.`
+#[tokio::test(flavor = "current_thread")]
+async fn finished_research_does_not_cancel_the_planner_token_and_the_plan_writer_publishes_this_run()
+ {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let handoff = StdArc::new(std::sync::Mutex::new(Vec::new()));
+            let handoff_for_runner = StdArc::clone(&handoff);
+            let (link_entered_tx, mut link_entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (coordinator_tx, coordinator_rx) =
+                SubagentCoordinator::<GoalRoleRunner>::channel();
+            let event_tx = coordinator_tx.event_sender().0.clone();
+            let coordinator = tokio::task::spawn_local(async move {
+                SubagentCoordinator::from_channel(
+                    coordinator_rx,
+                    GoalRoleRunner {
+                        handoff: handoff_for_runner,
+                        link_entered: link_entered_tx,
+                    },
+                    CoordinatorConfig::default(),
+                )
+                .run()
+                .await;
+            });
+            let (actor, tmp) = make_planner_actor(Some(event_tx), true).await;
+            create_test_goal(&actor);
+            let plan_path = actor.goal_tracker.lock().plan_path();
+            std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+            std::fs::write(&plan_path, OLDER_PLAN).unwrap();
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                actor.maybe_run_goal_planner("do X"),
+            )
+            .await
+            .expect("planner must finish; a cancelled planner token would retry research only");
+
+            let rows = handoff.lock().expect("handoff").clone();
+            let descriptions: Vec<&str> = rows.iter().map(|row| row.description.as_str()).collect();
+            assert_eq!(
+                descriptions,
+                vec![
+                    "goal research specialist",
+                    "goal recon specialist",
+                    "goal plan writer",
+                    "goal plan reviewer",
+                ],
+                "one attempt must request recon, the plan writer, and the reviewer after research, not five research-only fires: {descriptions:?}"
+            );
+            let research = rows.first().expect("research role");
+            assert_eq!(research.terminal, "Done");
+            let research_body = std::fs::read_to_string(&research.wrote).expect("research file");
+            assert!(
+                !research_body.trim().is_empty() && research_body.contains("research notes for this run"),
+                "research file must be non-empty, got {research_body:?}"
+            );
+            for row in &rows {
+                assert!(
+                    !row.planner_token.is_cancelled(),
+                    "finish_child must not cancel the planner token after {}",
+                    row.description
+                );
+                assert!(
+                    row.child_token.is_cancelled(),
+                    "finish_child must cancel the child token so {} stops sampling",
+                    row.description
+                );
+            }
+            research.planner_token.cancel();
+            for row in rows.iter().skip(1) {
+                assert!(
+                    row.planner_token.is_cancelled(),
+                    "{} must hold the same planner token as research, not a fresh token per role",
+                    row.description
+                );
+            }
+
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snap.status, crate::session::goal_tracker::GoalStatus::Active);
+            assert_ne!(
+                snap.pause_message.as_deref(),
+                Some("No plan was produced. Retry with /goal resume.")
+            );
+            assert!(
+                snap.pause_message.is_none(),
+                "a produced plan must not pause, pause_message={:?}",
+                snap.pause_message
+            );
+            assert!(
+                snap.history.iter().all(|entry| !matches!(
+                    entry.event,
+                    crate::session::goal_tracker::GoalEvent::PlanningFailed
+                )),
+                "research completion must not fail-closed: {:?}",
+                snap.history
+            );
+            assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
+            assert_eq!(
+                std::fs::read_to_string(&plan_path).unwrap(),
+                THIS_RUN_PLAN,
+                "goal/plan.md must be this run's writer output, not the older file"
+            );
+            assert_ne!(std::fs::read_to_string(&plan_path).unwrap(), OLDER_PLAN);
+
+            let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).expect("events.jsonl");
+            assert_eq!(
+                event_count(&events, "goal_planner_fired"),
+                1,
+                "the run must not fire research-only attempts 1 through 5: {events}"
+            );
+            assert!(
+                has_event_with(&events, "goal_planner_fired", |value| value["attempt"] == 1),
+                "{events}"
+            );
+            assert!(
+                has_event_with(&events, "goal_planner_completed", |_| true),
+                "the completed path must be emitted: {events}"
+            );
+            assert!(
+                !has_event_with(&events, "goal_auto_paused", |value| value["reason"] == "planner"),
+                "must not auto-pause reason planner: {events}"
+            );
+            assert!(
+                !has_event_with(&events, "goal_planner_fail_closed", |_| true),
+                "{events}"
+            );
+
+            let parent = CancellationToken::new();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            coordinator_tx
+                .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                    request: Box::new(planner_token_link_request(parent.clone())),
+                    result_tx,
+                    registered_tx: None,
+                    admitted_tx: None,
+                }))
+                .expect("coordinator still running");
+            tokio::time::timeout(std::time::Duration::from_secs(5), link_entered_rx.recv())
+                .await
+                .expect("in-flight role must start")
+                .expect("link-entered channel");
+            assert!(!parent.is_cancelled());
+            parent.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx)
+                .await
+                .expect("cancelling the planner token must cancel the in-flight child token")
+                .expect("spawn result");
+            assert!(
+                result.cancelled,
+                "an in-flight role must observe planner-token cancel"
+            );
+
+            // `make_planner_actor` keeps a clone of the command sender. Dropping
+            // only `coordinator_tx` leaves that clone open, so `run` never sees
+            // the channel close and the join waits out the timeout. The in-flight
+            // role has already returned `result.cancelled`.
+            drop(actor);
+            drop(coordinator_tx);
+            tokio::time::timeout(std::time::Duration::from_secs(5), coordinator)
+                .await
+                .expect("coordinator exits")
+                .expect("coordinator join");
         })
         .await;
 }
@@ -429,14 +833,18 @@ async fn planner_spawn_sets_harness_only_fork_context() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let forks = capture.fork_context.lock().unwrap().clone();
             let surfaces = capture.surface_completion.lock().unwrap().clone();
-            assert_eq!(forks, vec![true], "planner must request chat-prefix fork");
+            assert_eq!(
+                forks,
+                vec![true, true, true, true],
+                "each goal-creation role must request chat-prefix fork"
+            );
             assert_eq!(
                 surfaces,
-                vec![false],
-                "planner remains harness-internal (no idle reminder)"
+                vec![false, false, false, false],
+                "each goal-creation role remains harness-internal (no idle reminder)"
             );
         })
         .await;
@@ -475,12 +883,12 @@ async fn planner_fork_inherits_parent_model() {
 
             actor.maybe_run_goal_planner("do X").await;
 
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
             let models = capture.model.lock().unwrap().clone();
             assert_eq!(
                 models,
-                vec![None],
-                "planner fork must ignore the configured role model and inherit the parent (None)"
+                vec![None, None, None, None],
+                "each goal-creation fork must ignore a configured role model and inherit the parent (None)"
             );
         })
         .await;
@@ -538,9 +946,9 @@ async fn planner_snapshots_plan_baseline_once_and_does_not_overwrite() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn planner_records_own_harness_trace_turn_with_footer() {
-    // The planner subagent is represented by its OWN trace turn.
+    // The four goal-creation roles share one harness trace turn.
     // After `maybe_run_goal_planner`, the chat-state side buffer holds exactly one sealed harness trace turn.
-    // The result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover the planner subagent.
+    // Each result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover that role.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -556,25 +964,42 @@ async fn planner_records_own_harness_trace_turn_with_footer() {
             let [items] = turns.as_slice() else {
                 panic!("planner rides its own trace turn: {turns:?}");
             };
-            let [call, result] = items.as_slice() else {
-                panic!("synthetic task call + result pair: {items:?}");
-            };
-            assert!(
-                matches!(
-                    call,
-                    crate::sampling::ConversationItem::Assistant(a) if !a.tool_calls.is_empty()
-                ),
-                "first item is the synthetic task call",
+            let roles = [
+                "goal research specialist",
+                "goal recon specialist",
+                "goal plan writer",
+                "goal plan reviewer",
+            ];
+            assert_eq!(
+                items.len(),
+                roles.len() * 2,
+                "four role call/result pairs: {items:?}"
             );
-            let result_text = result.text_content();
-            assert!(
-                result_text.contains("<subagent_result>"),
-                "footer present for trace-viewer / subagent discovery: {result_text}",
-            );
-            assert!(
-                result_text.contains("subagent_id:"),
-                "subagent_id present in footer: {result_text}",
-            );
+            for (idx, role) in roles.iter().enumerate() {
+                let call = &items[idx * 2];
+                let result = &items[idx * 2 + 1];
+                match call {
+                    crate::sampling::ConversationItem::Assistant(assistant) => {
+                        assert!(
+                            assistant
+                                .tool_calls
+                                .iter()
+                                .any(|call| call.arguments.contains(role)),
+                            "trace pair {idx} must spawn {role}: {assistant:?}"
+                        );
+                    }
+                    other => panic!("trace pair {idx} must be a synthetic task call: {other:?}"),
+                }
+                let result_text = result.text_content();
+                assert!(
+                    result_text.contains("<subagent_result>"),
+                    "footer present for trace-viewer / subagent discovery: {result_text}",
+                );
+                assert!(
+                    result_text.contains("subagent_id:"),
+                    "subagent_id present in footer: {result_text}",
+                );
+            }
         })
         .await;
 }
@@ -778,6 +1203,78 @@ async fn planner_runtime_failure_pauses_goal_with_canonical_message() {
                 snap.pause_message.as_deref(),
                 Some(planner_failure_pause_message().as_str()),
             );
+        })
+        .await;
+}
+
+/// GitHub #234: nested writer repeating-sentence stop after writing `{PLAN_FILE}`
+/// must publish the plan. #228 only auto-retried the parent goal turn.
+#[tokio::test(flavor = "current_thread")]
+async fn planner_repeating_sentence_stop_with_plan_file_does_not_pause_with_no_plan_was_produced() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenRuntime {
+                    body: b"# Plan\n",
+                    message: format!("Session error: {REPETITIVE_GENERATION_USER_MESSAGE}"),
+                    cancelled: false,
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.status,
+                crate::session::goal_tracker::GoalStatus::Active,
+                "a written plan must not pause with \"No plan was produced.\""
+            );
+            assert!(
+                snap.plan_file.is_some(),
+                "repeating-sentence after write must publish the plan"
+            );
+            assert!(
+                snap.pause_message.is_none(),
+                "must not store {}: {:?}",
+                planner_failure_pause_message(),
+                snap.pause_message
+            );
+        })
+        .await;
+}
+
+/// Repeating-sentence with no file is Interrupted: retry this `maybe_run_goal_planner`
+/// call. The Operator does not type `/goal resume`.
+#[tokio::test(flavor = "current_thread")]
+async fn planner_repeating_sentence_stop_without_plan_retries_then_publishes() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::RuntimeThenWritePlan {
+                    message: format!("Session error: {REPETITIVE_GENERATION_USER_MESSAGE}"),
+                    body: b"# Plan\n",
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                5,
+                "repeating-sentence with no plan must retry inside maybe_run_goal_planner"
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.status,
+                crate::session::goal_tracker::GoalStatus::Active,
+                "the retry that writes the plan must not pause"
+            );
+            assert!(snap.plan_file.is_some());
         })
         .await;
 }
@@ -1034,7 +1531,7 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
                 .clone();
 
             actor.maybe_run_goal_planner("do X").await;
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 4);
 
             // Simulate the SubagentSpawned notification handler after the planner reports 12,000 cumulative tokens.
             let child_attempt = xai_message_delivery_core::AttemptId::mint(0x11).to_string();
@@ -1164,7 +1661,7 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 spawn_count.load(SeqOrd::SeqCst),
-                2,
+                5,
                 "retry must re-fire planner"
             );
             assert_eq!(snap.status, GoalStatus::Active);
@@ -1175,15 +1672,39 @@ async fn lifecycle_fail_pause_resume_retry_success() {
             let plan_path = actor.goal_tracker.lock().plan_path();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
             let targets = plan_targets.lock().unwrap();
-            let [first, second] = targets.as_slice() else {
-                panic!("expected two plan targets: {targets:?}");
-            };
-            assert_ne!(first, second, "each attempt must use an isolated plan path");
-            assert!(targets.iter().all(|path| {
+            assert_eq!(
+                targets.len(),
+                5,
+                "failed research spawn plus four roles on the retry: {targets:?}"
+            );
+            let file_name = |path: &str| {
                 std::path::Path::new(path)
                     .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("plan-"))
-            }));
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let failed_name = file_name(&targets[0]);
+            assert!(
+                failed_name.starts_with("research-"),
+                "the failed attempt stops on research: {failed_name}"
+            );
+            let plan_names: Vec<String> = targets
+                .iter()
+                .map(|path| file_name(path))
+                .filter(|name| name.starts_with("plan-"))
+                .collect();
+            assert_eq!(
+                plan_names.len(),
+                1,
+                "only the retry reaches the plan writer: {targets:?}"
+            );
+            let failed_suffix = failed_name.strip_prefix("research").unwrap();
+            let retry_suffix = plan_names[0].strip_prefix("plan").unwrap();
+            assert_ne!(
+                failed_suffix, retry_suffix,
+                "each attempt must use an isolated plan path"
+            );
         })
         .await;
 }
@@ -1623,7 +2144,7 @@ async fn resume_after_planner_failure_succeeds_without_infra_recap() {
                 !reminder.contains("Previous state: Paused (infrastructure error)."),
                 "{reminder}"
             );
-            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 2);
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 5);
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert!(snap.plan_file.is_some());
             assert_eq!(

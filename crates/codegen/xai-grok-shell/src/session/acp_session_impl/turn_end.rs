@@ -735,6 +735,28 @@ impl SessionActor {
         }
     }
 
+    /// Apply a goal infra turn error, then `handle_turn_end` unless auto-retry
+    /// already queued the same goal turn.
+    ///
+    /// Auto-retry must not increment the non-completing streak and must not
+    /// reset `goal_repeat_stop_retries`. #228 queued the continuation; this
+    /// is the production wiring that call missed.
+    pub(super) async fn apply_goal_turn_infra_then_maybe_turn_end(
+        &self,
+        infra_pause_message: Option<String>,
+        turn_succeeded: bool,
+        suppress_goal_continuation: bool,
+    ) {
+        if let Some(message) = infra_pause_message {
+            let paused = self.apply_infra_pause_after_turn_err(message).await;
+            if !paused {
+                return;
+            }
+        }
+        self.handle_turn_end(turn_succeeded, suppress_goal_continuation)
+            .await;
+    }
+
     /// Extract the best human-readable detail from an infra turn error.
     pub(super) fn turn_error_detail(err: &acp::Error) -> Option<String> {
         err.data
@@ -840,6 +862,29 @@ mod goal_repeat_stop_action_tests {
             }
             GoalInfraTurnErrAction::AutoRetry => {
                 panic!("other turn errors must still pause")
+            }
+        }
+    }
+
+    #[test]
+    fn test_repeating_sentence_stop_auto_retries_at_most_twice() {
+        let slash_detail = xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
+        for used in 0..GOAL_REPEAT_STOP_AUTO_RETRY_CAP {
+            assert!(
+                matches!(
+                    SessionActor::goal_infra_turn_err_action(slash_detail, used),
+                    GoalInfraTurnErrAction::AutoRetry
+                ),
+                "retries_used={used} must auto-retry under cap {GOAL_REPEAT_STOP_AUTO_RETRY_CAP}"
+            );
+        }
+        match SessionActor::goal_infra_turn_err_action(
+            slash_detail,
+            GOAL_REPEAT_STOP_AUTO_RETRY_CAP,
+        ) {
+            GoalInfraTurnErrAction::Pause { .. } => {}
+            GoalInfraTurnErrAction::AutoRetry => {
+                panic!("repeating-sentence stop auto-retries at most twice")
             }
         }
     }

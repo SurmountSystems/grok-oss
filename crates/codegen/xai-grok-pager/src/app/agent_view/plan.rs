@@ -2055,9 +2055,10 @@ impl AgentView {
     }
 
     /// Submit the live composer as a normal agent prompt. Does not Approve
-    /// or Revise a parked plan. A typed sentence in an open Isolated
-    /// Preview is not this send: flush the prompt write-ahead log and
-    /// leave the composer for click Approve.
+    /// or Revise a parked plan. A typed sentence in idle Isolated Preview
+    /// is not this send: flush the prompt write-ahead log and leave the
+    /// composer for click Approve. Rewriting-wait notes plus Enter use
+    /// this send.
     pub(super) fn send_composer_as_normal_prompt(&mut self) -> InputOutcome {
         // Bare Enter already recorded a typed Preview sentence. Shift+Enter
         // reaches here and must send, including when composer multiline is off.

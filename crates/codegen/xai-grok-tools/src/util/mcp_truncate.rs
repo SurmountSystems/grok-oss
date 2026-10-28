@@ -460,6 +460,38 @@ mod tests {
         );
     }
 
+    /// Keep-small-JSON: an under-cap MCP body is not densified to TOON.
+    #[tokio::test]
+    async fn mcp_already_fits_policy_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = r#"{"ok": true, "name": "x"}"#;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), small.len() + 64);
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "tiny".into(),
+                "test".into(),
+                small.to_string(),
+            )),
+            &cfg,
+        )
+        .await;
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
+        };
+        assert_eq!(
+            text, small,
+            "keep-small-JSON: under-cap MCP body must stay quoted JSON, not densify to TOON"
+        );
+        assert!(text.contains("\"ok\""), "JSON quotes must remain: {text}");
+        assert!(
+            !dir.path().join("mcp").exists(),
+            "no dump when the body already fits"
+        );
+    }
+
     #[tokio::test]
     async fn traversal_in_call_id_cannot_escape_session_dir() {
         let dir = tempfile::tempdir().unwrap();

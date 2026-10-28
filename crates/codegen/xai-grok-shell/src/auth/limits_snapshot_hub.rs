@@ -18,6 +18,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -79,6 +80,10 @@ pub enum LimitsSnapshotMode {
     /// than one hour. After waiting on a leader, reuse the just-written
     /// snapshot unless it is still missing or stale.
     ForceRefresh,
+    /// Successful login only. Fetch the included SuperGrok period limits
+    /// percent even when the snapshot is fresh and even when it is younger
+    /// than one minute. Does not clear console team prepaid caches.
+    LoginImmediateIncludedPeriodLimitsRefresh,
 }
 
 /// How this process obtained the snapshot.
@@ -557,9 +562,71 @@ fn publish_limits_billing_ask_socket(home: &Path, doc: &LimitsSnapshotDocument) 
     Ok(())
 }
 
+/// Latest generation issued by a debounced or immediate limits snapshot call.
+///
+/// A fetch completion whose generation is less than this value is stale.
+static LATEST_LIMITS_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes the stale check with write, ask-socket publish, and apply.
+///
+/// This is not the snapshot flock. The immediate entry point does not take
+/// the flock, so two completions can otherwise pass the generation check
+/// and then overwrite each other.
+static LIMITS_SNAPSHOT_COMMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn issue_limits_snapshot_generation() -> u64 {
+    LATEST_LIMITS_SNAPSHOT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn limits_snapshot_generation_is_stale(generation: u64) -> bool {
+    generation < LATEST_LIMITS_SNAPSHOT_GENERATION.load(Ordering::SeqCst)
+}
+
+fn limits_snapshot_commit_guard() -> io::Result<std::sync::MutexGuard<'static, ()>> {
+    LIMITS_SNAPSHOT_COMMIT
+        .lock()
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Write, publish, and apply `doc` only when `generation` is still latest.
+///
+/// A completion older than the latest issued generation returns here. It is
+/// not written by [`write_snapshot_atomic`], not published on the ask socket,
+/// and not passed to [`apply_limits_snapshot`].
+fn commit_fetched_limits_snapshot(
+    generation: u64,
+    home: &Path,
+    doc: &LimitsSnapshotDocument,
+    write_shared: bool,
+) -> io::Result<()> {
+    let _guard = limits_snapshot_commit_guard()?;
+    if limits_snapshot_generation_is_stale(generation) {
+        return Ok(());
+    }
+    if write_shared {
+        fs::create_dir_all(home)?;
+        let (snap_path, _) = snapshot_paths(home);
+        write_snapshot_atomic(&snap_path, doc)?;
+        publish_limits_billing_ask_socket(home, doc)?;
+    }
+    apply_limits_snapshot(doc);
+    Ok(())
+}
+
+fn apply_read_snapshot_if_current(generation: u64, doc: &LimitsSnapshotDocument) -> io::Result<()> {
+    let _guard = limits_snapshot_commit_guard()?;
+    if limits_snapshot_generation_is_stale(generation) {
+        return Ok(());
+    }
+    apply_limits_snapshot(doc);
+    Ok(())
+}
+
 /// Coordinate: only the exclusive-flock holder may invoke `fetch`.
 ///
 /// `fetch` must not include JWTs or API keys in the returned document.
+/// Each call carries a generation issued before the flock wait. A fetch
+/// completion older than the latest issued generation is dropped.
 pub async fn coordinate_limits_snapshot<F, Fut>(
     grok_home: impl AsRef<Path>,
     mode: LimitsSnapshotMode,
@@ -570,13 +637,14 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = LimitsSnapshotDocument>,
 {
+    let generation = issue_limits_snapshot_generation();
     let home = grok_home.as_ref();
     if shared_limits_snapshot_disabled() {
         let mut doc = fetch().await;
         if doc.fetched_at_unix_ms == 0 {
             doc.fetched_at_unix_ms = now_unix_ms;
         }
-        apply_limits_snapshot(&doc);
+        commit_fetched_limits_snapshot(generation, home, &doc, false)?;
         return Ok((LimitsSnapshotRole::UncoordinatedFetch, doc));
     }
 
@@ -623,6 +691,7 @@ where
                 !inside_minute || disk_usage_at_100
             }
         }
+        LimitsSnapshotMode::LoginImmediateIncludedPeriodLimitsRefresh => true,
     };
 
     let (role, doc) = if should_fetch {
@@ -630,17 +699,46 @@ where
         if doc.fetched_at_unix_ms == 0 {
             doc.fetched_at_unix_ms = now_unix_ms;
         }
-        write_snapshot_atomic(&snap_path, &doc)?;
-        publish_limits_billing_ask_socket(home, &doc)?;
+        commit_fetched_limits_snapshot(generation, home, &doc, true)?;
         (LimitsSnapshotRole::LeaderFetched, doc)
     } else {
         let doc = existing.expect("fresh snapshot exists when not fetching");
+        apply_read_snapshot_if_current(generation, &doc)?;
         (LimitsSnapshotRole::FollowerRead, doc)
     };
 
-    apply_limits_snapshot(&doc);
     let _ = lock_file.unlock();
     Ok((role, doc))
+}
+
+/// Fetch limits immediately and commit the result when this call is still latest.
+///
+/// Does not take [`LimitsSnapshotMode`]. Does not skip a snapshot younger
+/// than [`SNAPSHOT_TTL`] (3600 seconds). Does not skip a snapshot inside
+/// the 60_000 ms window. Does not wait on the follower `lock_exclusive`
+/// before `fetch`. `fetch` is the caller's callback. This function does
+/// not start a second meter fetch.
+///
+/// A completion older than the latest issued generation is not written,
+/// not published on the ask socket, and not applied.
+pub async fn coordinate_limits_snapshot_immediate<F, Fut>(
+    grok_home: impl AsRef<Path>,
+    now_unix_ms: u64,
+    fetch: F,
+) -> io::Result<(LimitsSnapshotRole, LimitsSnapshotDocument)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = LimitsSnapshotDocument>,
+{
+    let generation = issue_limits_snapshot_generation();
+    let home = grok_home.as_ref();
+    let mut doc = fetch().await;
+    if doc.fetched_at_unix_ms == 0 {
+        doc.fetched_at_unix_ms = now_unix_ms;
+    }
+    let write_shared = !shared_limits_snapshot_disabled();
+    commit_fetched_limits_snapshot(generation, home, &doc, write_shared)?;
+    Ok((LimitsSnapshotRole::LeaderFetched, doc))
 }
 
 fn write_snapshot_atomic(path: &Path, doc: &LimitsSnapshotDocument) -> io::Result<()> {
@@ -1257,6 +1355,66 @@ mod tests {
         assert!(
             !bytes.contains("eyJ"),
             "snapshot must not contain JWT header prefixes: {bytes}"
+        );
+    }
+
+    /// Generation 1 returns 11.0 and stays in flight until generation 2,
+    /// which returns 22.0, has completed. The older completion must not
+    /// replace 22.0.
+    #[tokio::test]
+    async fn older_in_flight_completion_is_not_applied_after_a_newer_generation_is_issued() {
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path().to_path_buf();
+        let _env = SharedSnapshotEnvGuard::acquire(&home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let home_older = home.clone();
+        let older = tokio::spawn(async move {
+            coordinate_limits_snapshot_immediate(&home_older, now, || async move {
+                let _ = entered_tx.send(());
+                let _ = release_rx.await;
+                sample_doc(now, 11.0)
+            })
+            .await
+        });
+
+        entered_rx
+            .await
+            .expect("generation 1 fetch stays in flight until generation 2 is issued");
+
+        let home_newer = home.clone();
+        coordinate_limits_snapshot_immediate(
+            &home_newer,
+            now,
+            || async move { sample_doc(now, 22.0) },
+        )
+        .await
+        .expect("generation 2");
+
+        release_tx
+            .send(())
+            .expect("release generation 1 after generation 2 completed");
+        older
+            .await
+            .expect("generation 1 task")
+            .expect("generation 1");
+
+        let applied = read_limits_snapshot_file(&home).expect("snapshot the UI reads");
+        assert_eq!(
+            applied.identities[0].usage_pct,
+            Some(22.0),
+            "a response whose generation is less than the latest issued generation must not be written into the value the UI reads"
+        );
+        let remembered = included_billing_fields_snapshot();
+        assert_eq!(
+            remembered
+                .get("user-personal")
+                .and_then(|fields| fields.usage_pct),
+            Some(22.0),
+            "a stale completion must not be passed to apply_limits_snapshot"
         );
     }
 }

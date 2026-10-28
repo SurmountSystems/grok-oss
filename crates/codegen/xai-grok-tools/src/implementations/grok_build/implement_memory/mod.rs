@@ -21,7 +21,7 @@ pub const IMPLEMENT_MEMORY_TOOL_NAME: &str = "implement_memory";
 pub struct ImplementMemoryInput {
     /// One of: `path` | `read` | `snapshot` | `update`.
     #[schemars(
-        description = "Subcommand: path (memory file path), read (raw markdown), snapshot (JSON state), update (merge JSON patch)."
+        description = "Subcommand: path (memory file path), read (raw markdown), snapshot (TOON state; JSON when GROK_TOOL_RESULT_FORMAT=json), update (merge JSON patch)."
     )]
     pub op: String,
     /// JSON object/array text for `update` only (merged into memory). Ignored for other ops.
@@ -104,12 +104,12 @@ impl ToolMetadata for ImplementMemoryTool {
 Ops:
 - path: print the memory file path for this workspace
 - read: raw markdown body (empty if missing)
-- snapshot: JSON state (common_issues, recent_runs, …)
-- update: merge `update_json` (JSON object string) into memory
+- snapshot: TOON state (common_issues, recent_runs, exists). JSON when GROK_TOOL_RESULT_FORMAT=json
+- update: merge `update_json` (JSON object string) into memory; stdout densifies the same way
 
 Same in-process handler as the bash intercept of host
 `python3 …/implement/scripts/memory.py …`. Prefer this named tool when available;
-bash form remains a fallback for skill dual-pin."#
+bash form remains a fallback for skill dual-pin and still prints pretty JSON."#
     }
 
     fn requires_expr(&self) -> Expr<crate::types::requirements::ToolRequirement> {
@@ -161,10 +161,25 @@ impl xai_tool_runtime::Tool for ImplementMemoryTool {
         };
         let h = execute_intercept(&intercept, &cwd, None);
         Ok(ImplementMemoryOutput {
-            stdout: h.stdout,
+            stdout: densify_memory_stdout(&input.op, h.stdout),
             stderr: h.stderr,
             exit_code: h.exit_code,
         })
+    }
+}
+
+/// Snapshot/update JSON stdout densifies for the first-class tool. Path/read stay
+/// as the intercept wrote them. Bash intercept of memory.py is unchanged.
+fn densify_memory_stdout(op: &str, stdout: String) -> String {
+    match op.trim().to_ascii_lowercase().as_str() {
+        "snapshot" | "update" => match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            Ok(v) => crate::util::toon::maybe_encode_for_llm(
+                &v,
+                crate::util::toon::ToolResultFormat::Toon,
+            ),
+            Err(_) => crate::util::toon::densify_structured_text(&stdout),
+        },
+        _ => stdout,
     }
 }
 
@@ -229,8 +244,38 @@ mod tests {
             .await
             .expect("snapshot ok");
         assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
-        let v: serde_json::Value = serde_json::from_str(out.stdout.trim()).expect("snapshot JSON");
-        assert!(v.get("exists").is_some());
+        let stdout = out.stdout.trim();
+        assert!(
+            stdout.contains("exists:") || stdout.contains("common_issues"),
+            "snapshot stdout from the first-class tool, got: {stdout}"
+        );
+    }
+
+    #[tokio::test]
+    async fn implement_memory_snapshot_stdout_is_toon() {
+        let mut resources = Resources::new();
+        resources.insert(Cwd(std::path::PathBuf::from("/tmp")));
+        let tool = ImplementMemoryTool;
+        let out = tool
+            .run(
+                test_ctx(resources.into_shared()),
+                ImplementMemoryInput {
+                    op: "snapshot".into(),
+                    update_json: None,
+                },
+            )
+            .await
+            .expect("snapshot ok");
+        assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
+        let stdout = out.stdout.trim();
+        assert!(
+            !stdout.starts_with('{'),
+            "snapshot stdout must be TOON by default, not pretty JSON: {stdout}"
+        );
+        assert!(
+            stdout.contains("exists:") || stdout.contains("common_issues"),
+            "TOON snapshot keys, got: {stdout}"
+        );
     }
 
     #[test]

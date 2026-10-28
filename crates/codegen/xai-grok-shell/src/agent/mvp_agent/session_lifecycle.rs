@@ -377,7 +377,12 @@ impl MvpAgent {
         if upserted.is_empty() && removed.is_empty() {
             return;
         }
-        let payload = crate::agent::roster::RosterChanged { upserted, removed };
+        let payload = crate::agent::roster::RosterChanged {
+            upserted,
+            removed,
+            // This call has no ExternalRoster handle. 0 means unstamped.
+            generation: 0,
+        };
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.gateway
                 .forward_fire_and_forget(acp::ExtNotification::new(

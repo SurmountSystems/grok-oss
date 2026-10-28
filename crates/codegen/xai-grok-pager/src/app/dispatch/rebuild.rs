@@ -2019,6 +2019,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             finished: false,
             status: None,
+            from_occupancy_restore: false,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,

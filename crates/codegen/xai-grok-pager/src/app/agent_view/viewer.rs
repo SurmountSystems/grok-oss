@@ -10,7 +10,7 @@ use crate::views::block_viewer::{BlockViewerPane, format_blockquote};
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem, SelectedPlanCta};
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -218,6 +218,21 @@ impl AgentView {
         reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
     }
 
+    /// Isolated Preview rewriting-wait: idle Approve is not armed. Typed
+    /// notes plus Enter send. Leftover Revising with a live present still
+    /// paints idle CTAs and is not this state.
+    fn isolated_preview_is_rewrite_wait(&self) -> bool {
+        match self.plan_feedback_in_flight {
+            Some(PlanFeedbackInFlight::Updating) => true,
+            Some(_) => self
+                .line_viewer
+                .as_ref()
+                .and_then(|v| v.plan_ref())
+                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active),
+            None => false,
+        }
+    }
+
     /// Isolated Preview idle after present: a paste chip plus Enter
     /// Approves with those notes. A typed sentence while the plan viewer
     /// is open is not Approve. A `[Pasted: 13 lines]` chip whose body
@@ -227,12 +242,18 @@ impl AgentView {
     /// send. Line-comment overlay still saves. Vanished Isolated Preview
     /// (pane shut, live waiter, Preview focus) still Approves with those
     /// notes. A typed human sentence in an open Isolated Preview is not
-    /// that setup. Leftover slash-palette `/` is not notes.
+    /// that setup. Leftover slash-palette `/` is not notes. Rewriting-wait
+    /// notes plus Enter send; they do not Approve leftover.
     pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
         if self.plan_decision_resolved {
             return false;
         }
-        if self.plan_feedback_in_flight.is_some() {
+        if self.isolated_preview_is_rewrite_wait() {
+            return false;
+        }
+        // Real rewrite unmounts the park. Leftover Revising with a live
+        // present is still Operator speech, not a reason to freeze Enter.
+        if self.plan_feedback_in_flight.is_some() && self.plan_approval_view.is_none() {
             return false;
         }
         let Some(pav) = self.plan_approval_view.as_ref() else {
@@ -289,12 +310,21 @@ impl AgentView {
 
     /// Typed sentence in an open Isolated Preview. Not a paste chip, not a
     /// vanished pane, not keep-draft, not a typed slash, not a line comment.
-    /// Session Multiline Enter still inserts a newline.
+    /// Session Multiline Enter still inserts a newline. Rewriting-wait notes
+    /// plus Enter send; they are not this WAL-only leftover path.
     pub(crate) fn isolated_preview_typed_open_enter_is_human_turn(&self) -> bool {
         if !self.is_plan_viewer() {
             return false;
         }
-        if self.plan_decision_resolved || self.plan_feedback_in_flight.is_some() {
+        if self.plan_decision_resolved {
+            return false;
+        }
+        if self.isolated_preview_is_rewrite_wait() {
+            return false;
+        }
+        // Real rewrite unmounts the park. Leftover Revising with a live
+        // present must not turn Hello? into Plan Exit.
+        if self.plan_feedback_in_flight.is_some() && self.plan_approval_view.is_none() {
             return false;
         }
         let Some(pav) = self.plan_approval_view.as_ref() else {
@@ -362,9 +392,7 @@ impl AgentView {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return None;
         }
-        if self.plan_approval_view.is_none() || self.plan_feedback_in_flight.is_some() {
-            return None;
-        }
+        self.plan_approval_view.as_ref()?;
         let hit = self
             .line_viewer
             .as_ref()
@@ -427,7 +455,13 @@ impl AgentView {
         // it's fucking stuck!!" Rewrite-wait must not swallow Exit. Revise
         // still waits for a live park (`send_plan_feedback` takes
         // `plan_approval_view`). Empty Enter never Approves.
-        if self.plan_feedback_in_flight.is_some() && choice != SelectedPlanCta::Exit {
+        // Real rewrite unmounts the park. Leftover Revising with a live
+        // present must not swallow Approve / Comment / Revise so Exit is
+        // the only live chrome.
+        if self.plan_feedback_in_flight.is_some()
+            && self.plan_approval_view.is_none()
+            && choice != SelectedPlanCta::Exit
+        {
             return InputOutcome::Changed;
         }
         self.mark_selected_plan_cta(choice);
@@ -508,6 +542,9 @@ impl AgentView {
         let text = self.prompt.text().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            return false;
+        }
+        if self.isolated_preview_is_rewrite_wait() {
             return false;
         }
         // Recognized slash commands are not plan review comments.
@@ -769,8 +806,9 @@ impl AgentView {
                 if self.hold_parked_plan_review_comments_from_enter() {
                     return InputOutcome::Changed;
                 }
-                // Preview: empty Enter never Approves. A non-empty draft
-                // already stashed above so it can ride Approve.
+                // Preview: empty Enter never Approves. Rewriting-wait notes
+                // plus Enter send. Idle leftover typed Enter already returned
+                // above as a WAL-only human turn.
                 return self.send_composer_as_normal_prompt();
             }
             if self.is_plan_viewer() {

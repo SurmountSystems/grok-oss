@@ -3,6 +3,8 @@
 Append-only record of monorepo exports absorbed into **SurmountSystems/grok-oss**
 as **reviewed content** on Surmount history (not a git merge of xAI parents).
 
+**Open source publication gap (pinned 2026-10-24).** It has been a while since the last open source publication of Grok Build (upstream xai-org/grok-build). This fork keeps shipping. Evaluate a newer upstream export when one appears (`just upstream-detect`). Do not invent a last publication date. See FORK.md same heading.
+
 | Date (UTC) | xAI commit | xAI tree | Surmount import commit | Notes |
 |------------|------------|----------|------------------------|-------|
 | 2026-07-15 | `b189869b7755d2b482969acf6c92da3ecfeffd36` | `3dd054cb911a6975e4b414c3d9f72108ed0eeeca` | seed (`b189869` as initial Surmount base) | First public export used as Surmount root; OpenRouter + branding built on top |

@@ -211,7 +211,8 @@ pub fn context_chip_token_text(
 /// Sampling window the footer chip should paint.
 ///
 /// Live session sampling wins. When that field is empty, L1 falls back to the
-/// catalog window and nested L2/L3 fall back to 40% of nested catalog.
+/// catalog window and nested L2/L3 fall back to nested live (the 200k nested
+/// catalog cap, not 40% of catalog).
 pub fn footer_sampling_window(
     session_sampling_window: Option<u64>,
     catalog_window: Option<u64>,
@@ -754,7 +755,7 @@ mod tests {
         assert_eq!(
             footer_sampling_window(None, Some(500_000), true),
             Some(200_000),
-            "nested empty session sampling falls back to 40% of 500k catalog, not 500k"
+            "nested empty session sampling falls back to the 200k nested catalog cap, not 500k"
         );
         let sampling = footer_sampling_window(Some(200_000), Some(500_000), true);
         assert_eq!(
@@ -773,18 +774,18 @@ mod tests {
         );
     }
 
-    /// Nested L2/L3 empty-session fallback is 40% of nested catalog.
+    /// Nested L2/L3 empty-session fallback is the nested catalog cap (200k).
     #[test]
-    fn nested_l2_and_l3_live_sampling_is_forty_percent_of_catalog() {
+    fn nested_l2_and_l3_live_sampling_is_nested_catalog_cap() {
         assert_eq!(
             footer_sampling_window(None, Some(1_000_000), true),
-            Some(400_000),
-            "1M nested catalog → 400k live"
+            Some(200_000),
+            "1M nested catalog → 200k live, not 400k"
         );
         assert_eq!(
             footer_sampling_window(None, Some(200_000), true),
-            Some(80_000),
-            "200k nested catalog → 80k live"
+            Some(200_000),
+            "200k nested catalog → 200k live, not 80k"
         );
         assert_eq!(
             footer_sampling_window(None, Some(500_000), false),

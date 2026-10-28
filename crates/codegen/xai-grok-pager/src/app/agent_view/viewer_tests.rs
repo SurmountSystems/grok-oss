@@ -1211,6 +1211,45 @@ fn type_plan_chars(agent: &mut AgentView, text: &str) {
     }
 }
 
+fn draw_plan_present_screen(agent: &mut AgentView) -> String {
+    use crate::scrollback::render::ScratchBuffer;
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = agent.draw(
+        area,
+        &mut buf,
+        &ActionRegistry::defaults(),
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        false,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn scrollback_has_plan_exit_tool(agent: &AgentView) -> bool {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::ToolCallBlock;
+    (0..agent.scrollback.len()).any(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+        Some(RenderBlock::ToolCall(ToolCallBlock::Other(block))) => {
+            block.name.contains("Plan: Exit") || block.name.contains("Plan Exit")
+        }
+        _ => false,
+    })
+}
+
 /// Operator: a focused plan comment composer inserts y. Copy must not
 /// steal that letter. The Operator typed `for you too` and saw `for ou too`
 /// because the footer advertised `y:copy` during text entry.
@@ -2273,6 +2312,105 @@ fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
     );
 }
 
+/// Operator text `Hello? Are you stuck?` during plan present does not freeze
+/// the UI, does not paint `Plan Exit` into an empty transcript, and does not
+/// leave `Run Plan: Exit 0.0s` on an empty screen. Leftover Revising with a
+/// live present is still Operator speech, not a reason to freeze Enter or to
+/// run Plan Exit.
+#[test]
+fn operator_hello_are_you_stuck_with_leftover_revising_does_not_freeze_or_paint_plan_exit() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::PlanFeedbackInFlight;
+
+    const HELLO: &str = "Hello? Are you stuck?";
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.session.state = AgentState::Idle;
+    agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+    agent.prompt.set_text("");
+    type_plan_chars(&mut agent, HELLO);
+    assert!(
+        agent.isolated_preview_typed_open_enter_is_human_turn(),
+        "leftover Revising with a live present must not freeze Hello? Enter"
+    );
+    let send = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            &send,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Hello? with leftover Revising must not SendPrompt or Interject into Plan Exit; got {send:?}"
+    );
+    assert!(
+        matches!(&send, InputOutcome::Changed),
+        "Hello? with leftover Revising is Operator speech, not Plan Exit; got {send:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Hello? must not abandon the parked present"
+    );
+    assert!(
+        agent.prompt.text().contains(HELLO),
+        "Hello? must stay in the composer so the present is not an empty screen, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        !scrollback_has_plan_exit_tool(&agent),
+        "Hello? must not paint Plan Exit into the transcript"
+    );
+
+    let painted = draw_plan_present_screen(&mut agent);
+    assert!(
+        painted.contains("Plan ready. Side panel open"),
+        "leftover Revising plus Hello? must not freeze the present; got:\n{painted}"
+    );
+    assert!(
+        painted.contains("approve | comment | revise | exit"),
+        "idle Approve / Comment / Revise / Exit must stay live; Exit must not be the only chrome:\n{painted}"
+    );
+    assert!(
+        !painted.contains("Run Plan: Exit"),
+        "Hello? must not leave Run Plan: Exit 0.0s on the screen:\n{painted}"
+    );
+    assert!(
+        !painted.contains("Plan: Exit"),
+        "Hello? must not paint Plan: Exit:\n{painted}"
+    );
+    assert!(
+        painted.contains(HELLO) || agent.prompt.text().contains(HELLO),
+        "the screen must still hold Hello?; got:\n{painted}"
+    );
+
+    agent.prompt.set_text("");
+    let empty = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            empty,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::SetPlanMode(_))
+        ),
+        "empty Enter never Approves and never Exits; got {empty:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "empty Enter never Approves and never Exits"
+    );
+}
+
 /// Comment CTA still focuses the Operator box. Non-empty Enter then
 /// Approves with those notes. Empty Enter never Approves.
 #[test]
@@ -2402,6 +2540,43 @@ fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
     assert!(
         agent.line_viewer.is_none(),
         "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
+    );
+}
+
+/// Leftover Revising with a live present must not swallow Approve / Comment /
+/// Revise so Exit is the only live chrome. Clickable Revise still rewrites.
+#[test]
+fn leftover_revising_with_live_present_does_not_leave_exit_as_only_live_cta() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::PlanFeedbackInFlight;
+
+    let mut agent = agent_with_scrollable_plan();
+    agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+    agent.prompt.set_text("cannot revise plans: add auth");
+    arm_exclusive_covering_revise_and_exit(&mut agent);
+    let outcome = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 41, 20),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Changed | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "leftover Revising must not swallow clickable Revise; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "leftover Revising must not leave Exit as the only live CTA; clickable Revise must send the rewrite"
+    );
+    assert_eq!(
+        agent.plan_feedback_in_flight,
+        Some(PlanFeedbackInFlight::Revising)
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "clickable Revise is not Approve and not Exit"
     );
 }
 

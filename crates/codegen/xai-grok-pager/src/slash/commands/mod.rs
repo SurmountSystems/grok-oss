@@ -392,6 +392,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(new::NewCommand),
+        Arc::new(new::ClearCommand),
         // Per turn.
         Arc::new(effort::EffortCommand),
         Arc::new(context_window::ContextWindowCommand),
@@ -613,6 +614,30 @@ pub(crate) mod tests {
         let cmd = new::NewCommand;
         let result = cmd.run(&mut ctx, "");
         assert!(matches!(result, CommandResult::Action(Action::NewSession)));
+    }
+    /// Operator: "clear doesn't clear many subagents... we had thousands but now
+    /// there's hundreds even though there aren't really."
+    /// Session `/clear` (the slash the Operator types) must not only start `/new`.
+    /// It clears leftover/ghost Subagents rows in the same conversation.
+    #[test]
+    fn session_clear_dispatches_same_conversation_leftover_subagent_clear() {
+        let reg = CommandRegistry::new(builtin_commands());
+        let cmd = reg.get("clear").expect("session /clear");
+        assert_ne!(cmd.name(), "new", "session /clear must not only start /new");
+        assert_eq!(cmd.name(), "clear");
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        let session_id = acp::SessionId::new("same-conversation");
+        ctx.session_id = Some(&session_id);
+        let result = cmd.run(&mut ctx, "");
+        assert!(
+            !matches!(result, CommandResult::Action(Action::NewSession)),
+            "session /clear must not only start /new, got {result:?}"
+        );
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::ClearLeftoverSubagentRows)
+        ));
     }
     #[test]
     fn home_returns_exit_session_action() {

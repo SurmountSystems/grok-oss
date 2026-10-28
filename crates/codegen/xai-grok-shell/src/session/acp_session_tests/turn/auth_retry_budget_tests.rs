@@ -14,6 +14,12 @@ use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedRespons
 /// The token the mock server accepts and the refresher mints on success.
 const FRESH_TOKEN: &str = "refreshed-test-token";
 
+/// Bearer on the first authenticated send. The mock server rejects it.
+const REJECTED_LIVE_BEARER: &str = "rejected-live-bearer";
+
+/// Bearer recovery stores after that 401. The mock server accepts it.
+const RECOVERED_BEARER: &str = "recovered-next-bearer";
+
 /// With `fail_pre_request`, mimics the post-wake sequence: `PreRequest` refreshes fail (the send
 /// goes out fail-closed) while 401 recovery mints [`FRESH_TOKEN`] for `mint_ttl` — a TTL inside
 /// the pre-request buffer (< 5 min) stays wire-valid yet keeps later prepares observable in `calls`.
@@ -46,6 +52,28 @@ impl xai_grok_login::refresh::TokenRefresher for WakeGapRefresher {
     }
 }
 
+/// Mints [`RECOVERED_BEARER`], a different key from the rejected live bearer.
+struct MintRecoveredBearer {
+    calls: Arc<AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl xai_grok_login::refresh::TokenRefresher for MintRecoveredBearer {
+    async fn refresh(
+        &self,
+        _reason: xai_grok_login::refresh::RefreshReason,
+    ) -> xai_grok_login::refresh::RefreshOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        xai_grok_login::refresh::RefreshOutcome::success(GrokAuth {
+            key: RECOVERED_BEARER.to_string(),
+            auth_mode: AuthMode::Oidc,
+            refresh_token: Some("rt-recovered".into()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..GrokAuth::test_default()
+        })
+    }
+}
+
 /// `(tempdir, manager)` with a hard-expired OIDC token, so the wire-valid resolver has nothing to stamp until the refresher succeeds.
 /// The tempdir must outlive the manager (auth.json path).
 fn expired_auth_manager(
@@ -58,6 +86,25 @@ fn expired_auth_manager(
         auth_mode: AuthMode::Oidc,
         refresh_token: Some("rt".into()),
         expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    am.set_refresher(refresher);
+    (dir, am)
+}
+
+/// Wire-valid OIDC bearer minted outside the fresh-mint window, so a 401 recovery
+/// stores a new key instead of returning this one.
+fn aged_rejected_auth_manager(
+    refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher>,
+) -> (tempfile::TempDir, Arc<AuthManager>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    am.hot_swap(GrokAuth {
+        key: REJECTED_LIVE_BEARER.into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        create_time: chrono::Utc::now() - chrono::Duration::minutes(10),
         ..GrokAuth::test_default()
     });
     am.set_refresher(refresher);
@@ -534,6 +581,233 @@ fn authenticated_401s_still_exhaust_after_three_retries() {
                 AuthRetrySchedule::MAX_RETRIES as usize,
                 AuthRetrySchedule::MAX_RETRIES,
                 &["Re-authenticated after 401"],
+            );
+        });
+    });
+}
+
+/// The exhaust sentence prints the rejection count as `MAX_RETRIES + 1` and the retry cap as the `MAX_RETRIES` constant.
+/// Those two digits are format arguments in the failure text.
+/// They are not the HTTP send count and not the Retrying update fields.
+#[test]
+fn exhaust_sentence_prints_rejection_count_and_retry_cap() {
+    on_session_stack(|| {
+        run_current_thread(true, || async {
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                "never-issued-token",
+            )
+            .await
+            .expect("mock inference server");
+
+            let refresher = Arc::new(WakeGapRefresher {
+                calls: Arc::new(AtomicU32::new(0)),
+                fail_pre_request: false,
+                mint_ttl: chrono::Duration::hours(1),
+            });
+            let (_dir, am) = expired_auth_manager(refresher);
+            let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
+
+            let outcome = run_prompt_with_cap(&actor, "auth-retry-printed-counts", 86_400).await;
+            let err = outcome.expect_err("the printed exhaust sentence is on the failed turn");
+            let rendered = serde_json::to_string(&err.data).unwrap_or_default();
+            let painted = terminal_failure(&updates)
+                .map(|(_, message)| message)
+                .unwrap_or_default();
+
+            let rejection_count = AuthRetrySchedule::MAX_RETRIES + 1;
+            let retry_cap = AuthRetrySchedule::MAX_RETRIES;
+            let printed_rejections = format!(
+                "{rejection_count} authenticated inference requests were still rejected (401)"
+            );
+            let printed_cap = format!("giving up after {retry_cap} retries");
+            assert!(
+                rendered.contains(&printed_rejections),
+                "the error must print the rejection count as MAX_RETRIES + 1, got: {rendered}"
+            );
+            assert!(
+                rendered.contains(&printed_cap),
+                "the error must print the retry cap as the MAX_RETRIES constant, got: {rendered}"
+            );
+            assert!(
+                painted.contains(&printed_rejections),
+                "the terminal notification must print the rejection count as MAX_RETRIES + 1, got: {painted}"
+            );
+            assert!(
+                painted.contains(&printed_cap),
+                "the terminal notification must print the retry cap as the MAX_RETRIES constant, got: {painted}"
+            );
+        });
+    });
+}
+
+/// A non-nested 401 on bearer OLD, then recovery stores bearer NEW.
+/// The next request must send NEW, and the turn must not exhaust.
+#[test]
+fn recovered_bearer_is_what_the_next_send_uses() {
+    on_session_stack(|| {
+        run_current_thread(true, || async {
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                RECOVERED_BEARER,
+            )
+            .await
+            .expect("mock inference server");
+
+            let calls = Arc::new(AtomicU32::new(0));
+            let refresher = Arc::new(MintRecoveredBearer {
+                calls: calls.clone(),
+            });
+            let (_dir, am) = aged_rejected_auth_manager(refresher);
+            let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
+
+            let outcome = run_prompt_with_cap(&actor, "recovered-bearer-next-send", 86_400).await;
+            assert!(
+                outcome.is_ok(),
+                "recovery must finish the turn on the new bearer: {outcome:?}"
+            );
+
+            let inference: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|r| r.path.contains("/responses"))
+                .collect();
+            assert!(
+                inference.len() >= 2,
+                "expected the rejected send plus the recovered send; got {}",
+                inference.len()
+            );
+            assert_eq!(
+                inference
+                    .first()
+                    .expect("first send")
+                    .authorization
+                    .as_deref(),
+                Some(&format!("Bearer {REJECTED_LIVE_BEARER}") as &str),
+                "first authenticated send must use the bearer the server rejects"
+            );
+            assert_eq!(
+                inference
+                    .get(1)
+                    .expect("second send")
+                    .authorization
+                    .as_deref(),
+                Some(&format!("Bearer {RECOVERED_BEARER}") as &str),
+                "the next send must use the bearer recovery stored"
+            );
+            assert!(
+                calls.load(Ordering::SeqCst) >= 1,
+                "recovery must mint the new bearer instead of resending the rejected one"
+            );
+
+            let rendered = format!("{outcome:?}");
+            let painted = updates
+                .lock()
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !rendered.contains("authenticated inference requests were still rejected"),
+                "a turn that sent the recovered bearer must not exhaust: {rendered}"
+            );
+            assert!(
+                !rendered.contains("giving up after"),
+                "a turn that sent the recovered bearer must not give up: {rendered}"
+            );
+            assert!(
+                !painted.contains("authenticated inference requests were still rejected"),
+                "notifications must not exhaust after the recovered bearer: {painted}"
+            );
+            assert!(
+                !painted.contains("giving up after"),
+                "notifications must not give up after the recovered bearer: {painted}"
+            );
+        });
+    });
+}
+
+/// One 401 of bearer OLD, then recovery stores bearer NEW, and the server keeps 401ing NEW.
+/// The give-up sentence may still appear, but only after NEW itself has been rejected
+/// `MAX_RETRIES + 1` times. OLD must not sit inside that four.
+#[test]
+fn old_bearer_401_is_not_inside_the_new_bearer_exhaustion() {
+    on_session_stack(|| {
+        run_current_thread(true, || async {
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                "never-issued-token",
+            )
+            .await
+            .expect("mock inference server");
+
+            let refresher = Arc::new(MintRecoveredBearer {
+                calls: Arc::new(AtomicU32::new(0)),
+            });
+            let (_dir, am) = aged_rejected_auth_manager(refresher);
+            let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
+
+            let outcome = run_prompt_with_cap(&actor, "old-401-does-not-burn-new", 86_400).await;
+            let err = outcome.expect_err("NEW must still exhaust once its own budget is spent");
+            let rendered = serde_json::to_string(&err.data).unwrap_or_default();
+            let painted = terminal_failure(&updates)
+                .map(|(_, message)| message)
+                .unwrap_or_default();
+
+            let inference: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path.contains("/responses"))
+                .collect();
+            let old_sends = inference
+                .iter()
+                .filter(|request| {
+                    request.authorization.as_deref()
+                        == Some(&format!("Bearer {REJECTED_LIVE_BEARER}") as &str)
+                })
+                .count();
+            let new_sends = inference
+                .iter()
+                .filter(|request| {
+                    request.authorization.as_deref()
+                        == Some(&format!("Bearer {RECOVERED_BEARER}") as &str)
+                })
+                .count();
+            assert_eq!(
+                old_sends,
+                1,
+                "the rejected bearer is sent once, before recovery stores the new one; \
+                 got {old_sends} old and {new_sends} new among {}",
+                inference.len()
+            );
+            assert_eq!(
+                new_sends,
+                (AuthRetrySchedule::MAX_RETRIES + 1) as usize,
+                "NEW must be rejected MAX_RETRIES + 1 times. Counting the OLD 401 inside \
+                 that four would stop after fewer NEW sends. got {new_sends}"
+            );
+
+            let rejection_count = AuthRetrySchedule::MAX_RETRIES + 1;
+            let retry_cap = AuthRetrySchedule::MAX_RETRIES;
+            let printed_rejections = format!(
+                "{rejection_count} authenticated inference requests were still rejected (401)"
+            );
+            let printed_cap = format!("giving up after {retry_cap} retries");
+            assert!(
+                rendered.contains(&printed_rejections),
+                "give-up must name NEW's own rejection count, got: {rendered}"
+            );
+            assert!(
+                rendered.contains(&printed_cap),
+                "give-up must keep the retry cap, got: {rendered}"
+            );
+            assert!(
+                painted.contains(&printed_rejections),
+                "the terminal notification must name the same rejection count, got: {painted}"
+            );
+            assert!(
+                painted.contains(&printed_cap),
+                "the terminal notification must keep the retry cap, got: {painted}"
             );
         });
     });

@@ -76,6 +76,18 @@ fn empty_question_is_none() {
 }
 
 #[test]
+fn sentence_with_plan_is_a_mention_lone_plan_is_not() {
+    use super::typed_text_is_slash_mention;
+    assert!(typed_text_is_slash_mention(
+        "sentences where you type things like this: /plan like if you type a skill in the prompt"
+    ));
+    assert!(typed_text_is_slash_mention("please /pr-workflow now"));
+    assert!(!typed_text_is_slash_mention("/plan"));
+    assert!(!typed_text_is_slash_mention("/plan add auth"));
+    assert!(!typed_text_is_slash_mention(""));
+}
+
+#[test]
 fn punctuated_or_uppercase_token_misses() {
     for text in ["hi /btw, q", "hi /btw: q", "hi /BTW q"] {
         assert_eq!(None, hoist(text), "{text:?}");

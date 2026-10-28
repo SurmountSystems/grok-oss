@@ -33,12 +33,18 @@ newer — golden tests guard our surface).
 | `encode(&Value) -> Result<String>` | Thin wrap `toon_format::encode_default` |
 | `decode(&str) -> Result<Value>` | Thin wrap `toon_format::decode_default` |
 | `maybe_encode_for_llm(value, policy)` | Policy-aware model text |
-| `ToolResultFormat` | `Auto` (default) \| `Toon` \| `Json` |
-| Env | `GROK_TOOL_RESULT_FORMAT=toon\|json\|auto` |
+| `ToolResultFormat` | `Toon` (default when unset) \| `Auto` (explicit token) \| `Json` |
+| Env | `GROK_TOOL_RESULT_FORMAT=toon\|json\|auto` (unset = **toon**) |
 
-**Auto heuristic:** emit TOON when `is_tabular_eligible` (uniform object arrays
-or non-empty primitive arrays, shallow) **or** TOON byte length &lt; compact
-JSON; else compact JSON. Encode errors fail open to compact JSON.
+**Default is Toon.** Unset `GROK_TOOL_RESULT_FORMAT` always encodes structured
+tool results as TOON (fail-open compact JSON on encode error). `Json` stays
+for `GROK_TOOL_RESULT_FORMAT=json` and for external wires (MCP JSON-RPC,
+`prompt_context.json`, CLI `--json`).
+
+**Auto heuristic** (explicit `auto` only): emit TOON when `is_tabular_eligible`
+(uniform object arrays or non-empty primitive arrays, shallow) **or** TOON
+byte length &lt; compact JSON; else compact JSON. Encode errors fail open to
+compact JSON. Empty/unknown parse tokens still land on Auto.
 
 ## T2 — tool result integration
 

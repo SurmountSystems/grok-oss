@@ -403,6 +403,7 @@ impl acp::Agent for MvpAgent {
             ),
         );
         let mut has_cached_token = init_has_current;
+        let grok_home = crate::util::grok_home::grok_home();
         if !init_has_current && init_is_expired {
             let _t = xai_grok_telemetry::instrumentation::timer(
                 "startup.acp_initialize.silent_refresh",
@@ -412,6 +413,13 @@ impl acp::Agent for MvpAgent {
                 SilentRefresh::Renewed(_) => true,
                 SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
             };
+        }
+        if !has_cached_token
+            && !crate::util::config::fresh_authorize_required_in(&grok_home)
+        {
+            let _ = self.auth_manager.pick_up_sibling_token();
+            // IPC already has a live authorized session. Do not put grok.com first.
+            has_cached_token = true;
         }
         let (
             login_label,
@@ -460,6 +468,20 @@ impl acp::Agent for MvpAgent {
             Some(xai_grok_login::PreferredAuthMethod::ApiKey) => false,
             _ => has_cached_token,
         };
+        if has_cached_token {
+            let permission_mode = crate::util::config::permission_mode_canonical_str(
+                crate::util::config::load_permission_mode(None),
+            )
+            .to_string();
+            let _ = crate::util::config::publish_authorize_ask_socket(
+                &grok_home,
+                &crate::util::config::AuthorizeAskDocument {
+                    authorized: true,
+                    permission_mode,
+                    event_ms: crate::util::config::authorize_ask_event_ms(),
+                },
+            );
+        }
         let built = {
             let _t = xai_grok_telemetry::instrumentation::timer(
                 "startup.acp_initialize.auth_methods",
@@ -816,6 +838,7 @@ impl acp::Agent for MvpAgent {
                 self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
                 let auth_for_settings = auth.clone();
+                let login_jwt = auth.key.clone();
                 {
                     let mut sampling_config = self.sampling_config.borrow_mut();
                     sampling_config.api_key = Some(auth.key);
@@ -826,6 +849,7 @@ impl acp::Agent for MvpAgent {
                         None,
                     );
                 }
+                self.restamp_resident_samplers_after_login(&login_jwt);
                 self.set_auth_method(arguments.method_id.clone());
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
@@ -963,6 +987,7 @@ impl acp::Agent for MvpAgent {
                         None,
                     );
                 }
+                self.restamp_resident_samplers_after_login(&auth.key);
                 self.auth_manager.hot_swap(auth.clone());
                 self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
@@ -1262,19 +1287,39 @@ impl acp::Agent for MvpAgent {
             // spawn (`parent_sampler_handle.current_api_key()` / live_parent_sampler_jwt
             // first). Nested MvpAgent has no parent_sampler_handle field: live JWT
             // comes from `_meta.recoveredBearerJwt` or the resident parent's sampler.
-            // Do not SetApiKey(AuthManager current_wire_valid / current_or_expired):
-            // cli-chat-proxy rejects it while the parent JWT still talks (Operator paste:
-            // auth_kind=bearer … reason=no auth context after login).
+            // Nested must not SetApiKey(AuthManager current_wire_valid /
+            // current_or_expired): cli-chat-proxy rejects it while the parent JWT
+            // still talks (Operator paste: auth_kind=bearer … reason=no auth context
+            // after login). Parent L1 recoveredBearer with no JWT reloads the
+            // shared store instead of posting spawn-time live_api_key.
             let parent_jwt = if recovered_bearer_jwt_meta.is_some() {
                 recovered_bearer_jwt_meta
             } else if let Some(parent_sid) = handle.parent_session_id.as_ref() {
                 let parent_id = acp::SessionId::new(parent_sid.clone());
                 match self.session_registry.resident_handle(&parent_id) {
-                    Some(parent) => parent.sampler_handle.current_api_key().await,
+                    Some(parent) => {
+                        if let Some(key) = parent.sampler_handle.live_api_key() {
+                            Some(key)
+                        } else {
+                            parent.sampler_handle.current_api_key().await
+                        }
+                    }
                     None => None,
                 }
             } else {
-                None
+                // Already-open L1 after sibling IPC, or waiting parent after
+                // AuthComplete: re-read the shared store and restamp. Do not
+                // POST this process's spawn-time live_api_key after a sibling
+                // login wrote a different bearer. Nested inherit stays above.
+                let store_or_live = xai_grok_login::credential_provider::parent_recovered_bearer_from_shared_store(
+                    &self.auth_manager,
+                    handle.sampler_handle.live_api_key(),
+                );
+                if store_or_live.is_some() {
+                    store_or_live
+                } else {
+                    handle.sampler_handle.current_api_key().await
+                }
             };
             let recovered = xai_grok_login::credential_provider::recovered_bearer_inherit_jwt(
                 parent_jwt,
@@ -1287,12 +1332,10 @@ impl acp::Agent for MvpAgent {
                 ));
             };
             handle.sampler_handle.set_api_key(Some(recovered.clone()));
-            // SetApiKey is a mailbox command. Await CurrentApiKey so the
-            // restamp lands before this prompt reconstructs and POSTs.
-            // Fire-and-forget left spawn-time JWT on the wire (Operator:
-            // same 401 after Logging in..., then 4m Waiting for the model).
-            let flushed = handle.sampler_handle.current_api_key().await;
-            if flushed.as_deref() != Some(recovered.as_str()) {
+            // set_api_key restamps the shared inherit resolver and live_api_key
+            // immediately. Do not wait on CurrentApiKey: a busy mailbox left
+            // chrome on Waiting for the model with no POST after login.
+            if handle.sampler_handle.live_api_key().as_deref() != Some(recovered.as_str()) {
                 return Err(acp::Error::internal_error().data(
                     "nested recoveredBearer SetApiKey did not restamp live parent sampler JWT",
                 ));

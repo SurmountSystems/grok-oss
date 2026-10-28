@@ -1803,7 +1803,9 @@ impl MvpAgent {
             let Some(handle) = self.session_registry.resident_handle(&id) else {
                 continue;
             };
-            let Some(jwt) = handle.sampler_handle.current_api_key().await else {
+            // live_api_key does not wait on a busy sampler mailbox. After login
+            // AuthComplete must POST immediately with this JWT.
+            let Some(jwt) = handle.sampler_handle.live_api_key() else {
                 continue;
             };
             parent_sampler_jwts.insert(
@@ -1863,6 +1865,24 @@ impl MvpAgent {
                 obj
             });
         AuthenticateResponse::new().meta(meta)
+    }
+
+    /// After a real login, restamp resident samplers with the login JWT so
+    /// AuthComplete recoveredBearer / parent POST uses that JWT immediately.
+    /// Does not wait on the sampler mailbox.
+    pub(crate) fn restamp_resident_samplers_after_login(&self, jwt: &str) {
+        let jwt = jwt.trim();
+        if jwt.is_empty() {
+            return;
+        }
+        for id in self.session_registry.resident_ids() {
+            let Some(handle) = self.session_registry.resident_handle(&id) else {
+                continue;
+            };
+            handle
+                .sampler_handle
+                .set_api_key(Some(jwt.to_string()));
+        }
     }
     /// Fetch remote settings after authentication when early prefetch had none.
     /// Notifies the pager so soft-default permission_mode applies post-login.

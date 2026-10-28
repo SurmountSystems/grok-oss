@@ -236,6 +236,99 @@ fn workspace_tmp_session_command_dir_and_verified_caches_are_the_default_write_r
     }));
 }
 
+/// Operator 2026-10-23 asked: investigate why `read_file` Permission-denied a
+/// session compaction segment (`$GROK_HOME/sessions/<id>/compaction/segment_*.md`
+/// and `INDEX.md`), prevent it, red/green TDD. GitHub #245
+/// SurmountSystems/grok-oss title `read_file Permission denied on session compaction segment`.
+/// Unix `cat` / OS mode is not the deny; the `$GROK_HOME/sessions` TreeExcept is.
+/// The encoded-cwd own session is already excepted; the screenshot class is a
+/// session-id directory under `sessions/` that is not that except path.
+#[test]
+fn session_compaction_segment_is_readable_through_the_sessions_tree_except() {
+    let f = Fixture::new("compaction-segment");
+    let policy = f.build(&[], None);
+    let own_session = xai_grok_config::sessions_cwd_dir_in(&f.grok_home, &f.ws.to_string_lossy());
+    let other = xai_grok_config::sessions_cwd_dir_in(&f.grok_home, "/opt/ws-fixture/other");
+    let session_id = f
+        .grok_home
+        .join("sessions")
+        .join("01k8compactionsegmentulid1");
+    let read = |path: PathBuf| policy.would_allow(&Blocked::FsRead { path });
+    let write = |path: PathBuf| policy.would_allow(&Blocked::FsWrite { path });
+
+    assert!(
+        read(session_id.join("compaction/segment_006.md")),
+        "session compaction segment must stay readable"
+    );
+    assert!(read(session_id.join("compaction/INDEX.md")));
+    assert!(read(own_session.join("compaction/segment_001.md")));
+    assert!(read(own_session.join("compaction/INDEX.md")));
+
+    assert!(!read(other.join("events.jsonl")));
+    assert!(!read(session_id.join("chat_history.jsonl")));
+    assert!(!read(session_id.join("compaction/notes.md")));
+
+    assert!(!write(session_id.join("compaction/segment_006.md")));
+    assert!(!write(own_session.join("compaction/INDEX.md")));
+}
+
+#[test]
+fn is_session_compaction_store_path_names_segments_and_index_only() {
+    assert!(is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/compaction/segment_006.md"
+    )));
+    assert!(is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/compaction/INDEX.md"
+    )));
+    assert!(!is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/compaction/notes.md"
+    )));
+    assert!(!is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/chat_history.jsonl"
+    )));
+    assert!(!is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/compaction/segment_.md"
+    )));
+    assert!(!is_session_compaction_store_path(Path::new(
+        "/home/u/.grok/sessions/01k8id/compaction/segment_00a.md"
+    )));
+    assert!(is_session_compaction_store_path(Path::new(
+        "/home/hunter/.grok/sessions/%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build/01a10146-489e-7b91-88cb-fd2dc2222244/compaction/segment_006.md"
+    )));
+}
+
+/// Operator 2026-10-23 / GitHub #245: the screenshot path is
+/// `$GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction/segment_006.md`.
+/// Reads stay allowed. Writes stay denied. This is not the Linux in-process
+/// `read_file` prevent; that lives in grok_build `read_file`.
+#[test]
+fn screenshot_encoded_cwd_uuid_compaction_segment_writes_stay_denied() {
+    let f = Fixture::new("screenshot-compaction-layout");
+    let policy = f.build(&[], None);
+    let segment = f
+        .grok_home
+        .join("sessions")
+        .join("%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build")
+        .join("01a10146-489e-7b91-88cb-fd2dc2222244")
+        .join("compaction")
+        .join("segment_006.md");
+    let index = segment.with_file_name("INDEX.md");
+    let events = segment
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .join("events.jsonl");
+    let read = |path: PathBuf| policy.would_allow(&Blocked::FsRead { path });
+    let write = |path: PathBuf| policy.would_allow(&Blocked::FsWrite { path });
+
+    assert!(read(segment.clone()));
+    assert!(read(index.clone()));
+    assert!(!read(events.clone()));
+    assert!(!write(segment));
+    assert!(!write(index));
+    assert!(!write(events));
+}
+
 /// A hook source the process-wide profile write-denies — here a `hooks-paths` entry inside the
 /// workspace — is in the command's floor: grok runs the hooks it defines unsandboxed, so no
 /// command writes it and no grant opens it.

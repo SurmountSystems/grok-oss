@@ -356,12 +356,15 @@ impl AgentView {
             .subagent_sessions
             .values()
             .filter(|info| info.attempt.workflow_run_id.is_none())
-            .filter(|info| show_done || info.is_running())
             .filter(|info| {
-                info.is_running()
-                    || !self
-                        .tasks
-                        .completed_subagent_is_hidden(info.child_session_id.as_ref())
+                let hidden = self
+                    .tasks
+                    .completed_subagent_is_hidden(info.child_session_id.as_ref());
+                // Dock `[clear]` and session `/clear` share this hide set.
+                if hidden && info.should_hide_on_dock_clear() {
+                    return false;
+                }
+                show_done || info.is_running()
             })
             .filter(|info| crate::app::subagent::is_l2_list_row(info, &child_ids))
             .filter(|info| {
@@ -385,7 +388,10 @@ impl AgentView {
         infos
             .into_iter()
             .map(|info| {
-                let running = info.is_running();
+                // Stale `is_running()` with a host terminal status is leftover.
+                // Paint it as finished so dock `[clear]` is offered, then hide
+                // it when the Operator uses that control.
+                let running = info.is_running() && !info.should_hide_on_dock_clear();
                 let (kind, description) = crate::app::subagent::format_subagent_label(info);
                 let mut meta = String::new();
                 if let Some(model) = info.attempt.model.as_deref().filter(|s| !s.is_empty()) {
@@ -413,7 +419,11 @@ impl AgentView {
                         activity: if running {
                             info.attempt.activity_label.clone()
                         } else {
-                            info.attempt.status.as_deref().map(str::to_owned)
+                            info.attempt
+                                .status
+                                .as_deref()
+                                .map(str::to_owned)
+                                .or_else(|| info.status.as_deref().map(str::to_owned))
                         },
                         meta,
                         killable: running && !info.attempt.pending_kill,
@@ -426,13 +436,26 @@ impl AgentView {
             .collect()
     }
 
-    /// Hide completed subagent rows that are on the list now. A running row stays.
-    /// The registry row stays so a later resume can still find it. This does not kill.
+    /// Session `/clear` (the slash the Operator types). Hide leftover/ghost
+    /// Subagents rows on this same conversation so header tasks is the live
+    /// list, including occupancy-dead stale-running rows with no host
+    /// terminal status. This is not `/new`. Registry rows stay. This does
+    /// not kill.
+    pub(crate) fn clear_session_leftover_subagent_rows(&mut self) {
+        self.clear_completed_subagent_rows();
+    }
+
+    /// Hide leftover subagent rows from the dock list. Ghost running-looking
+    /// rows whose host already reported a terminal status go too.
+    /// Occupancy-dead stale-running rows with no host terminal status go
+    /// too. A live row with no terminal status that was not occupancy-restored
+    /// stays. The registry row stays so a later resume can still find it.
+    /// This does not kill.
     pub(crate) fn clear_completed_subagent_rows(&mut self) {
         let ids: Vec<String> = self
             .subagent_sessions
             .values()
-            .filter(|info| !info.is_running() && info.terminal_status_is_completed())
+            .filter(|info| info.should_hide_on_dock_clear())
             .map(|info| info.child_session_id.to_string())
             .collect();
         for id in &ids {

@@ -6,8 +6,10 @@
 pub mod config;
 pub mod implement_effort;
 pub mod ledger;
+pub mod live;
 pub mod period_pacing;
 pub mod reconcile;
+pub mod token_report_source;
 
 pub use config::{
     DEFAULT_DESIRED_IMPLEMENT_EFFORT, DEFAULT_MAX_IMPLEMENT_EFFORT, TokenEconomyConfig,
@@ -25,9 +27,15 @@ pub use ledger::{
     broken_host_context_cell, count_reconciliation_runs, host_chrome_is_zero_context,
     ingest_all_sessions_usage, ingest_usage_jsonl, insert_local_usage_event,
     insert_reconciliation_run, insert_remote_meter_sample, last_input_tokens_from_usage_jsonl,
-    latest_remote_sample, local_usage_event_exists, model_call_cost_for_sessions,
-    parse_usage_jsonl, summarize_local_book, try_insert_local_usage_event,
-    try_insert_remote_meter_sample,
+    latest_remote_sample, local_usage_event_exists, local_usage_events_for_session,
+    model_call_cost_for_sessions, parse_usage_jsonl, summarize_local_book,
+    try_insert_local_usage_event, try_insert_remote_meter_sample,
+};
+pub use live::{
+    CompletedModelCall, JobCostRecord, JobKindActual, LiveSlotTotals, LiveTokenLedger,
+    TOKEN_SLOT_COUNT, TokenSlot, estimate_vs_actual_by_job_kind, finish_job_cost, live_cost,
+    live_rollup, live_slot, live_totals_for_session, persist_job_cost, persist_model_call,
+    record_completed_model_call,
 };
 pub use period_pacing::{
     PeriodPacing, compute_period_pacing, derive_period_start_from_end_and_type, parse_rfc3339_utc,
@@ -37,6 +45,7 @@ pub use reconcile::{
     DoubleEntryReport, RemoteBookSummary, SuperGrokPeriodContext, format_double_entry_report,
     format_limits_spend_section, gap_honesty_line, ticks_to_usd,
 };
+pub use token_report_source::token_report_live_resource;
 
 /// Build a double-entry report from local DB + optional remote fields + SuperGrok period.
 ///

@@ -2970,6 +2970,43 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `grok-oss version --json` is compact JSON, not pretty and not TOON.
+    #[test]
+    fn version_json_flag_emits_json() {
+        let src = include_str!("main.rs");
+        let fn_src = src
+            .split("fn print_cli_version")
+            .nth(1)
+            .expect("print_cli_version must exist");
+        let fn_src = fn_src
+            .split("fn crash_dir_for")
+            .next()
+            .expect("print_cli_version must end before crash_dir_for");
+        assert!(
+            fn_src.contains("serde_json::to_string(&payload)"),
+            "version --json must emit compact JSON: {fn_src}"
+        );
+        assert!(
+            !fn_src.contains("to_string_pretty"),
+            "version --json is compact, not pretty"
+        );
+        assert!(
+            !fn_src.to_ascii_lowercase().contains("toon"),
+            "version --json must stay JSON, not TOON"
+        );
+        let payload = serde_json::json!({
+            "currentVersion": env!("VERSION_WITH_COMMIT"),
+            "channel": xai_grok_update::channel_name().unwrap_or("unknown"),
+        });
+        let compact = serde_json::to_string(&payload).unwrap();
+        assert!(compact.starts_with('{'), "compact JSON object: {compact}");
+        assert!(
+            !compact.contains('\n'),
+            "compact JSON, not pretty: {compact}"
+        );
+    }
+
     #[cfg(all(feature = "jemalloc", unix))]
     struct TempHeapDump(std::path::PathBuf);
     #[cfg(all(feature = "jemalloc", unix))]

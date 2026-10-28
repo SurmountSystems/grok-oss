@@ -701,6 +701,9 @@ pub(crate) struct ReplayRebuiltState {
     pub(crate) workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
     pub(crate) workflow_run_revisions: std::collections::HashMap<String, u64>,
     pub(crate) cleared_workflow_runs: std::collections::HashSet<String>,
+    pub(crate) goal_state: Option<super::agent::GoalDisplayState>,
+    pub(crate) last_cleared_goal_id: Option<String>,
+    pub(crate) show_goal_detail: bool,
 }
 /// Lifecycle of the inline plugin CTA. `Hidden`/`Matched` cover the idle and prompt-matched states; `Installing`/`Installed`/`Error` cover an in-TUI install triggered from the CTA. `AwaitingReload`/`AwaitingMcps` cover the post-install branch (reload plugins, then read MCP servers); a needs-auth result hands the user into the Extensions modal and settles back to `Hidden`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1654,6 +1657,9 @@ pub struct AgentView {
     /// Effects queued by input handlers that cannot return `InputOutcome::Action`.
     /// Drained by `AppView.handle_input` after each event.
     pub(crate) pending_effects: Vec<super::actions::Effect>,
+    /// Tool call already auto-backgrounded on L1 so we do not re-fire
+    /// `DemoteToBackground` while the execute is still pending.
+    pub(crate) l1_auto_background_tool_call_id: Option<String>,
     /// In-flight deferred clipboard attachment probes for this prompt. A send while `> 0` is stashed (see `deferred_send`) so a paste-then-immediate-send never builds content blocks before the image attaches.
     pub(crate) paste_probe_in_flight: usize,
     /// A prompt send / interject deferred until the in-flight paste probe(s)
@@ -2508,6 +2514,7 @@ pub(crate) mod test_fixtures {
             subagent_type: Arc::from("general-purpose"),
             finished: false,
             status: None,
+            from_occupancy_restore: false,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
