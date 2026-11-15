@@ -682,6 +682,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
 }
 /// Build the bwrap re-exec command a profile needs on Linux.
 /// Returns `None` when no re-exec is needed (already inside bwrap, nothing to deny) or the deny plan could not be built.
+/// Built-in devbox still re-execs when `/data` is absent, so Landlock applies inside bubblewrap.
 /// Plan failures print their cause.
 #[cfg(target_os = "linux")]
 pub fn bwrap_reexec_for_profile(
@@ -702,6 +703,7 @@ pub fn bwrap_reexec_for_profile(
         && hook_plan.is_none()
         && deny_read.is_empty()
         && !requires_read_deny
+        && *profile != ProfileName::Devbox
     {
         return None;
     }

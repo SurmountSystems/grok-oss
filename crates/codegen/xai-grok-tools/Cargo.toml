@@ -43,7 +43,8 @@ grep = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 kamadak-exif = { workspace = true, optional = true }
 hayro = { workspace = true }
-# 0.1.15 is the first office_oxide that depends on zip 9.
+# Workspace pin is registry 0.1.17 (Operator 2026-11-15). 0.1.15 was the
+# first release that depends on zip 9.
 office_oxide = { workspace = true }
 # PPTX text extraction (implementations/read_file/pptx.rs). Deliberately NOT
 # `workspace = true`: the workspace `zip` pin has default features on, which

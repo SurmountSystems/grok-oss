@@ -123,6 +123,13 @@ let
       pkgs.mold
       pkgs.duckdb.lib
       pkgs.duckdb.dev
+      # check-remote uses this shell, not the Nix quality derivation.
+      # LSP, cgroup, and MCP tests spawn python3. bubblewrap gives those
+      # tests a private /tmp and a regular /etc/hosts. util-linux provides
+      # unshare for the hook write-deny test.
+      pkgs.python3
+      pkgs.bubblewrap
+      pkgs.util-linux
     ];
 
     # Share host-cargo env with .#ci so jemalloc configure works here too

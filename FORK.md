@@ -461,29 +461,22 @@ identifier that has no matching `fn`.
   a per-model undercut; Settings commit live-applies to open sessions.
   FORK claims; not a land class. Detail:
   `docs/dev/research/rca-auto-compact-early-fire.md`
-- [x] **CoT death spiral stop + compact not 75k** (GitHub #133): Isolated
-  Preview looped `Spawn dests of dest encoder skip. I'll spawn dests of
-  dest encoder skip.` for 19m18s, then compact painted
-  `Context compacted: 75.2k → 75.2k tokens`. Surmount fork of SpaceXAI
-  stream + compact. SpaceXAI `x-grok-doom-loop-check` /
-  `[doom_loop_recovery]` resamples confident *thinking* on Responses
-  (`DoomLoopDetected` is retried). Chat Completions never reports those
-  triggers, and visible assistant walls stayed the operator's to cancel.
-  Surmount `StreamRepetitionGuard` in `xai-grok-sampler` `stream/mod.rs`
-  aborts assistant and thought sentence loops as
-  `SamplingError::RepetitiveGeneration` (Fatal, not retried). Fixture
-  const `DEST_ENCODER_SKIP_LOOP` is `#[cfg(test)]` and **used** by named
-  tests (`-D warnings`). Compact `strip_repetitive_generation` is
-  recovery of that wall in summarizer input, not a second stream
-  breaker. Compact summary cap `COMPACT_SUMMARY_MAX_TOKENS` is 8192.
-  Compact reseed `COMPACT_RESEED_MAX_TOKENS` is 32768 (4 × 8192). After
-  compact, `get_total_tokens` must stay in that reserve, not ~75k.
-  Operator reported Oh My Pi does not loop this way. This tree has no
-  Oh My Pi checkout; do not invent internals. Hunter's razor: client
-  Fatal stop plus compact size cap, keep SpaceXAI server resample
-  configurable. Upstream option: `[doom_loop_recovery] enabled = false`
-  turns off server thinking resample. Client sentence-loop Fatal stays
-  on (that is the Isolated Preview miss). Named tests:
+- [x] **CoT death spiral stop + compact not 75k** (GitHub #133): Surmount
+  `StreamRepetitionGuard` in `xai-grok-sampler` `stream/mod.rs` aborts
+  assistant and thought sentence loops as
+  `SamplingError::RepetitiveGeneration` (Fatal, not retried). SpaceXAI
+  `x-grok-doom-loop-check` / `[doom_loop_recovery]` resamples confident
+  thinking on Responses (`DoomLoopDetected` is retried). Chat Completions
+  never reports those triggers. Fixture const `DEST_ENCODER_SKIP_LOOP` is
+  `#[cfg(test)]` and **used** by named tests (`-D warnings`). Compact
+  `strip_repetitive_generation` recovers that wall in summarizer input,
+  not as a second stream breaker. Compact summary cap
+  `COMPACT_SUMMARY_MAX_TOKENS` is 8192. Compact reseed
+  `COMPACT_RESEED_MAX_TOKENS` is 32768 (4 × 8192). After compact,
+  `get_total_tokens` must stay in that reserve, not about 75k. This tree
+  has no Oh My Pi checkout; do not invent internals. Client Fatal stop
+  plus the compact size cap stays. `[doom_loop_recovery] enabled = false`
+  turns off server thinking resample only. Named tests:
   `dest_encoder_skip_loop_is_repetitive`,
   `dest_encoder_skip_single_sentence_five_times_is_repetitive`,
   `short_repeated_phrase_does_not_stop_the_turn_runaway_loop_still_does`,
@@ -1910,6 +1903,9 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   row is dropped while the lock still has it. paste, smartstring, and
   bincode stay remaining (parents have no drop; no ignore; no vendor).
   Do not fetch crates.io to skip menhera-cooldown.
+  office_oxide is registry 0.1.17. That menhera-cooldown exception is
+  this crate only. Do not vendor. Do not point cargo at crates.io to
+  skip the wait for any other crate.
   Dual-pin: `RESIDUAL.md` Open cargo-audit.
 - [x] **Do not add grok-oss path vendoring (pinned 2026-08-27; path copies gone).**
   Audit-wave `[patch.crates-io]` path copies under `third_party/`
@@ -2510,84 +2506,6 @@ keeps Surmount pages. Do not paste those pages here.
 Also: `user_guide_operator_cli_examples_use_grok_oss` (leftover `grok login` /
 `grok sessions` must not return).
 
-### Dogfood snapshot (2026-08-09)
-
-This section is a **dated operator handoff from 2026-08-09**. It does **not**
-demote later shipped claims in Product, Chrome, or Land above. Source restore
-is not live TUI dogfood. This file does **not** claim a rebuilt interactive
-`grok-oss`. Do not start rebuild or quit from this inventory.
-
-**Read first (next task, recon, or dogfood):**
-
-1. **Operator install gate**: code can be green while old TUIs still run a
-   deleted-inode binary. Checklist:
-   [`.agents/reports/d0-dogfood-checklist-2026-08-09.md`](.agents/reports/d0-dogfood-checklist-2026-08-09.md).
-   Package status for that wave:
-   [`.agents/reports/impl-remaining-plan-wave-2026-08-09.md`](.agents/reports/impl-remaining-plan-wave-2026-08-09.md).
-2. **Shipped in that wave (tree + reports; dogfood only after a later
-   install the operator chooses)**: decisive plan Revise; same-batch
-   `plan.md` write + `exit_plan_mode`; plan decision surface (empty Enter
-   never approves; **Plan ready. Side panel open**); revise/clarify in-flight
-   status; caret empty half `text_primary`; OAuth 403 bad-credentials path;
-   rewind missing intermediate checkpoints; Ctrl+C dismisses rewind; status
-   `[pause]`/`[resume]` + red `[stop]`; soft stop chord-only; composer Enter
-   `send`/`queue`/`interject` cue; compact included SuperGrok period limits
-   meter. Later Product / Chrome bullets and named `fn`s supersede this
-   snapshot when they disagree. Later Product bullets for `/start` and
-   leftover `canceled_turn_resume.json` drop supersede this snapshot. Do
-   not revive idle Clarify as current leftover.
-3. **Still not shipped (honesty leftovers, not a demotion of shipped chrome)**
-   - **Auto-resume after error terminal on rebuild/reopen**: expected
-     operator contract if the last terminal was an error (not only the
-     cancel-resume marker). Document as shipped only when
-     `.agents/reports/impl-rebuild-auto-resume-after-error-2026-08-09.md`
-     (or equivalent) is green in tree. Distinct from continue interrupted
-     turn (`canceled_turn_resume.json`). After any auto-resume, 403
-     bad-credentials may still need `/login`.
-   - **Soft-stop button**: not shipped; soft stop stays `Ctrl+Shift+S` only.
-   - **Mid-sample freeze without cancel**: not shipped (global pause
-     cancels turns; soft stop only stops queue drain after the current
-     turn). Do not invent a media-player freeze metaphor.
-   - **CLI `grok-oss rebuild`**: clap-wired (`Command::Rebuild`,
-     `rebuild_subcommand_parses`). Compiles and restarts every running
-     grok-oss process. Those peers resume in-flight tasks the same way a
-     network interruption does. This CLI process is not re-execed. TUI
-     `/rebuild` still owns persist plus self re-exec.
-   - **`/economic-mode` slash**: pager queues the text only. No
-     BuiltinAction. Economic cap at spawn / model switch / header is
-     shipped.
-   - **SuperGrok Heavy ranking optional label**: not implemented. SuperGrok
-     Heavy is a real distinct weekly pool. This file does not diagnose
-     product usage of that pool.
-4. **Still open (residual, not this install alone)**
-   - Included SuperGrok period flat % / server C4 debit: paste-ready ticket
-     [`.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md`](.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md);
-     never invent included SuperGrok period used % on the client.
-   - Thoughtful todo tracking process (session board hygiene; **not**
-     file-level edit verify):
-     [`RESIDUAL.md`](RESIDUAL.md) Open.
-5. **Useful regression filters from that wave only** (not a substitute for
-   the seven-class land list):
-
-```bash
-cargo test -p xai-grok-pager --lib -- after_revise re_present_after_revise \
-  paint_composer_box_cursor_grapheme_phases_keep_letter \
-  left_through_letters_empty_phase_not_neon
-cargo test -p xai-grok-shell --lib -- same_batch_plan_write_before_exit_plan_mode_returns_new_body \
-  replay_skips_missing_intermediate_checkpoint
-cargo test -p xai-grok-sampling-types --lib -- forbidden_bad_credentials
-cargo test -p xai-grok-sampler --lib -- api_403_bad_credentials classify_forbidden
-cargo test -p xai-grok-pager --lib -- work_control_chrome_matrix_pause_not_cancel_stop_not_pause \
-  pause_button_click_dispatches_global_pause_not_cancel
-
-# File-level infer-from-path verify (2026-08-15; extra class, not that wave)
-cargo test -p xai-grok-tools --lib rust_edit_verify
-cargo test -p xai-grok-tools --lib dangerous_cargo
-```
-
-Process law (plain English, no bad metaphors): host + project `AGENTS.md`
-§ Prose + tone / hard constraint 4. Not re-dumped here.
-
 ### What recon keeps / clobbers
 
 | Path | Import | Put-history | Join (`-s ours`) |
@@ -2675,13 +2593,13 @@ or join. Adjacent to this paragraph, **Named tests are contracts**,
 lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 [`AGENTS.md`](AGENTS.md) § *Wasted human time* (hard constraint 24).
 
-**L2 floor prompt and L1 mid-turn Enter (pinned 2026-10-13).** These sentences say what the three named tests require. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint.
+**L2 floor prompt and L1 mid-turn Enter (pinned 2026-10-13).** These sentences say what the three named tests require. Do not reshape the asserts to match the code.
 
 - `l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn` requires Enter with text in the L2 floor prompt to send that text to that L2. That Enter must not start a new L1 turn. A hidden child view must not send on Enter.
 - `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count` requires empty Enter on the L2 floor to open the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count. It does not list specialist names in place of that count. `q` or Esc from that L3 returns to the L2 and does not cancel the L2.
 - `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan` requires Enter with text in the L1 Operator box, while a turn is running, to soft-interject into that turn on the L1 session. Empty Enter must not approve a plan.
 
-**Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is a paid product. Never tell the Operator to /login. Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. GitHub issue 203.
+**Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. Do not reshape the asserts to match the code. SuperGrok is a paid product. Never tell the Operator to /login. GitHub issue 203.
 
 - Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
 - Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
@@ -2707,17 +2625,17 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the parent session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. A parent JWT that actually expired still paints that sentence once.
 - Waiting parent 401 after login retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_the_turn_resumes`, `login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_login_retries_with_live_login_jwt`, `credentials_toast_parent_401_without_no_auth_context_after_login_retries_with_live_login_jwt`.
 
-**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth`, `already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`, `authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
+**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth`, `already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`, `authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
 
-**Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
+**Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. Do not reshape the asserts to match the code. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
 
-**Session board row click (pinned 2026-10-16).** These sentences say what a painted session-board row must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. A left click on a painted session board row (the Ctrl+T todo list, not only the Tasks overlay) opens that task so the Operator can review it. Completed rows are clickable. Named test: `clicking_a_painted_session_board_row_opens_that_task`. Keep `clicking_a_painted_in_progress_tasks_row_opens_that_task` for the Tasks overlay. That overlay test is not this board.
+**Session board row click (pinned 2026-10-16).** These sentences say what a painted session-board row must do. Do not reshape the asserts to match the code. A left click on a painted session board row (the Ctrl+T todo list, not only the Tasks overlay) opens that task so the Operator can review it. Completed rows are clickable. Named test: `clicking_a_painted_session_board_row_opens_that_task`. Keep `clicking_a_painted_in_progress_tasks_row_opens_that_task` for the Tasks overlay. That overlay test is not this board.
 
-**Plan present Hello? (pinned 2026-10-16).** These sentences say what plan present must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. Operator text `Hello? Are you stuck?` during plan present does not freeze the UI, does not paint `Plan: Exit` into an empty transcript, and does not leave `Run Plan: Exit 0.0s` on an empty screen. That text is a soft interject or a present-time comment. Named test: `operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit`. Isolated Preview idle Human Enter still sends (`isolated_preview_send_prompt_is_human_turn_not_only_plan_comment`). Revise Prompt idle still asks the model (`revise_prompt_send_prompt_still_asks_the_model`). Empty Enter never Approves and never Exits. Click Exit / `q` still abandon.
+**Plan present Hello? (pinned 2026-10-16).** These sentences say what plan present must do. Do not reshape the asserts to match the code. Operator text `Hello? Are you stuck?` during plan present does not freeze the UI, does not paint `Plan: Exit` into an empty transcript, and does not leave `Run Plan: Exit 0.0s` on an empty screen. That text is a soft interject or a present-time comment. Named test: `operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_plan_exit`. Isolated Preview idle Human Enter still sends (`isolated_preview_send_prompt_is_human_turn_not_only_plan_comment`). Revise Prompt idle still asks the model (`revise_prompt_send_prompt_still_asks_the_model`). Empty Enter never Approves and never Exits. Click Exit / `q` still abandon.
 
-**Nested explore spawn while writing or presenting (pinned 2026-10-16).** These sentences say what nested spawn must do while plan mode is writing or presenting. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. The advertised `spawn_subagent` description says that. Named tests: `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting`, `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve`, `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`, `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`. Follow-up to a still-running L2 is not a start. A `plan` type is not explore or implement.
+**Nested explore spawn while writing or presenting (pinned 2026-10-16).** These sentences say what nested spawn must do while plan mode is writing or presenting. Do not reshape the asserts to match the code. While `plan_mode_active` is writing or presenting, nested explore and implement jobs are not started. Nested research and implement start after Approve. The advertised `spawn_subagent` description says that. Named tests: `nested_explore_and_implement_are_not_started_while_plan_mode_active_is_writing_or_presenting`, `plan_mode_prepare_tool_call_refuses_explore_spawn_until_approve`, `build_task_description_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`, `orchestrator_prompt_does_not_tell_the_model_to_launch_explore_while_writing_or_presenting`. Follow-up to a still-running L2 is not a start. A `plan` type is not explore or implement.
 
-**Wayland doctor finding when wl-copy is present (pinned 2026-10-16).** These sentences say what `grok doctor` / `/doctor` must do for `terminal.wayland-data-control`. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint.
+**Wayland doctor finding when wl-copy is present (pinned 2026-10-16).** These sentences say what `grok doctor` / `/doctor` must do for `terminal.wayland-data-control`. Do not reshape the asserts to match the code.
 
 - If `wl-copy` is already on PATH, doctor must not emit this finding. `diagnose_wayland_data_control(true, false, true)` returns None. There is no Issue and no "install wl-clipboard" note. Named test: `wayland_no_data_control_warns`. Doctor report path: `standalone_wayland_with_wl_copy_is_not_an_issue`.
 - If `wl-copy` is missing on a Wayland session that does not expose data-control, doctor keeps a real Issue and a package install hint that names more than one distro family (pacman, dnf, and apt). Do not hardcode only apt as if every Linux is Debian. Named test: `wayland_no_data_control_missing_wl_copy_suggests_install`.
@@ -2925,20 +2843,20 @@ postpaid Billing Credits.
   stays. That click fixture does not seed a SuperGrok dollar-credits
   remaining, so the words `Limits and Credits` remain its click target.
 
-**Transcript message colors (pinned 2026-10-07).** These sentences say what the transcript must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. The message body stays white. The left accent carries the color.
+**Transcript message colors (pinned 2026-10-07).** These sentences say what the transcript must paint. Do not reshape the asserts to match the code. The message body stays white. The left accent carries the color.
 
 - The Operator's message body stays white. On DOGE that is `text_primary`, not `accent_user`. The left accent rail (`┃`) is Operator green, `accent_user` (`Rgb(0, 255, 0)` on DOGE). That rail stays present, including when the prompt is collapsed, because the body is still on screen. The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. Do not paint the caret magenta. Do not change that blink rule. Named test: `operator_message_text_stays_white_and_the_left_accent_is_green`. `doge_accent_user_is_pure_green_for_human` stays the palette proof that `accent_user` is pure green. `user_prompt_block_accent_is_static_human_rail` and `user_prompt_block_accent_is_green_rail_under_doge_default` stay.
 - Chain of thought body stays white (`text_primary`). Its left accent, when the thought is open, is cyan, `accent_system` (`Rgb(0, 255, 255)` on DOGE). `accent_thinking` stays magenta (`Rgb(255, 0, 255)`) and is not that left accent. No new theme key was added. Named test: `chain_of_thought_text_stays_white_and_the_left_accent_is_cyan`.
 - The Agent's response body stays white (`text_primary`). Its left accent, while the turn is active, is magenta, `accent_running` (`Rgb(255, 0, 255)` on DOGE). A finished turn does not keep a permanent rail. Named test: `agent_response_text_stays_white_and_the_left_accent_is_magenta`.
 
-**Operator transcript wrap (pinned 2026-10-15).** These sentences say what the Operator bubble must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The Operator transcript must show only the typed Operator text plus the image chip (`[Image #1]`). It must not paint `always_applied_workspace_rules`, skill catalogs, or other model-facing wrap. Named test: `operator_message_does_not_paint_injected_workspace_rules`.
+**Operator transcript wrap (pinned 2026-10-15).** These sentences say what the Operator bubble must paint. Do not reshape the asserts to match the code. SuperGrok is paid. The Operator transcript must show only the typed Operator text plus the image chip (`[Image #1]`). It must not paint `always_applied_workspace_rules`, skill catalogs, or other model-facing wrap. Named test: `operator_message_does_not_paint_injected_workspace_rules`.
 
-**Use limits click and header figure (pinned 2026-10-07).** These sentences say what the screen must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct.
+**Use limits click and header figure (pinned 2026-10-07).** These sentences say what the screen must do. Do not reshape the asserts to match the code. SuperGrok is paid. The meters stay distinct.
 
 - A left click on the painted words Use limits changes the card. The hit rect is the footer control that paints those letters, stored from the last paint. Esc, the close control, Exit, comment, and revise stay their own actions. The click writes MeterSource::Included and does not set use_console. It does not hop to the console API key. On a live personal session, and on a hard-expired personal session beside a Team JWT, the next request draws included SuperGrok period limits. The card shows Using limits. The Use limits control is gone because the choice was accepted. The card does not say included limits are not being drawn for the next request. When that meter's usage reading exists, the header shows percent used (`limits 28%` in the personal fixture and in the Team JWT click fixture). When that usage reading does not exist, the header does not invent `limits 0%`, `limits N%`, or `$0`. Named test: `clicking_use_limits_on_the_limits_card_is_handled`. The screen where the operator has not clicked Use limits stays `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`.
 - While the next request spends a credit meter that has a remaining, the header shows those dollars. The words Limits and Credits are only the missing-reading label. The open Limits card and the header use the same remaining for that meter. The header does not invent $0 or limits 0%. Team postpaid Billing Credits, SuperGrok dollar credits, and console team prepaid / console API credits stay distinct. Named test: `header_shows_the_same_team_postpaid_figure_the_open_card_shows`. The fixture figure is `$442.97` when the next request is not drawing included SuperGrok period limits. `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows` stays. These sentences are not a claim that the tests already passed.
 
-**Limits card Personal and Business SuperGrok Heavy rows (pinned 2026-10-16).** These sentences say what the Limits card must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct. Matching day counts are not a shared pool.
+**Limits card Personal and Business SuperGrok Heavy rows (pinned 2026-10-16).** These sentences say what the Limits card must paint. Do not reshape the asserts to match the code. SuperGrok is paid. The meters stay distinct. Matching day counts are not a shared pool.
 
 The Business tab paints only the Business SuperGrok Heavy row. It does not paint Personal SuperGrok Heavy. Remaining percent on that row is that business identity's included Heavy weekly pool. SuperGrok dollar credits on that row are that identity's prepaid remaining, including known zero as `$0.00`. The reset line names days and hours from that business meter's own `nextReset` / `period_end`. Named test: `business_tab_paints_only_the_business_supergrok_heavy_row`.
 
@@ -2946,7 +2864,7 @@ The Personal tab paints only the Personal SuperGrok Heavy row. It does not paint
 
 Each Heavy reset line names days and hours from that meter's own nextReset. Personal `Resets in: 6d 3h` and Business `Resets in: 6d 11h` are not the same clock. `earliest_reset_at` is not the Business tab's painted countdown. Named test: `each_heavy_reset_line_names_days_and_hours_from_that_meters_next_reset`. Keep `modal_content_includes_countdown_d_h_m_s`. Do not weaken it to days only. Do not reshape Use limits, team JWT, header credits, or Accounts list tests. A new Heavy row must not invent `$0` or `limits 0%` on unread Personal-tab fixtures.
 
-**Plan reminder and plan-mode paths (pinned 2026-10-12).** These sentences say what those checks must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's code.
+**Plan reminder and plan-mode paths (pinned 2026-10-12).** These sentences say what those checks must do. Do not reshape the asserts to match the code.
 
 The plan reminder puts open questions in Read this first. Named test: `plan_reminder_puts_open_questions_in_read_this_first`.
 
@@ -3454,301 +3372,21 @@ Full filter catalog (why each exists + every residual Validate honesty block):
 Open residual still points at the same commands under RESIDUAL § *Validate
 honesty* (D0 can demote; the catalog is durable).
 
-Operator cheat sheet (post-import / post-onto tip). `rg` each identifier for
-a matching `fn` first:
+The command list for each class lives in that catalog. Do not copy it here.
+After recon, run `just upstream-assert-process-pins` (or
+`grok-nix-helper assert-process-pins HEAD`), then the seven-class filters in
+the catalog, then `rg` each identifier for a matching `fn`. `just check` is
+the full gate before push. It does not replace a missing catalog `fn`.
 
-```bash
-just upstream-assert-process-pins
-grok-nix-helper assert-process-pins HEAD   # or onto tip
+Leader drain is not the `/rebuild` TUI persist path. An empty
+`models_cache.json` miss is not the `from_config` cold-catalog filter. Do not
+add a filter name that has no matching `fn`. That includes
+`retry_chrome_soft_reconnects_*`, `shell_collision`, and
+`default_title_items_include_agents`. Oh My Pi is not in this tree.
 
-# 1. CLI identity (first token grok-oss; substring "grok" is not enough)
-cargo test -p xai-grok-pager --lib -- product_version_line_uses_grok_oss_not_bare_grok \
-  resume_session_command_uses_grok_oss user_guide_resume_and_version_examples_use_grok_oss \
-  product_cli_name_is_grok_oss print_exit_resume_hint_writes_expected_lines \
-  user_guide_operator_cli_examples_use_grok_oss welcome_badge_brands_grok_oss \
-  hero_subtitle_brands_grok_oss tutorial_list_title_brands_grok_oss
-cargo test -p xai-grok-pager-bin --test version_without_tty
 
-# 2. Config is a surface (/settings rows + readers + DOGE picker; serde-only is not enough)
-cargo test -p xai-grok-pager --test settings_e2e -- hide_header always_expand_thinking \
-  scrub_ascii_punct allow_worktree bubble_copy_buttons plan_approval_park
-cargo test -p xai-grok-pager --lib -- theme_choices_include_doge_and_default_is_doge \
-  hide_header_zeroes always_expand_thinking ctrl_t_expand_is_default \
-  ctrl_t_collapse_is_default \
-  bubble_copy_buttons_on append_bubble_copy_button_paints \
-  clicking_human_bubble_copy clicking_assistant_bubble_copy \
-  clicking_wide_human_bubble_copy
-cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui \
-  prime_applies_always_expand_thinking_from_ui
-cargo test -p xai-grok-shell --lib -- resolve_subagents_copies_allow_worktree
 
-# 3. Token Economy ledger /spend (schema-only is not enough; extra SQL, not SuperGrok dollar credits)
-cargo test -p xai-grok-shell --lib -- spend_path_ingests_usage_jsonl_and_records_reconciliation
-cargo test -p xai-grok-pager --lib -- show_spend_ingests_usage_jsonl_and_is_not_empty_default
 
-# 4. DOGE / Surmount chrome (theme file existing is not paint)
-cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config \
-  doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan \
-  as_doge_human_green_named_ansi_is_rgb_0_255_0 osc12_named_ansi_green_is_doge_rgb_0_255_0
-cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry_renderer_paints_green_rail \
-  paint_composer_box_cursor_uses_human focused_composer_paints_human_green_box_caret \
-  doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
-  agent_message_block_accent info_line_model_name_uses_accent_model \
-  status_bar_pushes_credits_compact_included_supergrok_period_limits \
-  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
-  clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week \
-  credits_tab_shows_personal_credits_separate_from_console_api_credits_and_a_failed_fetch_is_not_a_balance \
-  use_credits_spends_console_api_credits_while_limits_remain_and_does_not_spend_personal \
-  real_402_uses_console_api_credits_when_available_and_a_100_percent_printout_does_not \
-  both_limits_and_console_api_credits_exhausted_shows_days_hours_minutes_until_reset \
-  hit_credits_click_dispatches_show_limits \
-  titled_doge_composer_frame_is_prompt_border_not_context_yellow \
-  plan_approval_footer_paints_five_cta_vocabulary \
-  auto_compact_completed_preserves_todo_board \
-  todo_badge_names_tasks_not_only_fraction \
-  status_header_todo_badge_names_tasks \
-  nested_l2_overlay_todo_toggle_stays_findable \
-  forked_session_status_header_paints_switcher_and_dashboard \
-  forked_session_status_header_clicks_open_dashboard_and_cycle \
-  load_session_restores_fork_family_from_disk
-
-# 5. Dual-auth hop after included SuperGrok period limits are full (rank helpers are not hop)
-cargo test -p xai-grok-shell --lib -- sampling_config_auto_use \
-  sampling_config_hops_to_sibling_included_before_dollar_credits \
-  afterburner_does_not_skip_mark_when_sibling_has_included_remaining \
-  resolve_model_to_sampling_config_auto_use \
-  align_after_billing_switches_sticky_personal_full_to_business_included \
-  prepare_sampler_for_turn_aligns_to_ranked_included_primary \
-  combined_included_remaining_sums_distinct_personal_and_business_pools \
-  combined_included_remaining_does_not_double_count_unified_pool \
-  combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool \
-  pick_prefers_business_included_before_personal_when_both_have_remaining \
-  order_credentials_business_included_before_personal_when_both_have_room \
-  limits_snapshot_second_process_within_the_hour_does_not_http \
-  limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
-  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
-  limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once \
-  limits_snapshot_never_writes_access_tokens \
-  billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
-  personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
-  business_with_no_period_limits_payload_still_switchable_via_use_business \
-  use_personal_switches_back_from_business_pin \
-  second_session_asks_the_first_over_ipc_and_does_not_call_the_api \
-  forced_refresh_inside_one_minute_does_not_call_the_api_again \
-  when_the_first_session_exits_exactly_one_successor_calls_the_api
-cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining \
-  active_spend_driver_stays_included_while_any_distinct_pool_has_remaining \
-  matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool
-
-# 6. Last-session on start
-cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_when_one_exists \
-  materialize_new_auto_stays_welcome_when_no_last_session \
-  materialize_new_auto_does_not_open_last_when_headless \
-  from_pager_args_opens_last_session_on_start
-
-# 7. Product skills are not a Python runtime (non-excepted .py or dropped intercept is a failed land)
-cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
-  extract_archive_skips_non_excepted_skill_python \
-  product_repo_skill_roots_have_no_non_excepted_python \
-  default_product_skills_include_polish_and_subagent \
-  default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash
-cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
-cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
-  plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell \
-  grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell \
-  generated_python_payload_is_not_skill_stub_intercept
-
-# Extra: plan present != approve + modal-free typing
-cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_approve \
-  empty_enter_on_revise_prompt_does_not_approve \
-  soft_park_empty_ctrl_c_abandons_plan_approval \
-  exit_plan_mode_keeps_mid_compose_draft_and_a_types \
-  exit_plan_mode_modal_park_does_not_steal_mid_compose_keys \
-  exit_plan_mode_empty_present_printable_goes_to_composer \
-  exit_plan_mode_shows_overlay_even_in_yolo
-cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval
-
-# Extra: pause / Clear finished (not paint-only)
-cargo test -p xai-grok-pager --lib -- work_control_chrome_matrix_pause_not_cancel_stop_not_pause \
-  pause_button_click_dispatches_global_pause_not_cancel \
-  idle_with_subagents_paints_pause_and_stop_hits \
-  global_paused_idle_paints_resume_not_stop \
-  clear_finished_action_idle_is_quiet_not_neon_green_or_magenta \
-  clear_finished_click_does_not_open_subagent
-
-# Extra: /rebuild SHA-aware (fail-does-not-signal is not enough)
-cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers \
-  build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
-  peer_relaunch_accepts_same_semver_different_sha \
-  peer_relaunch_declines_equal_identity_on_same_path \
-  peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
-  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart \
-  rebuild_must_exec_workspace_binary_not_stale_cargo_bin \
-  installed_identity_must_match_workspace_git_sha
-cargo test -p xai-grok-pager --lib -- tui_rebuild_starts_from_session_workspace_not_process_cwd
-cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_identity
-
-# Extra: /rebuild signals every live grok-oss PID (SHA-aware is not this list)
-cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_key \
-  peer_pids_to_signal_excludes_self_dead_and_non_grok
-
-# Extra: /rebuild restarts every running grok-oss process and resumes in-flight tasks
-cargo test -p xai-grok-pager --lib -- \
-  rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption
-
-# Extra: /rebuild TUI persist like a network interrupt (fork-owned)
-# Leader drain is not that persist path.
-cargo test -p xai-grok-pager --lib -- \
-  handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect \
-  handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it \
-  handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
-  handle_rebuild_done_persists_plan_feedback_draft_and_plan_md \
-  handle_rebuild_done_keeps_nested_subagents_for_resume \
-  rebuild_and_relaunch_starts_while_nested_subagents_are_running \
-  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart \
-  post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha \
-  tui_rebuild_starts_from_session_workspace_not_process_cwd \
-  restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty \
-  rebuild_subcommand_parses \
-  prompt_wal_appends_on_enter_before_model_wait \
-  prompt_wal_appends_on_mid_turn_interject \
-  prompt_wal_appends_on_queue_enqueue \
-  prompt_wal_appends_on_approve_notes \
-  ctrl_enter_mid_turn_dispatches_send_interject \
-  queue_send_now_click_dispatches_send_interject \
-  empty_ctrl_enter_mid_turn_does_not_send \
-  enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
-  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
-  l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
-  enter_send_must_not_leave_duplicate_prompt_in_composer \
-  enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
-  enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline \
-  arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path \
-  session_load_restores_wal_send_missing_from_prompt_history
-cargo test -p xai-grok-update --lib -- export_git_index_omits_unstaged_dirty_file \
-  stash_keep_index_hides_unstaged_wip_from_compile_worktree
-cargo test -p xai-grok-shell --lib -- \
-  relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect \
-  relaunch_drain_keeps_parent_turn_until_idle_like_disconnect
-
-# Extra: from_config cold catalog (empty models_cache.json miss is NOT this filter)
-cargo test -p xai-grok-shell --lib -- from_config_without_prefetch_produces_usable_catalog
-
-# Extra: session/load keeps seeded custom model on Chat Completions (not last-session on start)
-cargo test -p xai-grok-shell --lib -- keep_unverified_persisted_model_keeps_seeded_custom_slug \
-  seeded_test_model_keeps_chat_completions_backend
-cargo test -p xai-grok-shell --test test_image_strip_recovery -- \
-  poisoned_image_session_recovers_within_the_failing_turn
-
-# Extra: nucleo reuse-per-root
-cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_search_per_root \
-  distinct_roots_each_keep_one_search get_results_does_not_keep_a_stale_search_alive
-
-# Extra: always-three-layer product prompt
-cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
-cargo test -p xai-grok-tools --lib -- default_max_allows_l2_to_spawn_l3
-
-# Extra: file-level infer-from-path verify (not crate-wide cargo)
-cargo test -p xai-grok-tools --lib rust_edit_verify
-cargo test -p xai-grok-tools --lib compiler_probe_junk
-cargo test -p xai-grok-tools --lib -- rustfmt_argv_edition_2024_config_and_absolute_files \
-  clippy_argv_lints_the_edited_file_not_crate_lib \
-  clippy_argv_is_file_level_not_package_lib \
-  clippy_driver_uses_temp_out_dir_not_the_workspace_root \
-  write_refuses_rmeta_at_workspace_root_and_does_not_create_the_file \
-  rustc_oneshot_without_out_dir_is_refused_and_does_not_spawn_shell \
-  dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell \
-  dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell \
-  dangerous_cargo_test_package_lib_filter_is_not_refused
-
-# Extra: ACP per-path write lock CoW + share is allowed (GitHub #129)
-cargo test -p xai-grok-tools --lib -- \
-  after_write_returns_held_is_empty_lock_must_be_released \
-  reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot \
-  two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file \
-  spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error
-
-# Extra: L1 Subagents list is L2-only plus a live L3 count
-cargo test -p xai-grok-pager --lib -- \
-  live_subagent_list_shows_only_l2_and_reports_live_l3_count \
-  l2_row_shows_live_l3_count_not_specialist_names
-
-# Extra: live Subagents list is still-running only; already_exited overlay closeout
-cargo test -p xai-grok-pager --lib -- \
-  kill_already_exited_dismisses_paused_implementer_overlay \
-  restore_nested_occupancy_does_not_unfinish_or_revive_dead_host \
-  running_count_matches_listed_live_l2_not_l3 \
-  kill_already_completed_drops_live_list_responding_and_still_running_cue
-
-# Extra: Compacting Subagents row open button still opens
-cargo test -p xai-grok-pager --lib -- \
-  click_tasks_open_on_compacting_row_opens_subagent \
-  click_tasks_open_on_last_painted_row_opens_subagent \
-  click_tasks_kill_on_compacting_row_emits_kill \
-  open_subagent_fullscreen_sets_active_while_child_is_auto_compacting \
-  nested_compact_chrome_does_not_steal_parent_fullscreen_overlay \
-  nested_compact_chrome_must_not_steal_parent_tui_scroll
-
-# Extra: Ctrl+C two-stage, /model last Tab, Isolated Preview glass search,
-# Isolated Preview screenshot paste (GNOME All Markup Copy is an image)
-cargo test -p xai-grok-pager --lib -- \
-  isolated_preview_handle_input_ctrl_c_with_text_clears_and_stays \
-  isolated_preview_handle_input_second_empty_ctrl_c_exits \
-  isolated_preview_handle_input_running_turn_draft_ctrl_c_does_not_cancel_turn \
-  leftover_isolated_preview_handle_input_ctrl_c_clears_then_exits \
-  unique_model_slash_tab_switches_now_empty_composer_no_send \
-  unique_model_slash_enter_switches_now_no_operator_model_chat \
-  unique_m_slash_tab_switches_now \
-  complete_typed_model_xhigh_tab_switches_now_with_effort \
-  command_phase_unique_model_tab_still_completes \
-  multi_row_model_tab_stays_complete_not_switch \
-  isolated_preview_unique_model_tab_switches_now_does_not_rowwalk \
-  plan_preview_title_bar_search_glass_immediately_left_of_copy \
-  isolated_preview_search_query_plan_matches_plan_and_plan \
-  isolated_preview_search_glass_clickable_next_to_copy_and_expand \
-  isolated_preview_composer_slash_stays_slash_not_line_search \
-  isolated_preview_handle_input_n_jumps_hits_after_search \
-  isolated_preview_gnome_all_markup_copy_title_with_raster_is_image_chip \
-  isolated_preview_search_open_paste_does_not_fill_search \
-  mill_event_paste_gnome_all_markup_copy_title_with_raster_does_not_insert_title \
-  gnome_all_markup_copy_title_still_probes \
-  user_guide_ctrl_c_two_stage_clears_then_exits \
-  user_guide_unique_model_tab_switches_now \
-  user_guide_isolated_preview_search_glass \
-  user_guide_gnome_all_markup_copy_is_image
-
-# Extra: turbo planning (Surmount vs SpaceXAI; off = session effort)
-cargo test -p xai-grok-pager --lib -- \
-  session_medium_enter_plan_request_uses_xhigh_and_lower_right_shows_xhigh \
-  exit_or_approve_plan_returns_session_medium_effort \
-  turbo_planning_settings_off_plan_turn_stays_session_medium
-
-# Extra: soft process-rule reminders (spawn still succeeds)
-cargo test -p xai-grok-tools --lib -- \
-  process_rule_reminder_configured_third_l2_still_spawns \
-  process_rule_reminder_text_in_nested_spawn_prompt \
-  process_rule_reminders_off_nested_spawn_has_no_extra_reminder_text
-
-# Extra: Subagents list compact window counts and TECH.md (not billing meters)
-cargo test -p xai-grok-pager --lib -- \
-  subagents_list_omits_the_word_tokens \
-  subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists \
-  nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window \
-  nested_specialist_windows_are_not_double_counted_in_the_total \
-  l2_row_paints_present_plus_past_atomic_total_including_specialists \
-  parent_context_chip_is_l1_window_and_does_not_add_nested_windows \
-  format_live_subagents_list_row_uses_live_sample_not_tracker_high_water \
-  subagents_list_truncation_does_not_split_compact_count \
-  subagents_list_shows_measured_tokens_per_nested_l2 \
-  format_subagents_list_description_shows_measured_tokens_suffix \
-  format_subagent_label_shows_measured_tokens_suffix \
-  tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
-  subagents_list_layout_does_not_read_chat_history_jsonl \
-  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water \
-  subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot \
-  footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice
-cargo test -p xai-grok-shell --lib -- \
-  grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once
 
 # Extra: /start + leftover cancel-resume marker drop
 cargo test -p xai-grok-pager --lib -- \
@@ -3901,7 +3539,7 @@ Actions (supply-chain boundary). Humans package from a trusted tree when ready.
 |---------|------|
 | **`just check`** or **`just ci`** | Full Nix local gate (flake-meta + prep + fmt/clippy/tests): **run before push**. Uses Nix on this machine or configured builders. This is not host cargo. The remote gate is `just check-remote`. |
 | **`just check-local`** | Host cargo gate when the VPS is down. Runs `cargo fmt --all -- --check`, then workspace `cargo clippy --all-targets --locked` with `-D warnings`, then `cargo nextest run --workspace --locked`, then `cargo test --doc --workspace --locked`. Nextest compile and link, and doctest `--jobs`, cap at 4 (`CARGO_LINK_JOBS`). The recipe body does not run flake-meta, nix build, or the remote recipes. `just check` / `just ci` still use Nix. Remote remains `just check-remote`. Named test: grok-nix-helper `justfile_contracts` `just_check_local_is_cargo_only_and_does_not_nix`. |
-| **`just check-remote`** | Optional. Rsyncs a filtered source snapshot to `/home/nixbuilder/grok-oss-src` (`rsync -a --delete --exclude target`; changed files only; never a cargo `target` directory) and runs flake metadata there. Then runs the same full cargo gate as `just check` / `just test` on that machine: `cargo fmt --all -- --check`, then workspace clippy as `cargo check --workspace --all-targets --locked` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` and warnings denied, then `cargo nextest run --workspace --locked`, then `cargo test --workspace --doc --locked`. Incremental cargo output stays at `/home/nixbuilder/grok-oss-target` on the builder (`CARGO_TARGET_DIR`, `CARGO_INCREMENTAL=1`), outside the synced tree so rsync `--delete` does not ingest it. This recipe does not zstd or upload `target`, and it does not `nix build` `#workspace-cargo-quality` (that derivation discards the compile when the source hash changes). `nix develop` of `path:/home/nixbuilder/grok-oss-src` supplies cargo, rustc, clippy, and nextest. The dev shell linker is the Nix wrapper, which reports `collect2: impure path used in link` for an output outside a Nix build directory, so those cargo steps use that toolchain with an unwrapped linker. The receipt is `/home/nixbuilder/grok-oss-target/quality-summary.txt` (fmt, clippy, the nextest `Summary [` line, doctests). A missing summary line exits 2. rustc requires that builder's `surmount-remote` feature and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. The preflight still requires that feature and will not fall back to rustc on this laptop. Compile jobs are 64. Link jobs are 32. The measured nix-daemon MemoryMax is 192G. This session did not lower it. `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. The cargo profile is **dev**, the same profile as local `just test-clippy`, not a release check. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. Agents may run this recipe (pinned 2026-09-02; one live run at a time; do not restart at five minutes). |
+| **`just check-remote`** | Optional. Rsyncs a filtered source snapshot to `/home/nixbuilder/grok-oss-src` (`rsync -a --delete --exclude target`; changed files only; never a cargo `target` directory) and runs flake metadata there. Then runs the same full cargo gate as `just check` / `just test` on that machine: `cargo fmt --all -- --check`, then workspace clippy as `cargo check --workspace --all-targets --locked` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` and warnings denied, then `cargo nextest run --workspace --locked`, then `cargo test --workspace --doc --locked`. Incremental cargo output stays at `/home/nixbuilder/grok-oss-target` on the builder (`CARGO_TARGET_DIR`, `CARGO_INCREMENTAL=1`), outside the synced tree so rsync `--delete` does not ingest it. This recipe does not zstd or upload `target`, and it does not `nix build` `#workspace-cargo-quality` (that derivation discards the compile when the source hash changes). `nix develop` of `path:/home/nixbuilder/grok-oss-src` supplies cargo, rustc, clippy, nextest, python3, bubblewrap, and util-linux. The cargo steps re-exec under bubblewrap with a private `/tmp` and a regular `/etc/hosts`. They bind the host `/etc/passwd` over the overlay copy, because that copy is owned by the builder user. They keep only `/nix/store` entries on `PATH`, which is where `unshare` has to be found. Built-in devbox re-execs bubblewrap even when `/data` is absent, so Landlock still applies inside that sandbox. They unset `SSH_CONNECTION`, `SSH_TTY`, `SSH_CLIENT`, and `ET_VERSION` so the batch is not treated as a remote terminal. The dev shell linker is the Nix wrapper. That wrapper finds Scrt1.o and reports `collect2: impure path used in link` when `NIX_ENFORCE_PURITY` is 1 and the link output is outside a Nix build directory. Those cargo steps keep the wrapper and set `NIX_ENFORCE_PURITY=0`. An unwrapped gcc cannot open Scrt1.o. The receipt is `/home/nixbuilder/grok-oss-target/quality-summary.txt` (fmt, clippy, the nextest `Summary [` line, doctests). A missing summary line exits 2. rustc requires that builder's `surmount-remote` feature and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. The preflight still requires that feature and will not fall back to rustc on this laptop. Compile jobs are 64. Link jobs are 32. The measured nix-daemon MemoryMax is 192G. This session did not lower it. `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. The cargo profile is **dev**, the same profile as local `just test-clippy`, not a release check. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. Agents may run this recipe (pinned 2026-09-02; one live run at a time; do not restart at five minutes). |
 | **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. Agents must not run `just test-remote` / `just cargo-remote` unless the operator whitelist those in the same words. Agents may run `just check-remote` (pinned 2026-09-02; one live run at a time; do not restart at five minutes). The operator owns the VPS builder (pinned 2026-08-25). When a session is explicitly told to run one of those recipes as proof, it must start them as a background job with a long wait (timeout 0 or at least twenty minutes). A five-minute foreground wait that SIGKILLs a still-running VPS compile, then starts the same recipe again, is a failed wait policy (pinned 2026-08-28). Nested grok-oss agents inherit production bash wait policy (auto-background at the wait cap, ten-hour foreground ceiling). |
 | **`just test`** | Quality suite without re-running full flake prep |
 | **`just build` / install** | Optional release-style package (not CI) |

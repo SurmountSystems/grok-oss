@@ -7253,15 +7253,16 @@ dependencies = [
 
 [[package]]
 name = "office_oxide"
-version = "0.1.16"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96174357b389a992d7864db7a7a10a1254b82716cdfc40bee54f1da1234291bf"
+checksum = "d1985d384db629099807a236b6aa07f7cc8f7d0b4e821e02b8aea7175de4e164"
 dependencies = [
  "atoi_simd",
  "encoding_rs",
  "fast-float2",
  "flate2",
  "log",
+ "memchr",
  "quick-xml 0.42.0",
  "serde",
  "serde_json",

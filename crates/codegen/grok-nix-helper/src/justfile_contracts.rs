@@ -228,6 +228,14 @@ fn check_remote_quotes_quality_attr_and_nix_retry_uses_argv() {
         "check-remote must set CARGO_INCREMENTAL=1:\n{remote}"
     );
     assert!(
+        remote.contains("export NIX_ENFORCE_PURITY=0"),
+        "check-remote must turn off the Nix linker purity check so objects can live outside a Nix build directory:\n{remote}"
+    );
+    assert!(
+        !remote.contains("grok-oss-unwrapped-link"),
+        "check-remote must keep the Nix cc wrapper so the link can open Scrt1.o:\n{remote}"
+    );
+    assert!(
         remote.contains("mkdir -p /home/nixbuilder/grok-oss-target"),
         "check-remote must create the builder target directory outside the synced tree:\n{remote}"
     );
@@ -1118,7 +1126,7 @@ fn workspace_lockfile_has_no_yanked_aes_chacha20_spin() {
             && !manifest.contains("RustCrypto/stream-ciphers")
             && !manifest.contains("git = \"https://github.com/rustls/rustls\"")
             && !manifest.contains("git = \"https://github.com/yfedoseev/office_oxide\""),
-        "chacha20 0.10.2, rustls 0.23.46, and office_oxide 0.1.15 come from the 7-day index, not a git pin or a path copy:\n{manifest}"
+        "chacha20 0.10.2 and rustls 0.23.46 come from the 7-day index. office_oxide 0.1.17 is the crates.io release named on 2026-11-15, ahead of that delay. None of them is a git pin or a path copy:\n{manifest}"
     );
     let lock = read(&root, "Cargo.lock");
     for (name, version) in [
@@ -1141,7 +1149,7 @@ fn workspace_lockfile_has_no_yanked_aes_chacha20_spin() {
     for (name, version) in [
         ("chacha20", "0.10.2"),
         ("rustls", "0.23.46"),
-        ("office_oxide", "0.1.15"),
+        ("office_oxide", "0.1.17"),
     ] {
         let pkg = lock.split("[[package]]").find(|pkg| {
             pkg.lines()
