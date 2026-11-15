@@ -11,14 +11,16 @@
 # Closest GHA repro on Linux: CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci
 # Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
 # pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
-# Optional on this Linux host: `just check-remote` realizes flake metadata
-# and the workspace cargo quality derivation (the same gate as `just check` /
-# `just test`: fmt, workspace clippy --all-targets, workspace
-# nextest, doctests; members include cargo-mem-guard and grok-nix-helper) on
-# the existing trusted-user remote builder (default $HOME/.config/nix/machines).
+# Optional on this Linux host: `just check-remote` rsyncs changed source
+# files to the builder and runs fmt, workspace clippy, nextest, and doctests
+# there (the same gate as `just check` / `just test`; members include
+# cargo-mem-guard and grok-nix-helper). Incremental cargo output stays at
+# /home/nixbuilder/grok-oss-target on that machine. This recipe does not
+# upload a cargo target directory. The builder is the existing trusted-user
+# remote (default $HOME/.config/nix/machines).
 # Named filters: `just test-remote` / `just cargo-remote` realize
-# .#workspace-cargo-named-test the same way (force-remote nix, not host
-# rustc). rustc must not run on the caller. Those rustc jobs require
+# .#workspace-cargo-named-test with force-remote nix, not host rustc.
+# rustc must not run on the caller. Those rustc jobs require
 # surmount-remote (plus big-parallel). This laptop never auto-detects
 # surmount-remote; the ssh-ng machines line must advertise it. --option
 # system-features that omit big-parallel does not stop local nixbld: the
@@ -322,10 +324,9 @@ require_remote_builder:
 
     echo "==> just check-remote: using builders file ${file}"
     echo "==> just check-remote: NIX_SSHOPTS uses this account's known_hosts (host-key checks stay on)"
-    echo "==> just check-remote: rustc, clippy, and nextest require the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job."
-    echo "==> just check-remote: force-remote nix sets max-jobs 0. This laptop must not build. Fixed-output derivations and toolchain downloads (crates.io, static.rust-lang.org) go to the remote builder. This laptop must not curl those hosts for this gate. The VPS fetches them from the web (builders-use-substitutes)."
-    echo "==> just check-remote: force-remote nix uses --store ssh-ng (same machines-file builder) and --eval-store auto. Cargo-package NARs stay on the VPS. This laptop does not download those NARs from the builder, and does not substitute them from cache.nixos.org. -L logs still stream. nix build --no-link skips a local result symlink."
-    echo "==> just check-remote: force-remote nix uses --cores 64. Host machines max-jobs should advertise that many jobs on the builder."
+    echo "==> just check-remote: rustc, clippy, and nextest run on the builder. This laptop does not run them. The builder must list surmount-remote."
+    echo "==> just check-remote: source is rsynced to /home/nixbuilder/grok-oss-src. Incremental cargo output stays at /home/nixbuilder/grok-oss-target on that machine."
+    echo "==> just check-remote: this recipe does not upload a cargo target directory and does not realize the quality derivation."
 
 # Retry a nix (or other) command. Live body is this recipe: argv exec of
 # "$@", fail-fast on quality/SSH, force-remote flags when
@@ -648,10 +649,12 @@ nix_retry +cmd:
 #   nix_retry smoke).
 #
 # There is no `ci-quick` or `ci-host` recipe — use `check`/`check-local`/`ci` or `test`.
-# Optional `check-remote` sends that same full cargo gate (fmt, workspace
-# clippy --all-targets, nextest, doctests) to the remote builder
-# (surmount-remote). Named `just test-remote` / `just cargo-remote` send
-# a filter (cargo test / nextest / clippy / build / check) the same way.
+# Optional `check-remote` rsyncs changed source files to the remote builder
+# (surmount-remote) and runs that same full cargo gate there. Incremental
+# cargo output stays at /home/nixbuilder/grok-oss-target on that machine.
+# The recipe does not upload a cargo target directory. Named `just test-remote`
+# / `just cargo-remote` still send a filter (cargo test / nextest / clippy /
+# build / check) through the named-test derivation.
 # Caller max-jobs is 0: FODs and toolchain downloads must not run on this
 # laptop. Default `just check` / `just ci` stay on this machine's Nix path.
 #
@@ -683,63 +686,216 @@ check-local:
     echo "just check-local passed"
 
 check-remote:
-    #!/usr/bin/env bash
-    # Optional remote gate: flake metadata plus the same workspace cargo gate as
-    # just check (fmt, workspace clippy --all-targets, nextest run,
-    # doctests) as a Nix derivation.
-    # rustc requires the remote builder's surmount-remote feature.
-    # Optional remote gate. Default local check and ci recipes stay on this machine's Nix path.
-    set -euo pipefail
-    export GROK_NIX_FORCE_REMOTE=1
-    just require_system
-    just require_remote_builder
-    export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
-    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
-    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
-    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
-      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
-    else
-      export NIX_SSHOPTS="${extra_ssh}"
-    fi
-    # Nix copies a dirty git flake before the derivation filter runs, and that
-    # copy includes gitignored cargo output. Build from a snapshot of tracked
-    # files and untracked files that are not gitignored.
-    snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
-    trap 'rm -rf "$snapshot"' EXIT
-    git ls-files -z --cached --others --exclude-standard \
-      | rsync -a --from0 --files-from=- ./ "${snapshot}/"
-    if find "$snapshot" -type d -name target -print -quit | grep -q .; then
-      echo "just check-remote: snapshot still contains a target directory" >&2
-      exit 2
-    fi
-    # Nix ssh-ng store copy sends the whole source archive on every hash change.
-    # rsync sends changed files. The builder then copies that directory into its
-    # own store. The laptop does not upload the archive.
-    builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
-    builder_field="${builder_field%%\?*}"
-    ssh_spec="${builder_field#ssh-ng://}"
-    if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
-      echo "just check-remote: builders file has no ssh-ng destination" >&2
-      exit 2
-    fi
-    remote_src="/home/nixbuilder/grok-oss-src"
-    echo "==> just check-remote: rsync filtered source to the builder. The first sync sends the crate tree. Later syncs send changed files."
-    # Do not print the builders destination.
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
-    rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
-    echo "==> just check-remote: flake metadata on the builder"
-    # After rsync. nix_retry would add --store ssh-ng and copy this source from the laptop.
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
-    echo "==> just check-remote: nix build on the builder from the synced source"
-    # Single quotes keep '#' from becoming a remote-shell comment.
-    out="$(ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix build -L 'path:${remote_src}#workspace-cargo-quality' --print-out-paths --cores 64 --no-link" | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
-    if [ -z "${out}" ]; then
-      echo "just check-remote: missing quality store path in the builder nix build output" >&2
-      exit 2
-    fi
-    echo "==> just check-remote: quality output ${out}"
-    echo "==> just check-remote: quality receipt (printed even when Nix reuses a previous result)"
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" nix store cat "${out}/quality-summary.txt"
+	#!/usr/bin/env bash
+	# Optional remote gate. Rsync changed source files to the builder, then run
+	# fmt, workspace clippy, nextest, and doctests there. Incremental cargo
+	# output stays at /home/nixbuilder/grok-oss-target on that machine. This
+	# recipe does not upload or download a cargo target directory.
+	# The dev shell's cc is the Nix linker wrapper. That wrapper reports
+	# "collect2: impure path used in link" for an output outside a Nix build
+	# directory, so the cargo steps use the dev-shell toolchain and an
+	# unwrapped linker.
+	# rustc requires the remote builder's surmount-remote feature.
+	# This laptop does not run rustc or cargo. Default local check and ci stay here.
+	set -euo pipefail
+	export GROK_NIX_FORCE_REMOTE=1
+	just require_system
+	just require_remote_builder
+	export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+	known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+	extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+	if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+	  export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+	else
+	  export NIX_SSHOPTS="${extra_ssh}"
+	fi
+	# Nix copies a dirty git flake before the derivation filter runs, and that
+	# copy includes gitignored cargo output. Build from a snapshot of tracked
+	# files and untracked files that are not gitignored.
+	snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
+	trap 'rm -rf "$snapshot"' EXIT
+	git ls-files -z --cached --others --exclude-standard \
+	  | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+	if find "$snapshot" -type d -name target -print -quit | grep -q .; then
+	  echo "just check-remote: snapshot still contains a target directory" >&2
+	  exit 2
+	fi
+	# Nix ssh-ng store copy sends the whole source archive on every hash change.
+	# rsync sends changed files. The builder then copies that directory into its
+	# own store. The laptop does not upload the archive.
+	builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
+	builder_field="${builder_field%%\?*}"
+	ssh_spec="${builder_field#ssh-ng://}"
+	if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
+	  echo "just check-remote: builders file has no ssh-ng destination" >&2
+	  exit 2
+	fi
+	remote_src="/home/nixbuilder/grok-oss-src"
+	echo "==> just check-remote: rsync filtered source to the builder. The first sync sends the crate tree. Later syncs send changed files."
+	# Do not print the builders destination.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
+	rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
+	echo "==> just check-remote: flake metadata on the builder"
+	# After rsync. nix_retry would add --store ssh-ng and copy this source from the laptop.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
+	echo "==> just check-remote: fmt, clippy, nextest, and doctests on the builder"
+	# Source is already on the builder. Do not realize the quality derivation.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "bash -s" <<-'GROK_CHECK_REMOTE_SCRIPT'
+	set -euo pipefail
+	mkdir -p /home/nixbuilder/grok-oss-target
+	cat > /home/nixbuilder/grok-oss-target/run-quality.sh <<-'GROK_CHECK_REMOTE_QUALITY'
+	set -euo pipefail
+	cd /home/nixbuilder/grok-oss-src
+	export CARGO_TARGET_DIR=/home/nixbuilder/grok-oss-target
+	export CARGO_INCREMENTAL=1
+	# Dev-shell cc and ld are Nix wrappers. They reject a link output outside
+	# a Nix build directory. Point PATH at the unwrapped gcc and ld instead.
+	unwrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-unwrapped-link.XXXXXX")"
+	trap 'rm -rf "${unwrap_dir}"' EXIT
+	link_unwrapped() {
+	  local name="$1"
+	  local kind="$2"
+	  local wrapped real magic
+	  wrapped="$(command -v "${name}" || true)"
+	  if [[ -z "${wrapped}" || ! -e "${wrapped}" ]]; then
+	    echo "just check-remote: ${name} is not on the dev-shell PATH" >&2
+	    exit 2
+	  fi
+	  case "${kind}" in
+	    gcc) real="$(grep -oE '/nix/store/[a-z0-9]+-gcc-[0-9.]+/bin/gcc' "${wrapped}" | head -n 1 || true)" ;;
+	    g++) real="$(grep -oE '/nix/store/[a-z0-9]+-gcc-[0-9.]+/bin/g\+\+' "${wrapped}" | head -n 1 || true)" ;;
+	    ld) real="$(grep -oE '/nix/store/[a-z0-9]+-binutils-[0-9.]+/bin/ld' "${wrapped}" | head -n 1 || true)" ;;
+	    *) real="" ;;
+	  esac
+	  if [[ -z "${real}" || ! -x "${real}" ]]; then
+	    magic="$(head -c 2 "${wrapped}" || true)"
+	    if [[ "${magic}" != "#!" && -x "${wrapped}" ]]; then
+	      real="${wrapped}"
+	    fi
+	  fi
+	  if [[ -z "${real}" || ! -x "${real}" ]]; then
+	    echo "just check-remote: could not find an unwrapped ${kind} behind ${wrapped}" >&2
+	    exit 2
+	  fi
+	  ln -sfn "${real}" "${unwrap_dir}/${name}"
+	}
+	link_unwrapped cc gcc
+	link_unwrapped gcc gcc
+	link_unwrapped c++ g++
+	link_unwrapped g++ g++
+	link_unwrapped ld ld
+	export PATH="${unwrap_dir}:${PATH}"
+	export CC="${unwrap_dir}/cc"
+	export CXX="${unwrap_dir}/c++"
+	export NIX_ENFORCE_PURITY=0
+	host_triple="$(rustc -vV | awk '/^host:/{print $2}')"
+	if [[ -z "${host_triple}" ]]; then
+	  echo "just check-remote: rustc -vV did not report a host triple" >&2
+	  exit 2
+	fi
+	linker_var="CARGO_TARGET_$(printf '%s' "${host_triple}" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+	export "${linker_var}=${unwrap_dir}/cc"
+	if ! command -v mold >/dev/null 2>&1; then
+	  echo "just check-remote: mold is not on the dev-shell PATH" >&2
+	  exit 2
+	fi
+	unset CARGO_ENCODED_RUSTFLAGS
+	export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+	lib_path=""
+	if command -v pkg-config >/dev/null 2>&1; then
+	  for pc in libssl libcrypto dbus-1; do
+	    libdir="$(pkg-config --variable=libdir "${pc}" 2>/dev/null || true)"
+	    if [[ -n "${libdir}" && "${lib_path}" != *"${libdir}"* ]]; then
+	      lib_path="${lib_path:+${lib_path}:}${libdir}"
+	    fi
+	  done
+	fi
+	if [[ -n "${DUCKDB_LIB_DIR:-}" ]]; then
+	  lib_path="${lib_path:+${lib_path}:}${DUCKDB_LIB_DIR}"
+	fi
+	if [[ -n "${lib_path}" ]]; then
+	  export LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+	fi
+	export RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
+	export GROK_DISABLE_SHARED_HARNESS_SECRETS="${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+	export GROK_CREDENTIALS_FORCE_FILE="${GROK_CREDENTIALS_FORCE_FILE:-1}"
+	export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
+	unset NO_COLOR
+	unset CARGO_TERM_COLOR
+	unset OPENROUTER_API_KEY
+	mkdir -p frontend/apps/grok-desktop/scripts
+	cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
+	cargoJobs="${NIX_BUILD_CORES:-64}"
+	case "${cargoJobs}" in
+	  "" | *[!0-9]*) cargoJobs=64 ;;
+	esac
+	if [ "${cargoJobs}" -gt 64 ]; then
+	  cargoJobs=64
+	fi
+	if [ "${cargoJobs}" -le 64 ]; then
+	  cargoJobs=64
+	fi
+	export CARGO_BUILD_JOBS="${cargoJobs}"
+	linkJobs="${CARGO_BUILD_JOBS}"
+	if [ "${linkJobs}" -gt 32 ]; then
+	  linkJobs=32
+	fi
+	export CARGO_LINK_JOBS="${linkJobs}"
+	export CARGO_PROFILE=dev
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	echo "workspace cargo jobs=${CARGO_BUILD_JOBS} link jobs=${CARGO_LINK_JOBS} NIX_BUILD_CORES=${NIX_BUILD_CORES:-unset}"
+	workspace_run_make_jobserver() {
+	  unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	  if [ "$#" -lt 1 ]; then
+	    echo "workspace_run_make_jobserver: missing command" >&2
+	    exit 2
+	  fi
+	  mk="${TMPDIR:-/tmp}/workspace-cargo-jobserver.mk"
+	  {
+	    printf 'all:\n\t+env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 '
+	    printf '%q ' "$@"
+	    printf '\n'
+	  } > "${mk}"
+	  echo "workspace cargo make -j${CARGO_BUILD_JOBS} jobserver: $*"
+	  make -j"${CARGO_BUILD_JOBS}" --no-print-directory -f "${mk}"
+	}
+	nice -n 19 cargo fmt --all -- --check
+	clippy_driver="$(command -v clippy-driver || true)"
+	if [[ -z "${clippy_driver}" || ! -x "${clippy_driver}" ]]; then
+	  echo "just check-remote: clippy-driver not on PATH" >&2
+	  exit 2
+	fi
+	export RUSTC_WORKSPACE_WRAPPER="${clippy_driver}"
+	export CLIPPY_ARGS="-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__"
+	workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --all-targets --locked
+	unset RUSTC_WORKSPACE_WRAPPER CLIPPY_ARGS
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	nextest_log="${CARGO_TARGET_DIR}/nextest.log"
+	if ! command -v rg >/dev/null 2>&1; then
+	  echo "just check-remote: rg not on PATH" >&2
+	  exit 2
+	fi
+	CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" nice -n 19 cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" 2>&1 | tee "${nextest_log}"
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	workspace_run_make_jobserver cargo test --workspace --doc --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_LINK_JOBS"
+	summary="$(rg -a -F -n 'Summary [' "${nextest_log}" | tail -n 1 || true)"
+	if [[ -z "${summary}" ]]; then
+	  echo "just check-remote: nextest Summary line missing" >&2
+	  exit 2
+	fi
+	{
+	  echo "workspace-cargo-quality receipt"
+	  echo "fmt: cargo fmt --all -- --check"
+	  echo "clippy: cargo check --workspace --all-targets (clippy-driver -D warnings)"
+	  echo "${summary}"
+	  echo "doctests: cargo test --workspace --doc"
+	} > /home/nixbuilder/grok-oss-target/quality-summary.txt
+	GROK_CHECK_REMOTE_QUALITY
+	cd /home/nixbuilder/grok-oss-src
+	nix develop 'path:/home/nixbuilder/grok-oss-src' -c bash /home/nixbuilder/grok-oss-target/run-quality.sh
+	GROK_CHECK_REMOTE_SCRIPT
+	echo "==> just check-remote: quality receipt"
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "cat /home/nixbuilder/grok-oss-target/quality-summary.txt"
 
 # Named cargo on the same remote builder as check-remote (surmount-remote).
 # Kind is test, nextest, clippy, build, or check. Remaining words are the

@@ -1317,20 +1317,24 @@ pub async fn run_single_turn(
                     // Wake to re-check the timeout at the top of the loop.
                 }
                 _ = tokio::time::sleep_until(ack_deadline), if prompt_ack.is_some() => {
-                    let Some(watch) = prompt_ack.take() else {
-                        unreachable!("branch precondition is `prompt_ack.is_some()`")
-                    };
-                    let err = abort_unacknowledged_prompt(
-                        &acp_tx,
-                        &session_id,
-                        watch.prompt_id(),
-                        watch.waited(Instant::now()),
-                        &ack_deadlines,
-                    )
-                    .await;
-                    prompt_result = Some(Err(err));
-                    prompt_unacknowledged = true;
-                    break;
+                    // The prompt RPC is still in flight, so this turn is running and the watch is
+                    // that prompt's id. Taken: disarm. Do not rewind-cancel and do not fail the process.
+                    // A watch that outlived the prompt (the session never held that turn) still aborts.
+                    if prompt_result.is_none() {
+                        prompt_ack = None;
+                    } else if let Some(watch) = prompt_ack.take() {
+                        let err = abort_unacknowledged_prompt(
+                            &acp_tx,
+                            &session_id,
+                            watch.prompt_id(),
+                            watch.waited(Instant::now()),
+                            &ack_deadlines,
+                        )
+                        .await;
+                        prompt_result = Some(Err(err));
+                        prompt_unacknowledged = true;
+                        break;
+                    }
                 }
             }
         }

@@ -16,7 +16,9 @@ let
   # run (tests actually execute), then doctests. Workspace nextest
   # covers those member crates; do not add a late cargo test
   # --manifest-path after nextest.
-  # `just check-remote` realizes this on the Nix remote builder.
+  # Preserved package output. `just check-remote` does not build this
+  # derivation. It runs the same fmt, clippy, nextest, and doctest steps
+  # on the builder with a persistent cargo target directory.
   # Not in `checks` so `nix flake check` / GHA stay local and do not
   # need the builder.
   # preferLocalBuild=false is not enough: Nix still uses a local

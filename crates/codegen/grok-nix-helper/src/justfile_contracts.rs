@@ -216,17 +216,66 @@ fn check_remote_quotes_quality_attr_and_nix_retry_uses_argv() {
         "check-remote must not nix-build the local snapshot over ssh-ng:\n{remote}"
     );
     assert!(
-        remote.contains("#workspace-cargo-quality\"")
-            || remote.contains("#workspace-cargo-quality'"),
-        "check-remote must quote the workspace-cargo-quality installable:\n{remote}"
+        !remote.contains("#workspace-cargo-quality") && !remote.contains("nix build"),
+        "check-remote must not nix-build #workspace-cargo-quality:\n{remote}"
     );
-    let unquoted = remote.lines().any(|l| {
-        let code = l.split('#').next().unwrap_or(l);
-        code.contains("workspace-cargo-quality") && !code.contains('"') && !code.contains('\'')
-    });
     assert!(
-        !unquoted,
-        "check-remote must not leave workspace-cargo-quality unquoted:\n{remote}"
+        remote.contains("CARGO_TARGET_DIR=/home/nixbuilder/grok-oss-target"),
+        "check-remote must keep incremental cargo output on the builder:\n{remote}"
+    );
+    assert!(
+        remote.contains("CARGO_INCREMENTAL=1"),
+        "check-remote must set CARGO_INCREMENTAL=1:\n{remote}"
+    );
+    assert!(
+        remote.contains("mkdir -p /home/nixbuilder/grok-oss-target"),
+        "check-remote must create the builder target directory outside the synced tree:\n{remote}"
+    );
+    assert!(
+        !remote.contains("zstd"),
+        "check-remote must not zstd a cargo target:\n{remote}"
+    );
+    for line in remote.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || !t.contains("rsync") {
+            continue;
+        }
+        assert!(
+            !t.contains("grok-oss-target"),
+            "check-remote must not rsync the persistent target directory:\n{t}"
+        );
+        let mentions_target =
+            t.contains(" target") || t.contains("/target") || t.contains("target/");
+        if mentions_target {
+            assert!(
+                t.contains("--exclude target"),
+                "check-remote must not rsync a target directory:\n{t}"
+            );
+        }
+    }
+    let fmt_at = remote
+        .find("cargo fmt --all -- --check")
+        .expect("check-remote fmt");
+    let clippy_at = remote
+        .find("cargo check --profile \"$CARGO_PROFILE\" --jobs \"$CARGO_BUILD_JOBS\" --workspace --all-targets --locked")
+        .expect("check-remote clippy");
+    let nextest_at = remote
+        .find("cargo nextest run --workspace --locked")
+        .expect("check-remote nextest");
+    let doc_at = remote
+        .find("cargo test --workspace --doc --locked")
+        .expect("check-remote doctests");
+    assert!(
+        fmt_at < clippy_at && clippy_at < nextest_at && nextest_at < doc_at,
+        "check-remote order is fmt, clippy, nextest, doctests:\n{remote}"
+    );
+    assert!(
+        remote.contains("RUSTC_WORKSPACE_WRAPPER"),
+        "check-remote clippy must set RUSTC_WORKSPACE_WRAPPER:\n{remote}"
+    );
+    assert!(
+        remote.contains("nix develop 'path:/home/nixbuilder/grok-oss-src'"),
+        "check-remote must take cargo, rustc, clippy, and nextest from the builder dev shell:\n{remote}"
     );
     assert!(
         !remote.contains("just ci")
@@ -290,22 +339,20 @@ fn check_remote_prints_quality_receipt_on_cache_hit() {
     let just = read(&root, "justfile");
     let remote = recipe_body(&just, "check-remote");
     assert!(
-        remote.contains("--print-out-paths"),
-        "check-remote must print the quality store path even on a cache hit:\n{remote}"
+        remote.contains("/home/nixbuilder/grok-oss-target/quality-summary.txt"),
+        "check-remote must write and print the builder quality receipt:\n{remote}"
     );
     assert!(
-        remote.contains("quality-summary.txt"),
-        "check-remote must cat quality-summary.txt so nextest is not silent:\n{remote}"
+        remote.contains("Summary ["),
+        "check-remote receipt must include the nextest Summary line:\n{remote}"
     );
     assert!(
-        remote.contains("nix store cat"),
-        "check-remote must nix store cat the receipt (not rely on -L during a cache hit):\n{remote}"
+        remote.contains("just check-remote: nextest Summary line missing"),
+        "check-remote must exit 2 when the nextest Summary line is missing:\n{remote}"
     );
     assert!(
-        remote.contains("tee /dev/stderr")
-            && remote.contains("grep -E")
-            && remote.contains("/nix/store/"),
-        "check-remote must pick the quality store path out of nix_retry -L stdout; the full log is too long for argv:\n{remote}"
+        !remote.contains("--print-out-paths") && !remote.contains("nix store cat"),
+        "check-remote must not nix-build or nix store cat the quality receipt:\n{remote}"
     );
     let quality = read(&root, "flake/workspace-quality.nix");
     assert!(

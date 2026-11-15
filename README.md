@@ -81,7 +81,7 @@ Locally, the same quality gate:
 ```bash
 just check     # or: just ci  — full Nix local gate; run before push
 just check-local   # host cargo only (fmt, clippy, nextest, doctest) when the VPS is down
-just check-remote  # same full gate as just check, as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised; cargo --jobs from cores, cap 32; same dev profile as local clippy)
+just check-remote  # same full gate as just check, on this host's remote builder (rsync source only; incremental cargo stays at /home/nixbuilder/grok-oss-target; does not upload target)
 just test-remote -p <crate> --lib -- <filter>  # named cargo test on that same remote builder (not rustc on this laptop)
 just test      # fmt / clippy / tests without redoing full flake prep
 ```
@@ -138,7 +138,7 @@ Users: `grok-oss update --check`. Maintainers: `just upstream-detect` / `grok-ni
 ```bash
 just check                    # full Nix local quality gate (or just ci)
 just check-local              # host cargo when the VPS is down (fmt, clippy, nextest, doctest)
-just check-remote             # same full gate as just check, as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised)
+just check-remote             # same full gate as just check on this host's remote builder (source rsync; incremental cargo at /home/nixbuilder/grok-oss-target; does not upload target)
 just test-remote -p xai-grok-shell --test openrouter_credentials
 just cargo-remote clippy -p <crate> --all-targets -- -D warnings
 just cargo-remote check -p <crate>
