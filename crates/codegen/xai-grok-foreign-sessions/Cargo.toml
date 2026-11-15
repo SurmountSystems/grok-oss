@@ -20,7 +20,10 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 # Per-workspace store-directory hashing for the optional peer-editor scanner.
 md5 = { workspace = true, optional = true }
 # Read-only/query-only access to the foreign SQLite stores.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# rusqlite 0.43. libsqlite3-sys `bundled` keeps SQLite self-contained.
+# Required libsqlite3-sys is 0.40.0.
+rusqlite = { version = "0.43" }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 serde_json = { workspace = true }
 # Session ids are UUIDs; only parsing is used, no generation.
 uuid = { workspace = true }
