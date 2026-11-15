@@ -1352,7 +1352,10 @@ fn recovery_directory_and_database_scans_fail_at_named_caps() {
                 "INSERT INTO capture_jobs(
                     job_id, session_id, from_turn, through_turn, status, attempt
                  ) VALUES (?1, 'session', ?2, ?2, 'pending', 0)",
-                params![format!("job-{index}"), index],
+                params![
+                    format!("job-{index}"),
+                    i64::try_from(index).expect("recovery job index fits in i64")
+                ],
             )
             .unwrap();
     }
@@ -1377,7 +1380,10 @@ fn committed_observation_scan_has_a_named_row_cap() {
                 "INSERT INTO capture_jobs(
                     job_id, session_id, from_turn, through_turn, status, attempt
                  ) VALUES (?1, 'session', ?2, ?2, 'completed', 1)",
-                params![job_id, index],
+                params![
+                    job_id,
+                    i64::try_from(index).expect("committed observation index fits in i64")
+                ],
             )
             .unwrap();
         transaction

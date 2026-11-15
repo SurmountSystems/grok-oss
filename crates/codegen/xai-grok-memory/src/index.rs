@@ -331,8 +331,8 @@ impl MemoryIndex {
                         params![
                             chunk.text,
                             hash,
-                            chunk.start_line,
-                            chunk.end_line,
+                            sqlite_bind_usize(chunk.start_line)?,
+                            sqlite_bind_usize(chunk.end_line)?,
                             now,
                             chunk_id
                         ],
@@ -372,8 +372,8 @@ impl MemoryIndex {
                         params![
                             chunk_id,
                             path_str,
-                            chunk.start_line,
-                            chunk.end_line,
+                            sqlite_bind_usize(chunk.start_line)?,
+                            sqlite_bind_usize(chunk.end_line)?,
                             chunk.text,
                             hash,
                             source,
@@ -480,7 +480,7 @@ impl MemoryIndex {
              ORDER BY rank LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map(params![fts_query, limit], |row| {
+            .query_map(params![fts_query, sqlite_bind_usize(limit)?], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -633,7 +633,7 @@ impl MemoryIndex {
              WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
         )?;
         let results = stmt
-            .query_map(params![query_bytes, k], |row| {
+            .query_map(params![query_bytes, sqlite_bind_usize(k)?], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -796,6 +796,10 @@ impl MemoryIndex {
         )?;
         Ok(())
     }
+}
+
+fn sqlite_bind_usize(value: usize) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 #[cfg(test)]

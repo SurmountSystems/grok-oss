@@ -368,12 +368,15 @@ impl V2ConsolidationStore {
                  ORDER BY f.path LIMIT ?1",
             )?;
             statement
-                .query_map(params![MAX_CLAIMED_OBSERVATIONS, include_hidden], |row| {
-                    Ok(ClaimedObservation {
-                        relative_path: PathBuf::from(row.get::<_, String>(0)?),
-                        content_hash: row.get(1)?,
-                    })
-                })?
+                .query_map(
+                    params![sqlite_bind_usize(MAX_CLAIMED_OBSERVATIONS)?, include_hidden],
+                    |row| {
+                        Ok(ClaimedObservation {
+                            relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                            content_hash: row.get(1)?,
+                        })
+                    },
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         } else {
             Vec::new()
@@ -495,12 +498,15 @@ impl V2ConsolidationStore {
                      WHERE operation_id = ?1 ORDER BY source_path LIMIT ?2",
                 )?;
                 statement
-                    .query_map(params![operation_id, MAX_CLAIMED_OBSERVATIONS], |row| {
-                        Ok(ClaimedObservation {
-                            relative_path: PathBuf::from(row.get::<_, String>(0)?),
-                            content_hash: row.get(1)?,
-                        })
-                    })?
+                    .query_map(
+                        params![operation_id, sqlite_bind_usize(MAX_CLAIMED_OBSERVATIONS)?],
+                        |row| {
+                            Ok(ClaimedObservation {
+                                relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                                content_hash: row.get(1)?,
+                            })
+                        },
+                    )?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
             let tombstoned_destination = transaction
@@ -1917,6 +1923,10 @@ fn sqlite_usize_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Resul
 }
 
 fn sqlite_bind_u64(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+}
+
+fn sqlite_bind_usize(value: usize) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 

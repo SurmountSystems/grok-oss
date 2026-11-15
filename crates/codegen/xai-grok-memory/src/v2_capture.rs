@@ -763,12 +763,15 @@ impl V2CaptureStore {
              LIMIT ?1",
         )?;
         let rows = statement
-            .query_map(params![MAX_COMMITTED_OBSERVATION_ROWS + 1], |row| {
-                Ok(CommittedObservationFile {
-                    path: row.get(2)?,
-                    content_hash: row.get(3)?,
-                })
-            })?
+            .query_map(
+                params![sqlite_bind_usize(MAX_COMMITTED_OBSERVATION_ROWS + 1)?],
+                |row| {
+                    Ok(CommittedObservationFile {
+                        path: row.get(2)?,
+                        content_hash: row.get(3)?,
+                    })
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
         if rows.len() > MAX_COMMITTED_OBSERVATION_ROWS {
@@ -807,7 +810,7 @@ impl V2CaptureStore {
              LIMIT ?1",
         )?;
         let cursors = statement
-            .query_map(params![MAX_RECOVERY_JOBS + 1], |row| {
+            .query_map(params![sqlite_bind_usize(MAX_RECOVERY_JOBS + 1)?], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1206,21 +1209,24 @@ impl V2CaptureStore {
              LIMIT ?2",
         )?;
         let jobs = jobs_statement
-            .query_map(params![now, MAX_RECOVERY_JOBS + 1], |row| {
-                Ok((
-                    CaptureJob {
-                        job_id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        range: CaptureRange {
-                            from_turn: row.get(2)?,
-                            through_turn: row.get(3)?,
+            .query_map(
+                params![now, sqlite_bind_usize(MAX_RECOVERY_JOBS + 1)?],
+                |row| {
+                    Ok((
+                        CaptureJob {
+                            job_id: row.get(0)?,
+                            session_id: row.get(1)?,
+                            range: CaptureRange {
+                                from_turn: row.get(2)?,
+                                through_turn: row.get(3)?,
+                            },
+                            source_prompt_index: row.get(4)?,
+                            attempt: row.get(5)?,
                         },
-                        source_prompt_index: row.get(4)?,
-                        attempt: row.get(5)?,
-                    },
-                    row.get::<_, String>(6)?,
-                ))
-            })?
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(jobs_statement);
         if jobs.len() > MAX_RECOVERY_JOBS {
@@ -1725,7 +1731,7 @@ fn persist_outcome(
         transaction.execute(
             "INSERT INTO capture_observation_files(job_id, ordinal, path, content_hash)
              VALUES (?1, ?2, ?3, ?4)",
-            params![job.job_id, ordinal, path, file.hash],
+            params![job.job_id, sqlite_bind_usize(ordinal)?, path, file.hash],
         )?;
         let is_exposed = transaction
             .query_row(
@@ -1977,6 +1983,10 @@ fn reject_symlink(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(io_error(path, source)),
     }
+}
+
+fn sqlite_bind_usize(value: usize) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 fn io_error(path: impl AsRef<Path>, source: std::io::Error) -> V2CaptureError {
