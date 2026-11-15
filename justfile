@@ -583,7 +583,23 @@ check-remote:
 	  etc_copy=/home/nixbuilder/grok-oss-target/etc-overlay
 	  rm -rf "${etc_copy}"
 	  mkdir -p "${etc_copy}"
-	  cp -a /etc/. "${etc_copy}/" || true
+	  # This copies readable entries from surmount-1 /etc and skips root-only files.
+	  while IFS= read -r -d '' src; do
+	    rel="${src#/etc/}"
+	    dest="${etc_copy}/${rel}"
+	    if [[ ! -r "${src}" ]]; then
+	      continue
+	    fi
+	    if [[ -L "${src}" ]]; then
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    elif [[ -d "${src}" ]]; then
+	      mkdir -p "${dest}"
+	    else
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    fi
+	  done < <(find /etc -mindepth 1 -print0 2>/dev/null || true)
 	  rm -f "${etc_copy}/hosts"
 	  cp -L /etc/hosts "${etc_copy}/hosts"
 	  if [[ -L "${etc_copy}/hosts" || ! -f "${etc_copy}/hosts" ]]; then
@@ -2322,8 +2338,7 @@ test-nix-retry-force-remote-argv-is-nix:
     export GROK_NIX_BUILDERS_FILE="${machines}"
     export GROK_NIX_KNOWN_HOSTS="${hosts}"
     export NIX_RETRY_ATTEMPTS=1
-    # Hermetic: nix_retry sources ensure-working-nix-path. Honor this stub so
-    # the smoke does not need a host nix or a network fetch.
+    # Honor NIX_BIN so this smoke does not call host nix.
     export NIX_BIN="${fake_nix}"
     set +e
     out="$(timeout 8 just nix_retry "${fake_nix}" flake metadata 2>&1)"
@@ -2604,16 +2619,10 @@ test-nix-retry-force-remote-ssh-ng-max-connections:
       exit 1
     fi
     echo "test-nix-retry-force-remote-ssh-ng-max-connections: ok (default max-connections=8; --store reuses that URI; host not printed)"
-# Overrides host -fuse-ld=wild (breaks this link). See comments in recipe body.
-# Strips the installed artifact only: [profile.release] stays unstripped for
-# local debugging; release-dist keeps strip=false for sidecar extract.
-# grok-oss grep is embedded Rust (grep crate + ignore), not a sidecar rg.
-# just install does not cargo-install ripgrep.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
-    # this workspace. Unset encoded rustflags and pin mold only.
+    # Pin mold. Host rustflags often set -fuse-ld=wild.
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     echo "==> nice -n 19 cargo build --release -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
@@ -2627,8 +2636,7 @@ install:
     strip --strip-unneeded target/release/grok-oss
     echo "==> install -> ${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     install -Dm755 target/release/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
-    # Desktop Fish starts with ~/.local/bin and does not read ~/.profile.
-    # Already-open terminals keep that PATH. A symlink makes `grok-oss` resolve there.
+    # Fish starts at ~/.local/bin. Symlink the installed binary there.
     mkdir -p "${HOME}/.local/bin"
     ln -sfn "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" "${HOME}/.local/bin/grok-oss"
     echo "==> verify"
@@ -2636,10 +2644,8 @@ install:
     file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" | grep -q 'stripped' \
       || (echo "install: expected stripped binary" >&2; file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" >&2; exit 1)
 
-# Build release-dist binary, extract .debug sidecar, strip (not CI quality gate).
 build-dist:
-    # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
-    # this workspace. Unset encoded rustflags and pin mold only.
+    # Pin mold. Host rustflags often set -fuse-ld=wild.
     @echo "==> cargo build --profile release-dist -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
       RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}" \
@@ -2653,7 +2659,6 @@ build-dist:
     ls -lh target/release-dist/grok-oss target/release-dist/grok-oss.debug
     file target/release-dist/grok-oss target/release-dist/grok-oss.debug
 
-# Install release-dist binary + grok-oss.debug sidecar to cargo bin (not CI).
 install-dist: build-dist
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     @echo "==> install stripped binary + sidecar -> ${CARGO_HOME:-$HOME/.cargo}/bin/"
@@ -2666,32 +2671,13 @@ install-dist: build-dist
     @test -f "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.debug" \
       || (echo "install-dist: missing sidecar grok-oss.debug" >&2; exit 1)
 
-# Install from Nix result (matches just build / CI; no host cargo linker).
-# Strip after copy: nix fixup may already strip; --strip-unneeded is safe/idempotent.
+# Strip after copy. Nix may already have stripped the binary.
 install-nix: build
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     install -Dm755 ./result/bin/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     strip --strip-unneeded "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
 
-# ---------------------------------------------------------------------------
-# Limits-first path certainty (Slice E2)
-#
-# Never claim "limits-first path certain" without runnable proof.
-# Hermetic suite = rank / bare resolve / memo + JSON path checker unit tests.
-# Live recipe = rebuilt binary `limits --json` + same pure checker (ignored test).
-#
-# Spend order when auto_use_included_limits=true and preferred ≠ api_key:
-#   1. included weekly used < 100% → SuperGrok session only (console omitted)
-#   2. included full + SuperGrok dollar extras > 0 → SuperGrok primary, console failover
-#   3. included full + extras 0/unknown → console primary
-#
-# Dogfood field template: .agents/joins/template-limits-dogfood-window.md
-# ---------------------------------------------------------------------------
-
-# Hermetic path suite: spend-order rank, bare resolve, memo, flat-poll, prepaid
-# lag, Management ForceRefresh policy, and the pure limits --json C1/C3 checker.
-# One command. Run before claiming limits-first path certain.
 check-limits-first-path:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2703,23 +2689,12 @@ check-limits-first-path:
       resolve_api_key_pin sampling_config_auto_use resolve_model_override \
       afterburner_skips_allowance_mark apply_billing_100_pct_with_positive_extras
     echo "==> xai-grok-pager: flat_poll + prepaid lag + ForceRefresh policy + path checker"
-    # Filters: flat_poll / prepaid_lag match honesty tests; management_meter_cache
-    # + should_clear_management cover ForceRefresh; check_limits_first is E2 SoT.
     just cargo-ci cargo test -p xai-grok-pager --lib --locked -- \
       flat_poll prepaid_lag \
       management_meter_cache_policy should_clear_management_meter \
       check_limits_first multipoll
     echo "check-limits-first-path passed (hermetic)"
 
-# Live C1/C3 after rebuild: SuperGrok primary while included weekly used < 100%,
-# console not live. Requires auto_use_included_limits=true and preferred ≠ api_key
-# on the home under test. Uses the same pure checker as unit tests.
-#
-# Env:
-#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
-#   LIMITS_FIRST_AUTO_USE — default 1
-#   LIMITS_FIRST_PREFERRED_API_KEY — default 0 (set 1 only when preferred=api_key)
-#   LIMITS_JSON_TIMEOUT_SECS — default 90
 check-limits-first-live:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2763,19 +2738,6 @@ check-limits-first-live:
       live_check_limits_first_from_env_json -- --ignored --nocapture
     echo "check-limits-first-live passed"
 
-# Token economy multipoll evidence harness (P1 path + P2 free SuperGrok period series).
-#
-# Runs `grok-oss limits multipoll` (N samples, default sleep 30s between ends to
-# meet flat-detector min wall). Writes JSONL + summary under
-# `.agents/reports/limits-multipoll-<utc>/` (or --out-dir). Exit 0 when path is
-# OK; exit non-zero only on path failure. Free SuperGrok period flat is
-# measurement only and does not fail the process.
-#
-# Env:
-#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
-#   LIMITS_MULTIPOLL_SAMPLES — default 2
-#   LIMITS_MULTIPOLL_SLEEP_SECS — default 30
-#   LIMITS_MULTIPOLL_OUT_DIR — optional override for --out-dir
 limits-multipoll *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2802,30 +2764,25 @@ limits-multipoll *ARGS:
     echo "==> limits-multipoll: ${bin} limits multipoll --samples ${samples} --sleep-secs ${sleep_secs} ${extra[*]:-} {{ ARGS }}"
     exec "${bin}" limits multipoll --samples "${samples}" --sleep-secs "${sleep_secs}" ${extra[@]+"${extra[@]}"} {{ ARGS }}
 
-# Upstream monorepo export helpers (see docs/upstream-history.md).
 upstream-detect:
     just grok_helper detect-upstream-export
 
 upstream-import *ARGS:
     just grok_helper import-upstream-export {{ ARGS }}
 
-# Cherry-pick Surmount product onto current xAI tip → onto-xai/<short>
 upstream-put-history *ARGS:
     just grok_helper put-history-on-xai {{ ARGS }}
 
-# Join Surmount main into current onto tip (-s ours; stages merge for signed commit)
 upstream-join-main *ARGS:
     just grok_helper join-main-into-onto {{ ARGS }}
 
-# Fail if AGENTS/FORK/RESIDUAL/helper recon modules missing after recon
 [positional-arguments]
 upstream-assert-process-pins *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     just grok_helper assert-process-pins --root "{{ justfile_directory() }}" "$@"
 
-# Path assert, then remind land agents to walk the existing catalog.
-# Does not replace just check. Does not run cargo (deleted tests stay silent).
+# Does not replace just check. Does not run cargo.
 [positional-arguments]
 upstream-land-filters *ARGS:
     #!/usr/bin/env bash
@@ -2845,7 +2802,6 @@ upstream-land-filters *ARGS:
     echo "Then run the operator cheat-sheet cargo blocks in that catalog."
     echo "just check is quality only. Chrome-only is a failed land."
 
-# Read-only recon probe: branch, CHERRY_PICK/MERGE, UU count, onto-ish, next human action
 recon-status:
     just grok_helper recon-status
 
