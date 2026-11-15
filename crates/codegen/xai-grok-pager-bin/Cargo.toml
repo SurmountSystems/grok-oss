@@ -131,3 +131,6 @@ release-dist = [
     "stock",
     "xai-grok-pager/release-dist",
     ]
+
+[lints]
+workspace = true

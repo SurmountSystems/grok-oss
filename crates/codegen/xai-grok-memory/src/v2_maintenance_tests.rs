@@ -538,7 +538,7 @@ fn retention_gc_is_idempotent_and_refuses_active_dream() {
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM consolidation_archives", [], |row| {
-                row.get::<_, u64>(0)
+                super::sqlite_u64_column(row, 0)
             })
             .unwrap(),
         0
@@ -697,7 +697,7 @@ fn retention_gc_preserves_unarchived_hidden_and_shadow_observations() {
     ] {
         let count = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, u64>(0)
+                super::sqlite_u64_column(row, 0)
             })
             .unwrap();
         assert_eq!(count, 1, "{table} was collected while still pending");
@@ -862,7 +862,7 @@ fn active_promotion_exposes_record_only_and_shadow_history_without_erasing_evalu
             .query_row(
                 "SELECT COUNT(*) FROM memory_v2_hidden_observations",
                 [],
-                |row| row.get::<_, u64>(0)
+                |row| super::sqlite_u64_column(row, 0)
             )
             .unwrap(),
         0
@@ -872,7 +872,7 @@ fn active_promotion_exposes_record_only_and_shadow_history_without_erasing_evalu
             .query_row(
                 "SELECT COUNT(*) FROM memory_v2_shadow_evaluations",
                 [],
-                |row| row.get::<_, u64>(0)
+                |row| super::sqlite_u64_column(row, 0)
             )
             .unwrap(),
         1

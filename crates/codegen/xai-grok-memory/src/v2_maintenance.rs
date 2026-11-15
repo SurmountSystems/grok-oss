@@ -203,11 +203,11 @@ impl V2MaintenanceStore {
                 [],
                 |row| {
                     Ok((
-                        row.get::<_, Option<u64>>(0)?.unwrap_or(0),
-                        row.get::<_, Option<u64>>(1)?.unwrap_or(0),
-                        row.get::<_, Option<u64>>(2)?.unwrap_or(0),
-                        row.get::<_, Option<u64>>(3)?.unwrap_or(0),
-                        row.get::<_, Option<u64>>(4)?.unwrap_or(0),
+                        sqlite_u64_sum(row, 0)?,
+                        sqlite_u64_sum(row, 1)?,
+                        sqlite_u64_sum(row, 2)?,
+                        sqlite_u64_sum(row, 3)?,
+                        sqlite_u64_sum(row, 4)?,
                     ))
                 },
             )
@@ -233,8 +233,8 @@ impl V2MaintenanceStore {
                 [],
                 |row| {
                     Ok((
-                        row.get::<_, Option<u64>>(0)?.unwrap_or(0),
-                        row.get::<_, Option<u64>>(1)?.unwrap_or(0),
+                        sqlite_u64_sum(row, 0)?,
+                        sqlite_u64_sum(row, 1)?,
                         row.get::<_, Option<i64>>(2)?,
                     ))
                 },
@@ -249,7 +249,7 @@ impl V2MaintenanceStore {
                     Ok((
                         row.get::<_, bool>(0)?,
                         row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, u64>(2)?,
+                        sqlite_u64_column(row, 2)?,
                     ))
                 },
             )
@@ -267,8 +267,8 @@ impl V2MaintenanceStore {
                 "SELECT COUNT(*) FROM consolidation_claim_items ci
                  JOIN consolidation_operations co USING(operation_id)
                  WHERE co.generation = ?1",
-                params![lock.2],
-                |row| row.get(0),
+                params![sqlite_bind_u64(lock.2)?],
+                |row| sqlite_u64_column(row, 0),
             )
             .unwrap_or(0);
         let last_success_at = connection
@@ -316,13 +316,13 @@ impl V2MaintenanceStore {
             last_failure_at,
             archive_count: connection
                 .query_row("SELECT COUNT(*) FROM consolidation_archives", [], |row| {
-                    row.get(0)
+                    sqlite_u64_column(row, 0)
                 })
                 .unwrap_or(0),
             tombstone_count: connection.query_row(
                 "SELECT COUNT(*) FROM memory_v2_tombstones",
                 [],
-                |row| row.get(0),
+                |row| sqlite_u64_column(row, 0),
             )?,
         })
     }
@@ -952,6 +952,25 @@ fn remove_retained_file(scope_dir: &Path, relative: &str) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+fn sqlite_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn sqlite_u64_sum(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: Option<i64> = row.get(index)?;
+    match value {
+        Some(value) => {
+            u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+        }
+        None => Ok(0),
+    }
+}
+
+fn sqlite_bind_u64(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 fn path_text(path: &Path) -> Result<String> {

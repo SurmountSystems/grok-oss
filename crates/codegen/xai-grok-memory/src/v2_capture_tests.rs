@@ -14,6 +14,11 @@ fn setup() -> (TempDir, V2CaptureStore) {
     (temp, store)
 }
 
+fn sqlite_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
 fn range(from: u32, through: u32) -> CaptureRange {
     CaptureRange::try_new(from, through).unwrap()
 }
@@ -95,7 +100,7 @@ fn promotion_updates_running_hidden_job_before_it_commits() {
             .query_row(
                 "SELECT COUNT(*) FROM memory_v2_hidden_observations",
                 [],
-                |row| row.get::<_, u64>(0)
+                |row| sqlite_u64_column(row, 0)
             )
             .unwrap(),
         0

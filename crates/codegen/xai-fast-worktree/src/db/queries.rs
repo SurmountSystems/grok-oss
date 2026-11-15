@@ -187,18 +187,23 @@ pub fn list(conn: &Connection, filter: &ListFilter) -> Result<Vec<WorktreeRecord
         .map_err(Into::into)
 }
 
+fn sqlite_u64(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(0)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
+}
+
 pub fn stats(conn: &Connection) -> Result<DbStats> {
-    let total: u64 = conn.query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))?;
+    let total: u64 = conn.query_row("SELECT COUNT(*) FROM worktrees", [], sqlite_u64)?;
     let alive: u64 = conn.query_row(
         "SELECT COUNT(*) FROM worktrees WHERE status = 'alive'",
         [],
-        |row| row.get(0),
+        sqlite_u64,
     )?;
     let page_count: u64 = conn
-        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .query_row("PRAGMA page_count", [], sqlite_u64)
         .unwrap_or(0);
     let page_size: u64 = conn
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .query_row("PRAGMA page_size", [], sqlite_u64)
         .unwrap_or(0);
 
     Ok(DbStats {

@@ -16,3 +16,6 @@ xai-grok-secrets = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

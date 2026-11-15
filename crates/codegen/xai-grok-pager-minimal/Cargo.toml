@@ -60,3 +60,6 @@ serial_test = { workspace = true }
 # The pager's and the shell's defaults, unless a build turns them off.
 default = ["xai-grok-pager/default", "xai-grok-shell/default"]
 default-bazel = []
+
+[lints]
+workspace = true

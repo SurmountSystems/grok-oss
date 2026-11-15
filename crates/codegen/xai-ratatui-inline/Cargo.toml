@@ -38,3 +38,6 @@ test-support = []
 # CI builds a single shared rlib variant per crate, so the pager's CI test target links the same
 # lib as production; the helper is read-only and inert unless called.
 default-bazel = ["test-support"]
+
+[lints]
+workspace = true
