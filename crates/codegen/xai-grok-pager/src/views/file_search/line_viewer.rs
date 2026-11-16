@@ -1145,10 +1145,13 @@ impl LineViewerState {
 
     /// Width of the right-side soft plan pane.
     ///
-    /// Half the draw, at least 24 columns, leaving 16 columns on the left.
-    /// A 100-column draw keeps 50. An 80-column draw keeps 40. The
-    /// 49-column sentence wraps inside that content column.
+    /// Below 200 columns the pane is the full draw, including 100, 120,
+    /// and 160. At 200 columns and above the pane is about half (200
+    /// returns 100), at least 24 columns, leaving 16 columns on the left.
     pub fn soft_plan_pane_width(full_width: u16) -> u16 {
+        if full_width < 200 {
+            return full_width;
+        }
         let half = full_width / 2;
         let min = 24.min(full_width);
         let leave_left = 16.min(full_width.saturating_sub(min));
@@ -3164,7 +3167,9 @@ mod tests {
         viewer.plan_mut().feedback_active = true;
         viewer.plan_mut().show_action_buttons = false;
 
-        let full = Rect::new(0, 0, 80, 24);
+        // 200 columns is the first width that stays about half, so a left
+        // strip still sits beside the pane. Below 200 the pane is full width.
+        let full = Rect::new(0, 0, 200, 24);
         let mut buf = Buffer::empty(full);
         // `Z` is transcript text. The pane must paint over the columns
         // behind it. `X` stays on the left, beside the pane.
@@ -4510,8 +4515,9 @@ mod tests {
         }
     }
 
-    /// Half-width plan pane (`PlanPreview`, fullscreen off). The title and
-    /// the body phrase wrap inside the visible content column. The
+    /// Full-width plan pane below 200 columns (`PlanPreview`, fullscreen
+    /// off). A 100-column draw is the whole terminal. The title and the
+    /// body phrase still wrap inside the visible content column. The
     /// line-number gutter, `SOFT_PLAN_TEXT_INSET` (5), and the scrollbar
     /// stay inside the frame and leave every letter of those strings in
     /// that column.
@@ -4524,10 +4530,11 @@ mod tests {
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         let theme = crate::theme::Theme::doge();
         let white = Color::Rgb(255, 255, 255);
-        let title =
-            "Move the copy control, fix the wide status row, and choose one of the four cells";
+        let title = "Move the copy control, fix the wide status row, and choose one of the four cells before the scrollbar clips a letter";
         let phrase = "from that bottom-right corner";
-        let sentence = format!("The copy control moves away from that {phrase}.");
+        let sentence = format!(
+            "The copy control moves away from that {phrase} and every letter stays inside this content column."
+        );
         let mut body = format!("# {title}\n\nProposed plan.\n\n{sentence}\n");
         for n in 1..=40 {
             body.push_str(&format!("line {n:02}\n"));
@@ -4549,7 +4556,10 @@ mod tests {
         let right_x = pane_x + pane_w - 1;
         let top_y = full.y;
         let bottom_y = full.y + full.height - 1;
-        assert_eq!(pane_w, 50, "a 100-column draw keeps a half-width plan pane");
+        assert_eq!(
+            pane_w, 100,
+            "a 100-column draw keeps a full-width plan pane"
+        );
         assert_eq!(LineViewerState::SOFT_PLAN_TEXT_INSET, 5);
 
         for (x, y, glyph) in [
@@ -4713,6 +4723,74 @@ mod tests {
                     "column {x} at row {y} holds {symbol:?}; the scrollbar and its gap must leave that letter in the content column"
                 );
             }
+        }
+    }
+
+    /// A tall narrow terminal, including 100, 120, and 160 columns, is the
+    /// full-width class. 200 is the first width that is clearly wider than
+    /// that screenshot class, so the pane is about half there. Footer
+    /// buttons and the comment field stay inside the pane.
+    #[test]
+    fn narrow_terminal_plan_view_is_full_width_and_wide_terminal_is_about_half() {
+        let message = "full width below 200 columns, about half at 200 and above";
+        assert_eq!(LineViewerState::soft_plan_pane_width(160), 160, "{message}");
+        assert_eq!(LineViewerState::soft_plan_pane_width(100), 100, "{message}");
+        assert_eq!(LineViewerState::soft_plan_pane_width(200), 100, "{message}");
+
+        for width in [100u16, 200] {
+            let mut viewer = LineViewerState::open_markdown_content(
+                "plan.md",
+                "# Plan\n\nFile-backed approval\n".to_owned(),
+                None,
+            )
+            .expect("open plan");
+            viewer.kind = LineViewerKind::PlanPreview;
+            viewer.fullscreen = false;
+            viewer.plan_mut().feedback_active = true;
+            viewer.plan_mut().show_action_buttons = true;
+            viewer.plan_mut().show_revision_prompt = true;
+            viewer.plan_mut().revision_prompt_text.clear();
+
+            let full = Rect::new(0, 0, width, 30);
+            let mut buf = Buffer::empty(full);
+            let theme = crate::theme::Theme::current();
+            render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+            let pane_w = LineViewerState::soft_plan_pane_width(width);
+            let pane_x = full.width.saturating_sub(pane_w);
+            let pane_right = pane_x.saturating_add(pane_w);
+            let plan = viewer.plan_ref().expect("plan extras");
+            let prompt = plan
+                .revision_prompt_area
+                .expect("the comment field stays on screen");
+            assert!(
+                prompt.x >= pane_x && prompt.x.saturating_add(prompt.width) <= pane_right,
+                "comment field cells must not start left of the pane or run past the right edge; width={width} prompt={prompt:?} pane_x={pane_x} pane_right={pane_right}"
+            );
+            for (name, area) in [
+                ("approve", plan.approve_button_area),
+                ("comment", plan.comment_button_area),
+                ("revise", plan.send_button_area),
+                ("exit", plan.abandon_button_area),
+            ] {
+                let Some(area) = area else {
+                    panic!("{name} missing from the plan view at width {width}");
+                };
+                assert!(
+                    area.x >= pane_x && area.x.saturating_add(area.width) <= pane_right,
+                    "{name} cells must not start left of the pane or run past the right edge; width={width} area={area:?} pane_x={pane_x} pane_right={pane_right}"
+                );
+                let row = row_text(&buf, area.y);
+                assert!(
+                    row.to_ascii_lowercase().contains(name),
+                    "the {name} button stays on screen inside the plan view; row={row:?}"
+                );
+            }
+            let prompt_row = row_text(&buf, prompt.y.saturating_add(1));
+            assert!(
+                prompt_row.contains("Type a revision") || prompt_row.contains("Type your comment"),
+                "the comment field stays on screen inside the plan view; row={prompt_row:?}"
+            );
         }
     }
 

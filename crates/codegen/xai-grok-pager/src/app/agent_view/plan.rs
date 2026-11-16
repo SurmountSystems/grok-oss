@@ -2070,6 +2070,46 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    /// File-backed Comment CTA owns printable keys. They do not type into
+    /// the main composer.
+    fn selected_comment_cta_owns_typed_key(&self, key: &KeyEvent) -> bool {
+        if self.selected_plan_cta()
+            != Some(crate::views::file_search::line_viewer::SelectedPlanCta::Comment)
+        {
+            return false;
+        }
+        let file_backed_comment = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.source == PlanReviewSource::FileBacked
+                && pav.focus == PlanApprovalFocus::Prompt
+                && pav.prompt_intent == PlanPromptIntent::Comment
+        });
+        if !file_backed_comment {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => {
+                key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+            }
+            KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn edit_selected_plan_comment_field(&mut self, key: &KeyEvent) -> InputOutcome {
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return InputOutcome::Changed;
+        };
+        let text = &mut viewer.plan_mut().revision_prompt_text;
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => text.push(ch),
+            KeyCode::Backspace | KeyCode::Delete => {
+                text.pop();
+            }
+            _ => {}
+        }
+        InputOutcome::Changed
+    }
+
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         if crate::input::key::is_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
@@ -2189,6 +2229,11 @@ impl AgentView {
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
         if crate::key!('y').matches(key) && !is_commenting && empty_prompt && preview_focused {
             return self.copy_plan_full();
+        }
+        // Comment is the selected footer button. Typed letters land in the
+        // plan comment buffer, not the main composer.
+        if self.selected_comment_cta_owns_typed_key(key) {
+            return self.edit_selected_plan_comment_field(key);
         }
         // Preview types `a`. Empty Prompt (revision notes) still Approves.
         if !is_commenting

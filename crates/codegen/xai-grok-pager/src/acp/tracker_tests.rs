@@ -4935,6 +4935,47 @@ fn image_user_echo_second_chunk_must_not_paint_a_second_operator_line() {
     );
 }
 
+/// A stalled interject painted once, then a non-prompt block, then a
+/// `user_message_chunk` with the same display text and no `<user_query>` wrap,
+/// must not push a second block. A later different prompt still paints once.
+#[test]
+fn stalled_interject_echo_without_user_query_wrap_appears_once() {
+    let line = "Also look into why you can get into a state where you take 20 minutes to respond?";
+    let other = "Weird how the message duplicated itself, might be a clue...";
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    sb.push_block(RenderBlock::interjection_prompt(line));
+    assert_eq!(count_user_prompts_with_text(&sb, line), 1);
+    assert!(
+        tracker.handle_update(
+            tool_call("tc-between", acp::ToolKind::Other, "status"),
+            &meta(),
+            &mut sb,
+        ),
+        "a non-prompt block sits between the painted interject and its echo"
+    );
+    assert!(
+        !tracker.handle_update(user_message(line), &meta(), &mut sb),
+        "same display text with no <user_query> wrap must not push a second block"
+    );
+    assert_eq!(
+        count_user_prompts_with_text(&sb, line),
+        1,
+        "the line appears once"
+    );
+    assert!(tracker.handle_update(user_message(other), &meta(), &mut sb));
+    assert_eq!(
+        count_user_prompts_with_text(&sb, other),
+        1,
+        "a second, different prompt sent once also appears once"
+    );
+    assert_eq!(
+        count_user_prompts_with_text(&sb, line),
+        1,
+        "the line appears once"
+    );
+}
+
 fn user_message_with_chunk_meta(text: &str, chunk_meta: acp::Meta) -> acp::SessionUpdate {
     acp::SessionUpdate::UserMessageChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(

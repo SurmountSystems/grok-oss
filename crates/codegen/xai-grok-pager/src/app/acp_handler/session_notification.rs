@@ -650,6 +650,17 @@ pub(super) fn handle_session_notification_with_origin(
                             );
                             true
                         }
+                    } else if agent.session.state.is_turn_running()
+                        && matches!(
+                            xai_grok_shell::session::PromptOrigin::from_prompt_id(&prompt_id),
+                            xai_grok_shell::session::PromptOrigin::SubagentCompleted { .. }
+                        )
+                    {
+                        // The busy guard used to drop this wake, clear the wake
+                        // turn, and leave TurnRunning on Responding… or Waiting
+                        // for the model… with the reply already on screen.
+                        agent.session.finish_turn(&mut agent.scrollback);
+                        true
                     } else {
                         false
                     }
