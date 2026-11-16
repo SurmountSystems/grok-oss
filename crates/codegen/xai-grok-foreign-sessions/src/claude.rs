@@ -122,19 +122,18 @@ fn finish_recent_candidates(
     }
 }
 
+#[cfg(not(windows))]
 fn project_directory_is_safe(metadata: &std::fs::Metadata) -> bool {
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return false;
-        }
-    }
-    true
+    metadata.is_dir() && !metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn project_directory_is_safe(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
 
 fn collect_recent_candidates(

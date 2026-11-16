@@ -462,7 +462,7 @@ pub(super) fn handle_session_notification_with_origin(
             if !should_render {
                 return false;
             }
-            true
+            should_render
         } else {
             false
         };

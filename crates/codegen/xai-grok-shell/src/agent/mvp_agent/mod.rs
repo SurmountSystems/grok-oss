@@ -709,14 +709,11 @@ struct RetainedResources {
 }
 impl RetainedResources {
     fn is_empty(&self) -> bool {
-        if self.turn_number.is_some() || self.dispatch_lock.is_some()
-            || self.live_orphan_heal_lock.is_some()
-            || self.config_mutation_lock.is_some()
-            || self.permission_event_receiver.is_some()
-        {
-            return false;
-        }
-        true
+        self.turn_number.is_none()
+            && self.dispatch_lock.is_none()
+            && self.live_orphan_heal_lock.is_none()
+            && self.config_mutation_lock.is_none()
+            && self.permission_event_receiver.is_none()
     }
 }
 /// Per-resident-session `(title, last_turn_summary)` display cache; see `resident_roster_titles`.

@@ -335,7 +335,8 @@ pub enum AuthMode {
     /// RFC 8628 device flow: device code and copyable URL, no paste box.
     Device,
 }
-/// Named wait for the Connecting... splash (`AuthMode::Pending` with no URL).
+/// Named wait for the Connecting... splash (`AuthMode::Pending` with no URL)
+/// when no authenticate task is running.
 /// Last-session restore and a hung `x.ai/auth/get_url` must not keep this splash past this budget.
 pub(crate) const CONNECTING_SPLASH_WAIT: Duration =
     xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT;
@@ -353,6 +354,30 @@ impl AuthState {
                 ..
             }
         )
+    }
+
+    /// The welcome Login action spawned Authenticate and it has not finished.
+    /// A missing URL in this state is "not published yet", not a failed start.
+    pub(crate) fn login_starter_is_running(&self) -> bool {
+        self.is_connecting_splash()
+            && matches!(
+                self,
+                Self::Authenticating {
+                    handle: Some(_),
+                    ..
+                }
+            )
+    }
+
+    /// Splash budget. A live starter uses the interactive auth budget (60s),
+    /// not the 5s refresh budget that was cancelling login and painting
+    /// [`CONNECTING_SPLASH_TIMEOUT_ERROR`]. This is not the prompt-ack timeout.
+    pub(crate) fn connecting_splash_budget(&self) -> Duration {
+        if self.login_starter_is_running() {
+            xai_grok_shell::http::STARTUP_AUTH_TIMEOUT
+        } else {
+            CONNECTING_SPLASH_WAIT
+        }
     }
 }
 /// Folder-trust state for the welcome screen.

@@ -2533,7 +2533,7 @@ pub(crate) fn execute(
                                 .into(),
                         );
                         match tokio::time::timeout(
-                            crate::app::app_view::CONNECTING_SPLASH_WAIT,
+                            xai_grok_shell::http::STARTUP_AUTH_TIMEOUT,
                             acp_send(req, &tx),
                         )
                         .await

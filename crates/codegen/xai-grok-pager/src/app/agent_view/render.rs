@@ -1251,7 +1251,6 @@ impl AgentView {
     /// Render the agent into `area`.
     /// `in_dashboard_overlay` is `true` when this view is being rendered inside the dashboard's session-overlay.
     /// It appends `Ctrl+\\:dashboard` (and, when the overlay header can cycle, the `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         area: Rect,

@@ -2285,10 +2285,7 @@ impl PromptWidget {
         }
         // Check backslash continuation: a trailing `\` means send would do continuation, not send
         let cursor = self.textarea.cursor();
-        if cursor > 0 && text.as_bytes().get(cursor - 1) == Some(&b'\\') {
-            return false;
-        }
-        true
+        cursor == 0 || text.as_bytes().get(cursor - 1) != Some(&b'\\')
     }
 
     /// Drop a half-finished paste-chip double-click. Leaving Isolated

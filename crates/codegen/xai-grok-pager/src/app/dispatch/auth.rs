@@ -1018,6 +1018,11 @@ pub(super) fn handle_auth_url_ready(
         } if *current_seq == request_seq
     ) && auth_url.is_none();
     if splash_miss {
+        // The authenticate task is still the starter. An empty poll means the
+        // URL is not published yet. Do not paint the splash error or cancel it.
+        if app.auth_state.login_starter_is_running() {
+            return vec![Effect::PollAuthUrl { request_seq }];
+        }
         return dispatch_connecting_splash_timeout(app);
     }
     if let AuthState::Authenticating {

@@ -71,9 +71,6 @@ toml = { workspace = true, optional = true }
 xai-dirs = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
-[build-dependencies]
-sha2 = { workspace = true }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 
 [target.'cfg(unix)'.dependencies]
