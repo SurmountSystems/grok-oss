@@ -1399,6 +1399,43 @@ pub(in crate::app::dispatch) fn models_keeping_chosen_effort(
     next.restore_chosen_effort_if_same_model(previous_id.as_ref(), previous_effort);
     next
 }
+/// `response_ready` means `session/new` can take a prompt. Leave "Starting session..."
+/// and send anything queued during start. The later `SessionCreated` result still
+/// binds models, modes, and fetches. This does not wait for that result.
+pub(crate) fn finish_session_start_on_response_ready(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+) -> bool {
+    let loop_seed = app.scheduler_background_loops_seed;
+    let should_finish = app.agents.get(&agent_id).is_some_and(|agent| {
+        agent.pending_session_id.as_ref() == Some(&session_id) && agent.session.session_id.is_none()
+    });
+    if !should_finish {
+        return false;
+    }
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.session_id = Some(session_id);
+        agent.session_starting_since = None;
+    }
+    // Already-bound sessions keep their pin. A missing pin reads as in-session.
+    // Pin here because this is the first bind. SessionCreated sees the id and skips.
+    app.session_loop_fire_detached
+        .entry(agent_id)
+        .or_insert(loop_seed);
+    if app.reconnect_pending {
+        return true;
+    }
+    let drain = {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return true;
+        };
+        maybe_drain_queue(agent, &mut app.pending_image_notices)
+    };
+    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+    app.pending_effects.extend(drain.effects);
+    true
+}
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,
