@@ -342,6 +342,18 @@ grok-oss sessions search "rate limit"
 
 ---
 
+## grok-oss eyes
+
+`grok-oss eyes` is a short text view of one grok-oss session. It is not a screenshot, and it does not dump every terminal cell.
+
+The five verbs are look, type, key, expect, and score. `grok-oss eyes look` prints a short TOON list from the app's own UI state: status text, composer text and whether it is focused, each queued prompt, and the last few transcript lines. type writes into the composer. key sends one key the TUI already uses, including Enter. expect fails when a named string is missing. score fails when the composer has no caret, a queued row has no name, or the status line is still "Starting session..." after the session is ready and a queued prompt was not sent.
+
+The first session is a pseudoterminal the Agent starts. It does not attach to the window the Operator already has open. Attaching can steal keys.
+
+The steps for one open GitHub issue are in `/home/hunter/.agents/skills/enki-eyes/SKILL.md` under grok-oss eyes. This page is not a second copy of that protocol.
+
+---
+
 ## The grok usage Subcommand
 
 Print persisted token and cost usage for a session. Use this instead of reading session files:

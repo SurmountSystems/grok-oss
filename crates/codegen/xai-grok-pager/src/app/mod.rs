@@ -21,6 +21,7 @@ pub mod cli;
 pub(crate) mod command_catalog;
 pub mod consent;
 pub(crate) mod deferred_subagent_finishes;
+pub mod eyes;
 pub(crate) mod global_work_pause;
 pub(crate) mod l0_enqueue;
 pub(crate) mod soft_stop;

@@ -203,10 +203,25 @@ See ~/.grok/README.md for more information.
     /// Disabled by default and enabled server-side per account; set `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
+    /// Print a short text view of a spawned session.
+    /// This does not attach to a window that is already open, and it does not call the model.
+    Eyes(EyesArgs),
     /// Open the Agent Dashboard view at startup.
     /// The dashboard shows every session, top-level and subagents.
     /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
     Dashboard,
+}
+/// `grok-oss eyes` verbs. The first verb is `look`.
+#[derive(Debug, clap::Args, Clone)]
+pub struct EyesArgs {
+    #[command(subcommand)]
+    pub command: EyesCommand,
+}
+#[derive(Debug, Subcommand, Clone)]
+pub enum EyesCommand {
+    /// Print a short TOON look of this spawned session.
+    /// This does not call the model.
+    Look,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]

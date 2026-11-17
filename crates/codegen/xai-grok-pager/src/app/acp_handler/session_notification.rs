@@ -2690,6 +2690,44 @@ fn push_reauth_required_once(scrollback: &mut crate::scrollback::state::Scrollba
     scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
 }
 
+/// Same HTTP send miss the operator sees as `error sending request for url`.
+/// Image transcription has its own banner and is not this row.
+fn is_same_send_network_failure(reason: &str) -> bool {
+    crate::app::error_display::is_transport_send_miss(reason)
+        && !crate::app::error_display::is_image_transcription_transport_miss(reason)
+}
+
+fn session_event_is_network_request_retry_notice(event: &SessionEvent) -> bool {
+    let text = event.message();
+    text.contains("Network request failed") && text.contains("retrying")
+}
+
+fn same_send_network_retry_notice_present(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    (0..scrollback.len()).any(|i| match scrollback.get(i).map(|entry| &entry.block) {
+        Some(RenderBlock::SessionEvent(block)) => {
+            session_event_is_network_request_retry_notice(&block.event)
+        }
+        _ => false,
+    })
+}
+
+/// One scrollback row for repeated retries of the same send. Later attempts
+/// must not append another copy.
+fn push_same_send_network_retry_notice_once(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+) {
+    if same_send_network_retry_notice_present(scrollback) {
+        return;
+    }
+    scrollback.push_block(RenderBlock::session_event(SessionEvent::RequestFailed {
+        status: None,
+        headline: "Network request failed".to_string(),
+        detail: "retrying".to_string(),
+    }));
+}
+
 pub(super) fn apply_retry_state(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
@@ -2726,6 +2764,9 @@ pub(super) fn apply_retry_state_with_nested(
                 reason: reason.clone(),
                 error_type: error_type.clone(),
             }));
+            if is_same_send_network_failure(reason) {
+                push_same_send_network_retry_notice_once(scrollback);
+            }
         }
         // Live stream after a retry: keep Retrying chrome, not a hard clear.
         // Hard clear made the footer fall through to zombie "Waiting for
@@ -2800,6 +2841,11 @@ pub(super) fn apply_retry_state_with_nested(
                     error,
                     error_type: None,
                 }));
+            } else if is_same_send_network_failure(reason)
+                && same_send_network_retry_notice_present(scrollback)
+            {
+                // The retrying row already names this send. Leave that sentence.
+                // Do not append another copy when retries stop.
             } else {
                 scrollback.push_block(RenderBlock::session_event(
                     crate::app::error_display::format_request_failure(None, None, reason)

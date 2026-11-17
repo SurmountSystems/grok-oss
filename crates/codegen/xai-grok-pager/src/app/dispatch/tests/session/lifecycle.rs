@@ -1063,6 +1063,51 @@ fn response_ready_ends_starting_session_and_delivers_queued_prompt() {
         app.pending_effects
     );
 }
+/// Same moment as [`response_ready_ends_starting_session_and_delivers_queued_prompt`],
+/// before `response_ready`: the session is still starting and one prompt is queued.
+/// That moment must emit a short TOON look. The painted turn-status row is not that look.
+#[test]
+fn starting_session_with_one_queued_prompt_emits_a_short_toon_look() {
+    const CONTRACT: &str = "A session that is still starting, with one queued prompt, must emit a short TOON look that names \"Starting session...\" and that queued prompt. The look stays at or under ten lines so it cannot become a full screen dump.";
+    let id = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let queued = "can't seem to start a new session?";
+    let effects = dispatch(Action::SendPrompt(queued.into()), &mut app);
+    assert!(
+        expect_agent(&app, id).session_starting_since.is_some(),
+        "still starting, before response_ready"
+    );
+    assert!(
+        expect_agent(&app, id)
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.text == queued),
+        "one prompt is queued during start"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == queued)),
+        "the queued prompt is not sent while the session is still starting"
+    );
+    let look = short_toon_look(&app);
+    assert!(
+        look.contains("Starting session...") && look.contains(queued),
+        "{CONTRACT} got: {look:?}"
+    );
+    let line_count = look.lines().count();
+    assert!(
+        line_count <= 10,
+        "{CONTRACT} got {line_count} lines: {look:?}"
+    );
+}
+/// Text this starting session emits for a look.
+/// The painted turn-status row is not this look.
+fn short_toon_look(app: &AppView) -> String {
+    crate::app::eyes::short_toon_look(app)
+}
 fn deliver_session_setup_phase(app: &mut AppView, session_id: &str, phase: &str) {
     let params = serde_json::json!({
         "method": "session/new",
