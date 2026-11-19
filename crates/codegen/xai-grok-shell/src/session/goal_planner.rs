@@ -205,6 +205,9 @@ pub(crate) enum GoalPlannerOutcome {
     FailClosed {
         reason: GoalPlannerFailClosedReason,
         latency_ms: u64,
+        /// Session-error text from the research role when that role stopped and the plan file is missing or empty.
+        /// `None` keeps the generic planner pause: a bare runtime string, a cancelled stop, or a plan-writer runtime stop.
+        research_runtime_message: Option<String>,
     },
 }
 
@@ -456,6 +459,33 @@ pub(crate) async fn run_goal_planner(
     );
     let research_result =
         spawn_goal_creation_role(&spawner, GoalCreationRole::Research, research_prompt).await;
+    // A research session error with no plan names that role. A bare runtime string stays on the generic pause.
+    let research_runtime_message = match &research_result {
+        Err(SpawnError::Runtime {
+            message,
+            cancelled: false,
+        }) if spawn_error_is_session_error(message)
+            && !spawn_error_is_repeating_sentence_stop(message) =>
+        {
+            Some(message.clone())
+        }
+        _ => None,
+    };
+    if let Some(message) = research_runtime_message
+        && !non_empty_plan_file(inputs.plan_file).await
+    {
+        tracing::warn!(
+            error = %message,
+            "goal planner: research role runtime error and the plan file is missing or empty",
+        );
+        return record_fail_closed_with_research_runtime(
+            GoalPlannerFailClosedReason::Runtime,
+            Some(message),
+            inputs.attempt,
+            started,
+            emit_event,
+        );
+    }
     if let Some(stop) = outcome_if_spawn_stopped(
         research_result,
         inputs.plan_file,
@@ -738,6 +768,11 @@ async fn non_empty_plan_file(path: &Path) -> bool {
     }
 }
 
+/// Nested once-run turn errors are `Session error: {detail}`. A runtime string without that prefix is not one.
+fn spawn_error_is_session_error(message: &str) -> bool {
+    message.contains("Session error:")
+}
+
 /// Nested once-run writer turn errors are `Session error: {detail}`. Match the
 /// sampler line and the pager chrome headline (`Stopped: repeating sentence`).
 fn spawn_error_is_repeating_sentence_stop(message: &str) -> bool {
@@ -809,13 +844,27 @@ fn record_fail_closed(
     started: std::time::Instant,
     emit_event: &dyn Fn(Event),
 ) -> GoalPlannerOutcome {
+    record_fail_closed_with_research_runtime(reason, None, attempt, started, emit_event)
+}
+
+fn record_fail_closed_with_research_runtime(
+    reason: GoalPlannerFailClosedReason,
+    research_runtime_message: Option<String>,
+    attempt: u32,
+    started: std::time::Instant,
+    emit_event: &dyn Fn(Event),
+) -> GoalPlannerOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
     emit_event(Event::GoalPlannerFailClosed {
         reason: reason.as_const_str(),
         attempt,
         latency_ms,
     });
-    GoalPlannerOutcome::FailClosed { reason, latency_ms }
+    GoalPlannerOutcome::FailClosed {
+        reason,
+        latency_ms,
+        research_runtime_message,
+    }
 }
 
 // Tests

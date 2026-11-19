@@ -1089,6 +1089,11 @@ pub(crate) fn planner_failure_pause_message() -> String {
     format!("No plan was produced. {GOAL_RESUME_HINT}")
 }
 
+/// Stored pause when the research role's session error stops it and the plan file is missing or empty.
+pub(crate) fn research_role_runtime_pause_message(runtime_message: &str) -> String {
+    format!("The research role stopped with a runtime error: {runtime_message}")
+}
+
 pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &[String]) -> bool {
     use xai_grok_tools::implementations::grok_build::UPDATE_GOAL_TOOL_NAME;
     goal_enabled && tool_names.iter().any(|n| n == UPDATE_GOAL_TOOL_NAME)
@@ -1397,7 +1402,11 @@ impl SessionActor {
                     }
                 }
                 crate::session::goal_planner::GoalPlannerOutcome::Interrupted => continue,
-                crate::session::goal_planner::GoalPlannerOutcome::FailClosed { reason, .. } => {
+                crate::session::goal_planner::GoalPlannerOutcome::FailClosed {
+                    reason,
+                    research_runtime_message,
+                    ..
+                } => {
                     // History reads "Planning failed" + "Paused: planner", not a bare pause.
                     {
                         let mut tracker = self.goal_tracker.lock();
@@ -1410,11 +1419,17 @@ impl SessionActor {
                             );
                         }
                     }
+                    let pause_message = match research_runtime_message {
+                        Some(runtime_message) => {
+                            research_role_runtime_pause_message(&runtime_message)
+                        }
+                        None => planner_failure_pause_message(),
+                    };
                     let _ = self
                         .auto_pause_goal_if_matches_with_message(
                             &goal_id,
                             crate::session::goal_tracker::GoalPauseReason::Planner,
-                            planner_failure_pause_message(),
+                            pause_message,
                         )
                         .await;
                 }

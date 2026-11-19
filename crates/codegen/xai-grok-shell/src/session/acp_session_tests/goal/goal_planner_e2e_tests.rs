@@ -68,6 +68,8 @@ struct PlannerSpawnCapture {
     fork_context: StdArc<std::sync::Mutex<Vec<bool>>>,
     surface_completion: StdArc<std::sync::Mutex<Vec<bool>>>,
     model: StdArc<std::sync::Mutex<Vec<Option<String>>>>,
+    descriptions: StdArc<std::sync::Mutex<Vec<String>>>,
+    prompts: StdArc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Write `body` at the plan path the prompt names, then reply the planner's `Done`.
@@ -116,6 +118,8 @@ fn spawn_planner_coordinator_capturing(
     let fork_log = StdArc::clone(&capture.fork_context);
     let surface_log = StdArc::clone(&capture.surface_completion);
     let model_log = StdArc::clone(&capture.model);
+    let description_log = StdArc::clone(&capture.descriptions);
+    let prompt_log = StdArc::clone(&capture.prompts);
     tokio::task::spawn_local(async move {
         while let Some(ev) = rx.recv().await {
             if let SubagentEvent::Spawn(req) = ev {
@@ -126,6 +130,11 @@ fn spawn_planner_coordinator_capturing(
                     .lock()
                     .unwrap()
                     .push(req.runtime_overrides.model.clone());
+                description_log
+                    .lock()
+                    .unwrap()
+                    .push(req.description.clone());
+                prompt_log.lock().unwrap().push(req.prompt.clone());
                 let plan_path = plan_path_from_prompt(&req.prompt);
                 let result = match &behaviour {
                     SpawnBehaviour::WritePlanThenDone { body } => {
@@ -1202,6 +1211,80 @@ async fn planner_runtime_failure_pauses_goal_with_canonical_message() {
             assert_eq!(
                 snap.pause_message.as_deref(),
                 Some(planner_failure_pause_message().as_str()),
+            );
+        })
+        .await;
+}
+
+/// Live session `01a1f202-2379-7179-96da-abf6d8e7107f`: the only creation role
+/// was `goal research specialist`. It failed in 8671 ms. `goal/` had no files.
+/// The plan writer never ran. The painted pause was still
+/// `No plan was produced. Retry with /goal resume.` with no progress items.
+/// That pause is the miss. A written plan file stays covered by the tests that
+/// already require Planned instead of this sentence.
+#[tokio::test(flavor = "current_thread")]
+async fn when_only_the_research_role_stops_and_the_plan_writer_never_runs_the_goal_does_not_pause_with_no_plan_was_produced_before_any_progress_item()
+ {
+    let research_stop = "Session error: Internal error: {\n  \"message\": \"Auth recovery succeeded but 4 authenticated inference requests were still rejected (401); giving up after 3 retries. Turn ran 8s wall-clock.\",\n  \"http_status\": 401\n}";
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count, capture) =
+                spawn_planner_coordinator_capturing(SpawnBehaviour::Runtime {
+                    message: research_stop.to_string(),
+                    cancelled: false,
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+            let plan_path = actor.goal_tracker.lock().plan_path();
+            let research_path =
+                crate::session::goal_planner::goal_creation_artifact(&plan_path, "research");
+
+            actor.maybe_run_goal_planner("now run just deploy-dry-run and solve everything.").await;
+
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
+            let descriptions = capture.descriptions.lock().unwrap().clone();
+            assert_eq!(
+                descriptions,
+                vec!["goal research specialist".to_string()],
+                "the only creation role is research; the plan writer never runs: {descriptions:?}"
+            );
+            let prompts = capture.prompts.lock().unwrap().clone();
+            assert_eq!(prompts.len(), 1);
+            assert!(
+                prompts[0].contains("ROLE: research."),
+                "the only spawn must be the research role"
+            );
+            assert!(
+                !prompts[0].contains("ROLE: plan writer."),
+                "the plan writer must not run when research stops first"
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert!(
+                snap.plan_file.is_none(),
+                "research stopped before any plan file existed"
+            );
+            assert!(
+                !plan_path.is_file(),
+                "plan file must be absent, got {}",
+                plan_path.display()
+            );
+            assert!(
+                !research_path.is_file(),
+                "research file must be absent, got {}",
+                research_path.display()
+            );
+            assert!(
+                actor.goal_plan.lock().progress_items().is_empty(),
+                "the pause is before any progress item exists"
+            );
+            assert_ne!(
+                snap.pause_message.as_deref(),
+                Some(planner_failure_pause_message().as_str()),
+                "when only the research role stops and the plan writer never runs, the goal does not pause with \"No plan was produced. Retry with /goal resume.\" before any progress item exists. status={:?} pause={:?} progress_items={:?}",
+                snap.status,
+                snap.pause_message,
+                actor.goal_plan.lock().progress_items(),
             );
         })
         .await;
