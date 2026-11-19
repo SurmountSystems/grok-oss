@@ -763,6 +763,18 @@ test-remote *args: require_system
     #!/usr/bin/env bash
     set -euo pipefail
     export GROK_NIX_FORCE_REMOTE=1
+    # Empty filter and --no-run are local rejects. Do not locate grok-nix-helper first.
+    if [[ "$#" -eq 0 ]]; then
+      echo "just test-remote: missing test filter. Pass a filter (for example -p xai-grok-pager --lib -- actions::defaults)." >&2
+      echo "Refusing to run the whole workspace on the builder from an empty filter. Full gate: just check-remote." >&2
+      exit 2
+    fi
+    for a in "$@"; do
+      if [[ "${a}" == "--no-run" ]]; then
+        echo "just test-remote / just cargo-remote test runs the tests on the remote builder. Do not pass --no-run (that is compile-only)." >&2
+        exit 2
+      fi
+    done
     just grok_helper remote-named-cargo -- test "$@"
 
 [private]
@@ -1656,7 +1668,7 @@ test-test-remote-requires-filter:
     #!/usr/bin/env bash
     set -euo pipefail
     set +e
-    empty_out="$(just test-remote 2>&1)"
+    empty_out="$(env -u GROK_NIX_HELPER just test-remote 2>&1)"
     empty_status=$?
     set -e
     if [[ "${empty_status}" -ne 2 ]]; then
@@ -1669,13 +1681,23 @@ test-test-remote-requires-filter:
       echo "${empty_out}" >&2
       exit 1
     fi
+    if grep -qF 'grok-nix-helper is not on PATH' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty just test-remote must not print grok-nix-helper is not on PATH:" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
+    if ! grep -qF 'missing test filter' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty just test-remote must name a missing test filter (recipe failed alone is not enough):" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
     if grep -qE 'nix attempt|nix build' <<<"${empty_out}"; then
       echo "test-test-remote-requires-filter: empty filter must not start nix build:" >&2
       echo "${empty_out}" >&2
       exit 1
     fi
     set +e
-    norun_out="$(just test-remote --no-run 2>&1)"
+    norun_out="$(env -u GROK_NIX_HELPER just test-remote --no-run 2>&1)"
     norun_status=$?
     set -e
     if [[ "${norun_status}" -ne 2 ]]; then
