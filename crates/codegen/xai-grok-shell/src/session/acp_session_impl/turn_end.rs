@@ -9,6 +9,9 @@ use prod_mc_cli_chat_proxy_types::feedback_types;
 pub(super) enum GoalInfraTurnErrAction {
     /// Queue the same goal turn. Do not pause. Do not advertise `/goal resume`.
     AutoRetry,
+    /// Nested Unauthorized 401 with bearer, CLI Token-Auth, and `reason=no auth context`.
+    /// Do not infra-pause. Do not store that sentence as the pause message.
+    SkipNestedNoAuthContext,
     /// Pause as today and print `slash_output` (includes `/goal resume`).
     Pause { slash_output: String },
 }
@@ -687,6 +690,16 @@ impl SessionActor {
         )
     }
 
+    /// Nested Unauthorized 401 that names bearer, CLI Token-Auth, and no auth context.
+    /// A bare 401, a bare Unauthorized line, `auth_kind=other`, or any other turn error is not this case.
+    pub(super) fn is_nested_bearer_cli_no_auth_context_401(slash_detail: &str) -> bool {
+        let lower = slash_detail.to_ascii_lowercase();
+        lower.contains("unauthorized (401)")
+            && lower.contains("auth_kind=bearer")
+            && lower.contains("x_xai_token_auth=xai-grok-cli")
+            && lower.contains("reason=no auth context")
+    }
+
     /// Decide auto-retry vs pause for a goal infra turn error.
     pub(super) fn goal_infra_turn_err_action(
         slash_detail: &str,
@@ -696,6 +709,8 @@ impl SessionActor {
             && retries_used < GOAL_REPEAT_STOP_AUTO_RETRY_CAP
         {
             GoalInfraTurnErrAction::AutoRetry
+        } else if Self::is_nested_bearer_cli_no_auth_context_401(slash_detail) {
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext
         } else {
             GoalInfraTurnErrAction::Pause {
                 slash_output: format!(
@@ -720,6 +735,7 @@ impl SessionActor {
                 self.maybe_queue_goal_continuation().await;
                 false
             }
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext => false,
             GoalInfraTurnErrAction::Pause { slash_output } => {
                 let paused = self
                     .auto_pause_goal_if_active_with_message(
@@ -844,6 +860,9 @@ mod goal_repeat_stop_action_tests {
                     "a repeating-sentence stop must auto-retry, not emit the pause line: {slash_output}"
                 );
             }
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext => {
+                panic!("a repeating-sentence stop must auto-retry, not skip as a nested 401");
+            }
         }
     }
 
@@ -862,6 +881,9 @@ mod goal_repeat_stop_action_tests {
             }
             GoalInfraTurnErrAction::AutoRetry => {
                 panic!("other turn errors must still pause")
+            }
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext => {
+                panic!("a rate-limit turn error must still infra-pause")
             }
         }
     }
@@ -885,6 +907,11 @@ mod goal_repeat_stop_action_tests {
             GoalInfraTurnErrAction::Pause { .. } => {}
             GoalInfraTurnErrAction::AutoRetry => {
                 panic!("repeating-sentence stop auto-retries at most twice")
+            }
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext => {
+                panic!(
+                    "repeating-sentence stop at the cap must still pause, not skip as a nested 401"
+                )
             }
         }
     }
@@ -914,6 +941,34 @@ mod goal_repeat_stop_action_tests {
             GoalInfraTurnErrAction::AutoRetry => {
                 panic!("after the cap the goal must pause as today")
             }
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext => {
+                panic!("after the cap the goal must pause as today, not skip as a nested 401")
+            }
+        }
+    }
+
+    #[test]
+    fn nested_bearer_cli_no_auth_context_401_does_not_infra_pause() {
+        let slash_detail = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+        assert_eq!(
+            SessionActor::goal_infra_turn_err_action(slash_detail, 0),
+            GoalInfraTurnErrAction::SkipNestedNoAuthContext
+        );
+    }
+
+    #[test]
+    fn other_unauthorized_401s_still_pause() {
+        let bare = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials";
+        let other_kind = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)";
+        let bearer_without_reason = "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated)";
+        for detail in [bare, other_kind, bearer_without_reason] {
+            assert!(
+                matches!(
+                    SessionActor::goal_infra_turn_err_action(detail, 0),
+                    GoalInfraTurnErrAction::Pause { .. }
+                ),
+                "only the nested bearer CLI no-auth-context 401 skips infra pause, got {detail}"
+            );
         }
     }
 }
