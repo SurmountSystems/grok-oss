@@ -67,13 +67,6 @@ pub struct GoalDetailHits {
     pub clear: Option<Rect>,
 }
 
-fn close_only_hits(close: Rect) -> GoalDetailHits {
-    GoalDetailHits {
-        close: Some(close),
-        ..GoalDetailHits::default()
-    }
-}
-
 fn paint_footer_token(
     buf: &mut Buffer,
     x: u16,
@@ -261,11 +254,82 @@ fn sanitize_title(s: &str) -> String {
     strip_control_chars(s, false).trim().to_owned()
 }
 
+/// Byte span of the first `{...}` object in `text`, respecting strings and escapes.
+/// Returns `None` when there is no balanced object.
+fn json_object_span(text: &str) -> Option<(usize, usize)> {
+    let start = text.find('{')?;
+    let bytes = text.as_bytes();
+    let mut i = start;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let Some(&c) = bytes.get(i) else {
+            break;
+        };
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b'{' {
+            depth += 1;
+        } else if c == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((start, i + 1));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Pause text for the card. A research-role prefix plus a JSON object keeps the
+/// prefix and the human `message` sentence, and drops the raw object (`promptUsage`,
+/// `costUsdTicks`, and the rest). Any other reason is only control-stripped.
+fn pause_reason_visible_text(msg: &str) -> String {
+    let text = strip_control_chars(msg, true);
+    let Some((start, end)) = json_object_span(&text) else {
+        return text;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text[start..end]) else {
+        return text;
+    };
+    let Some(sentence) = value.get("message").and_then(|m| m.as_str()) else {
+        return text;
+    };
+    let sentence = sentence.trim();
+    if sentence.is_empty() {
+        return text;
+    }
+    let prefix = text[..start].trim_end();
+    let suffix = text[end..].trim();
+    let mut out = String::new();
+    if !prefix.is_empty() {
+        out.push_str(prefix);
+        out.push(' ');
+    }
+    out.push_str(sentence);
+    if !suffix.is_empty() {
+        if !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push_str(suffix);
+    }
+    out
+}
+
 /// Build the wrapped-reason source line for a paused goal's `pause_message`, control-stripped with newlines kept.
 /// [`wrap_pause_message_lines`] splits on the kept newlines for multi-line block reasons, so they never reach a rendered row.
 /// Shared by the height calc and the render so they wrap identical text.
 fn format_pause_reason(msg: &str) -> String {
-    format!("Reason: {}", strip_control_chars(msg, true))
+    format!("Reason: {}", pause_reason_visible_text(msg))
 }
 
 /// True when the goal carries at least one signal from the completion classifier.
@@ -462,6 +526,87 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     Rect::new(x, y, w, h)
 }
 
+/// Paint the command footer (`Esc: close` and `/goal resume | pause | status | clear`,
+/// or the failed-goal clear hint) on row `y`.
+fn paint_goal_command_footer(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    w: u16,
+    goal: &GoalDisplayState,
+    hovers: GoalDetailHovers,
+    theme: &Theme,
+    hits: &mut GoalDetailHits,
+) {
+    let hint_style = Style::default().fg(theme.gray_dim);
+    let failed = matches!(
+        goal.status,
+        GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+    );
+    let mut cx = x;
+    let mut rem = w;
+    let (tw, rect) = paint_footer_token(buf, cx, y, rem, "Esc: close", hovers.esc_close, theme);
+    hits.esc_close = Some(rect);
+    cx = cx.saturating_add(tw);
+    rem = rem.saturating_sub(tw);
+    if failed {
+        let (tw, _) = paint_footer_token(buf, cx, y, rem, "  ", false, theme);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, rect) = paint_footer_token(buf, cx, y, rem, "/goal clear", hovers.clear, theme);
+        hits.clear = Some(rect);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        buf.set_span_safe(
+            cx,
+            y,
+            &Span::styled(", then start a new goal", hint_style),
+            rem,
+        );
+    } else {
+        let (tw, _) = paint_footer_token(buf, cx, y, rem, "  /goal ", false, theme);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, rect) = paint_footer_token(buf, cx, y, rem, "resume", hovers.resume, theme);
+        hits.resume = Some(rect);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, theme);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, rect) = paint_footer_token(buf, cx, y, rem, "pause", hovers.pause, theme);
+        hits.pause = Some(rect);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, theme);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, rect) = paint_footer_token(buf, cx, y, rem, "status", hovers.status, theme);
+        hits.status = Some(rect);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, theme);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        let (_tw, rect) = paint_footer_token(buf, cx, y, rem, "clear", hovers.clear, theme);
+        hits.clear = Some(rect);
+    }
+}
+
+fn command_footer_hits(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    w: u16,
+    goal: &GoalDisplayState,
+    hovers: GoalDetailHovers,
+    theme: &Theme,
+    mut hits: GoalDetailHits,
+) -> GoalDetailHits {
+    paint_goal_command_footer(buf, x, y, w, goal, hovers, theme, &mut hits);
+    hits
+}
+
 /// Render the goal detail overlay into the buffer. Draws a bordered popup with. Title: objective.
 /// Status and phase. Token budget progress bar. Todo progress list. Active subagent metrics. Recent
 /// event history. Available commands hint.
@@ -568,6 +713,10 @@ pub fn render_goal_detail(
     let mut y = inner.y;
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
+    // The last inner row is the command footer. Wrapped reason lines and every
+    // later body row stop before it, so a long pause reason cannot return early
+    // and drop `/goal resume | pause | status | clear`.
+    let footer_y = inner.y + inner.height.saturating_sub(1);
 
     let (status_text, status_color, phase_text) = status_label(goal);
     let mut status_spans = vec![
@@ -589,8 +738,8 @@ pub fn render_goal_detail(
     buf.set_line_safe(x, y, &Line::from(status_spans), w);
     y += 1;
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     if goal.status.is_paused() {
@@ -623,8 +772,8 @@ pub fn render_goal_detail(
         );
         y += 1;
 
-        if y >= inner.y + inner.height {
-            return close_only_hits(close_rect);
+        if y >= footer_y {
+            return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
         }
     }
 
@@ -638,8 +787,8 @@ pub fn render_goal_detail(
     {
         let formatted = format_pause_reason(msg);
         for line in wrap_pause_message_lines(&formatted, w) {
-            if y >= inner.y + inner.height {
-                return close_only_hits(close_rect);
+            if y >= footer_y {
+                return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
             }
             buf.set_line_safe(
                 x,
@@ -649,6 +798,10 @@ pub fn render_goal_detail(
             );
             y += 1;
         }
+    }
+
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     let tokens_str =
@@ -681,8 +834,8 @@ pub fn render_goal_detail(
     );
     y += 1;
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     // Progress bar, only when a budget is set
@@ -703,14 +856,14 @@ pub fn render_goal_detail(
         y += 1;
     }
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     y += 1;
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     if todos.is_empty() {
@@ -740,7 +893,7 @@ pub fn render_goal_detail(
 
         let display_count = todos.len().min(MAX_TODO_DISPLAY);
         for item in todos.iter().take(display_count) {
-            if y >= inner.y + inner.height.saturating_sub(1) {
+            if y >= footer_y {
                 break;
             }
             let (icon, icon_color) = match item.status {
@@ -762,7 +915,7 @@ pub fn render_goal_detail(
             buf.set_line_safe(x, y, &Line::from(spans), w);
             y += 1;
         }
-        if todos.len() > MAX_TODO_DISPLAY {
+        if todos.len() > MAX_TODO_DISPLAY && y < footer_y {
             let remaining = todos.len() - MAX_TODO_DISPLAY;
             buf.set_line_safe(
                 x,
@@ -777,15 +930,15 @@ pub fn render_goal_detail(
         }
     }
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     if let Some(ref role) = goal.current_subagent_role {
         // Leading blank, budgeted in `subagent_lines` (renders only with the block)
         y += 1;
-        if y >= inner.y + inner.height {
-            return close_only_hits(close_rect);
+        if y >= footer_y {
+            return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
         }
         let mut subagent_spans = vec![
             Span::styled("Active Subagent: ", Style::default().fg(theme.gray)),
@@ -806,7 +959,7 @@ pub fn render_goal_detail(
         buf.set_line_safe(x, y, &Line::from(subagent_spans), w);
         y += 1;
 
-        if y < inner.y + inner.height {
+        if y < footer_y {
             // Subagent detail line.
             let mut detail_parts: Vec<String> = Vec::new();
             if let Some(tok) = goal.live_subagent_tokens {
@@ -841,8 +994,8 @@ pub fn render_goal_detail(
         if per_model_row_count(&goal.live_tokens_by_model) > 0 {
             use unicode_width::UnicodeWidthStr;
             for (model_id, tokens) in goal.live_tokens_by_model.iter().take(MAX_MODEL_DISPLAY) {
-                if y >= inner.y + inner.height {
-                    return close_only_hits(close_rect);
+                if y >= footer_y {
+                    return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
                 }
                 let tokens_str = format_tokens_compact((*tokens).min(i64::MAX as u64) as i64);
                 // Budget the model id to the columns left after the "  " indent and the "  <tokens>" suffix
@@ -862,7 +1015,7 @@ pub fn render_goal_detail(
                 );
                 y += 1;
             }
-            if goal.live_tokens_by_model.len() > MAX_MODEL_DISPLAY && y < inner.y + inner.height {
+            if goal.live_tokens_by_model.len() > MAX_MODEL_DISPLAY && y < footer_y {
                 let remaining = goal.live_tokens_by_model.len() - MAX_MODEL_DISPLAY;
                 buf.set_line_safe(
                     x,
@@ -878,15 +1031,15 @@ pub fn render_goal_detail(
         }
     }
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     if has_classifier_activity(goal) {
         // Blank separator.
         y += 1;
-        if y >= inner.y + inner.height {
-            return close_only_hits(close_rect);
+        if y >= footer_y {
+            return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
         }
 
         buf.set_line_safe(
@@ -902,7 +1055,7 @@ pub fn render_goal_detail(
         );
         y += 1;
 
-        if y < inner.y + inner.height {
+        if y < footer_y {
             let verdict_label = classifier_verdict_label(goal.last_classifier_verdict);
             buf.set_line_safe(
                 x,
@@ -916,7 +1069,7 @@ pub fn render_goal_detail(
             y += 1;
         }
 
-        if y < inner.y + inner.height {
+        if y < footer_y {
             // Shared label with the chip; empty (no run reserved yet) falls back to a hyphen so the row never reads "Attempts: "
             let attempts = classifier_attempts_label(goal);
             let attempts_display = if attempts.is_empty() {
@@ -936,7 +1089,7 @@ pub fn render_goal_detail(
             y += 1;
         }
 
-        if y < inner.y + inner.height {
+        if y < footer_y {
             let path_display = classifier_details_display(
                 goal.last_classifier_details_path.as_deref(),
                 goal.last_classifier_details_exists,
@@ -957,15 +1110,15 @@ pub fn render_goal_detail(
         }
     }
 
-    if y >= inner.y + inner.height {
-        return close_only_hits(close_rect);
+    if y >= footer_y {
+        return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
     }
 
     if goal.last_event.is_some() {
         // Leading blank, budgeted in `history_lines` (renders only with the block)
         y += 1;
-        if y >= inner.y + inner.height {
-            return close_only_hits(close_rect);
+        if y >= footer_y {
+            return command_footer_hits(buf, x, footer_y, w, goal, hovers, &theme, hits);
         }
         buf.set_line_safe(
             x,
@@ -980,7 +1133,7 @@ pub fn render_goal_detail(
         );
         y += 1;
 
-        if y < inner.y + inner.height
+        if y < footer_y
             && let Some(ref event) = goal.last_event
         {
             // Humanize both the event label (folding in the detail) and the timestamp
@@ -1003,62 +1156,10 @@ pub fn render_goal_detail(
         }
     }
 
-    if y < inner.y + inner.height {
-        let hint_style = Style::default().fg(theme.gray_dim);
-        let failed = matches!(
-            goal.status,
-            GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
-        );
-        let mut cx = x;
-        let mut rem = w;
-        let (tw, rect) =
-            paint_footer_token(buf, cx, y, rem, "Esc: close", hovers.esc_close, &theme);
-        hits.esc_close = Some(rect);
-        cx = cx.saturating_add(tw);
-        rem = rem.saturating_sub(tw);
-        if failed {
-            let (tw, _) = paint_footer_token(buf, cx, y, rem, "  ", false, &theme);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, rect) =
-                paint_footer_token(buf, cx, y, rem, "/goal clear", hovers.clear, &theme);
-            hits.clear = Some(rect);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            buf.set_span_safe(
-                cx,
-                y,
-                &Span::styled(", then start a new goal", hint_style),
-                rem,
-            );
-        } else {
-            let (tw, _) = paint_footer_token(buf, cx, y, rem, "  /goal ", false, &theme);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "resume", hovers.resume, &theme);
-            hits.resume = Some(rect);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "pause", hovers.pause, &theme);
-            hits.pause = Some(rect);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "status", hovers.status, &theme);
-            hits.status = Some(rect);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
-            cx = cx.saturating_add(tw);
-            rem = rem.saturating_sub(tw);
-            let (_tw, rect) = paint_footer_token(buf, cx, y, rem, "clear", hovers.clear, &theme);
-            hits.clear = Some(rect);
-        }
+    if y >= inner.y + inner.height {
+        paint_goal_command_footer(buf, x, footer_y, w, goal, hovers, &theme, &mut hits);
+    } else {
+        paint_goal_command_footer(buf, x, y, w, goal, hovers, &theme, &mut hits);
     }
 
     hits
@@ -2791,5 +2892,118 @@ mod tests {
         );
         let t = buffer_text(&buf);
         assert!(t.contains("Completion review:") && t.contains("Esc: close"));
+    }
+
+    /// Research-role pause text: the human sentence lives in `message`, and
+    /// `attach_prompt_usage` keeps the rest of the session error on the wire.
+    /// The fixture must keep those keys. The render output is what must drop them.
+    fn research_role_sampling_window_pause_message() -> String {
+        const HUMAN: &str = "Context is over this session's sampling window (230127/200000 tokens). Not retrying the same oversized model request. Compact once or start a new session.";
+        let json = r#"{
+  "message": "HUMAN_SENTENCE",
+  "promptUsage": {
+    "inputTokens": 228942,
+    "outputTokens": 1125,
+    "totalTokens": 230067,
+    "cachedReadTokens": 0,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 0,
+    "modelCalls": 1,
+    "apiDurationMs": 30000,
+    "costUsdTicks": 13939020000,
+    "modelUsage": {
+      "grok-4.7-build-fast": {
+        "inputTokens": 228942,
+        "outputTokens": 1125,
+        "totalTokens": 230067,
+        "cachedReadTokens": 0,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 0,
+        "modelCalls": 1,
+        "apiDurationMs": 30000,
+        "costUsdTicks": 13939020000
+      }
+    },
+    "numTurns": 1,
+    "usageIsIncomplete": true
+  }
+}"#;
+        let json = json.replace("HUMAN_SENTENCE", HUMAN);
+        format!(
+            "The research role stopped with a runtime error: Session error: Internal error: {json}"
+        )
+    }
+
+    fn infra_paused_goal_with_session_json() -> GoalDisplayState {
+        let mut goal = make_goal();
+        goal.status = GoalDisplayStatus::InfraPaused;
+        goal.objective =
+            "now run just deploy-dry-run and fix all the errors in a complete way".into();
+        goal.pause_message = Some(research_role_sampling_window_pause_message());
+        goal
+    }
+
+    #[test]
+    fn goal_pause_reason_shows_the_human_sentence_not_raw_session_json() {
+        let goal = infra_paused_goal_with_session_json();
+        let pause = goal
+            .pause_message
+            .as_deref()
+            .expect("paused goal must carry the session error");
+        assert!(
+            pause.contains("Context is over this session's sampling window (230127/200000 tokens). Not retrying the same oversized model request. Compact once or start a new session."),
+            "fixture message field must keep the human sentence"
+        );
+        assert!(
+            pause.contains("promptUsage"),
+            "fixture must still contain promptUsage"
+        );
+        assert!(
+            pause.contains("\"inputTokens\": 228942"),
+            "fixture must still contain inputTokens 228942"
+        );
+        assert!(
+            pause.contains("\"outputTokens\": 1125"),
+            "fixture must still contain outputTokens 1125"
+        );
+        assert!(
+            pause.contains("\"costUsdTicks\": 13939020000"),
+            "fixture must still contain costUsdTicks 13939020000"
+        );
+        assert!(
+            pause.contains("modelUsage"),
+            "fixture must still contain modelUsage"
+        );
+        assert!(
+            pause.contains("grok-4.7-build-fast"),
+            "fixture must still contain the model id"
+        );
+
+        let text = render_to_text(&goal);
+        assert!(
+            text.contains("Context is over this session's sampling window"),
+            "the human sentence must render, got:\n{text}"
+        );
+        assert!(
+            !text.contains("promptUsage"),
+            "raw session JSON key promptUsage must not render, got:\n{text}"
+        );
+        assert!(
+            !text.contains("costUsdTicks"),
+            "raw session JSON key costUsdTicks must not render, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn goal_command_row_stays_visible_when_the_pause_reason_is_long() {
+        // Same paused goal as the JSON test. `render_to_text` paints into
+        // `Rect::new(0, 0, 100, 40)`. `goal_detail_area` clamps the card to
+        // `screen.height - 4` (36 rows). That is the ~40 line card.
+        let goal = infra_paused_goal_with_session_json();
+        let text = render_to_text(&goal);
+        assert!(
+            text.contains("/goal resume | pause | status | clear"),
+            "goal command row must stay on the ~40 line card, got:\n{text}"
+        );
     }
 }

@@ -1,5 +1,4 @@
 use super::find_local_child_for_remote_in_root;
-use filetime::{self, FileTime};
 use std::fs;
 use tempfile::TempDir;
 
@@ -113,9 +112,9 @@ fn duplicate_children_equal_timestamps_stable_tiebreak() {
 
     // Force all directories to have *exactly* the same mtime so the lexicographic session_id comparison is the actual tie-breaker
     // Without this, nanosecond-precision filesystem mtimes can differ.
-    let fixed_mtime = FileTime::from_unix_time(1700000000, 0);
+    let fixed_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     for dir in &dirs {
-        filetime::set_file_mtime(dir, fixed_mtime).unwrap();
+        std::fs::set_times(dir, std::fs::FileTimes::new().set_modified(fixed_mtime)).unwrap();
     }
 
     let found = find_local_child_for_remote_in_root("remote-tie", cwd, &root);

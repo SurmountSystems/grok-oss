@@ -27,7 +27,6 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use filetime::{FileTime, set_file_mtime};
 use tempfile::TempDir;
 use xai_fast_worktree::{ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus};
 use xai_grok_shell::session::info::Info;
@@ -506,8 +505,12 @@ fn write_summary(
     let summary_path = session_dir.join("summary.json");
     let bytes = serde_json::to_vec_pretty(&summary).expect("serialize summary");
     fs::write(&summary_path, bytes).expect("write summary");
-    let mtime = FileTime::from_unix_time(active_at.timestamp(), 0);
-    set_file_mtime(summary_path, mtime).expect("set summary mtime");
+    let mtime = std::time::UNIX_EPOCH
+        + std::time::Duration::from_secs(
+            u64::try_from(active_at.timestamp()).expect("summary mtime after epoch"),
+        );
+    std::fs::set_times(&summary_path, std::fs::FileTimes::new().set_modified(mtime))
+        .expect("set summary mtime");
 }
 
 fn summary_ids(summaries: &[Summary]) -> Vec<String> {

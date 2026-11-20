@@ -1693,7 +1693,7 @@ mod tests {
     fn set_dir_mtime_days_ago(dir: &Path, days: u64) {
         let t =
             std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60 + 60);
-        filetime::set_file_mtime(dir, filetime::FileTime::from_system_time(t)).unwrap();
+        std::fs::set_times(dir, std::fs::FileTimes::new().set_modified(t)).unwrap();
     }
 
     #[test]
