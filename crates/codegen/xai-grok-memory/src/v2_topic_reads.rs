@@ -90,9 +90,11 @@ pub(crate) fn record_topic_read(scope_dir: &Path, relative_path: &str) -> Result
         .apply_with_retry_until(&connection, Instant::now() + COUNT_BUSY_TIMEOUT)
         .and_then(|()| connection.busy_timeout(COUNT_BUSY_TIMEOUT))
         .map_err(database_error)?;
-    let now = SystemTime::now()
+    let now_secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
+    let now = i64::try_from(now_secs)
+        .map_err(|err| database_error(rusqlite::Error::ToSqlConversionFailure(Box::new(err))))?;
     connection
         .execute(
             "INSERT INTO memory_v2_topic_reads(relative_path, read_count, last_read_at)

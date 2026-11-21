@@ -1,99 +1,18 @@
-# Grok OSS local recipes.
-# GHA quality uses the same recipe chain as `just ci` (flake-meta → ci-prep → test),
-# not the `just ci` entrypoint itself -- keep this file the source of truth for those recipes.
-# Requires: just, nix (with flakes). No bash scripts -- just recipes + nix.
-#
-# Refresh locks: `just update` (one workspace Cargo.lock, then flake.lock).
-# Bare `just` lists recipes (same idea as `just -l` / `just --list`).
-# Full Nix local gate (same recipe chain as GHA quality): `just ci`
-#   (or `just check`). Host cargo only: `just check-local`.
-#   `just test` is fmt/clippy/tests via cargo-ci.
-# Closest GHA repro on Linux: CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci
-# Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
-# pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
-# Optional on this Linux host: `just check-remote` realizes flake metadata
-# and the workspace cargo quality derivation (the same gate as `just check` /
-# `just test`: fmt, workspace clippy --all-targets, workspace
-# nextest, doctests; members include cargo-mem-guard and grok-nix-helper) on
-# the existing trusted-user remote builder (default $HOME/.config/nix/machines).
-# Named filters: `just test-remote` / `just cargo-remote` realize
-# .#workspace-cargo-named-test the same way (force-remote nix, not host
-# rustc). rustc must not run on the caller. Those rustc jobs require
-# surmount-remote (plus big-parallel). This laptop never auto-detects
-# surmount-remote; the ssh-ng machines line must advertise it. --option
-# system-features that omit big-parallel does not stop local nixbld: the
-# daemon still advertises big-parallel. Force-remote nix passes
-# --option max-jobs 0 so this laptop does not build: crates.io FODs,
-# static.rust-lang.org toolchain tarballs (the builder ISA, not extra
-# cores), and crane vendor unpacks schedule on the remote. Nix 2.4+
-# sends preferLocalBuild derivations to remotes when the caller has
-# no local job slots (see https://github.com/NixOS/nix/issues/5646
-# accessed: 2026-08-23; https://nix.dev/manual/nix/2.18/advanced-topics/distributed-builds
-# accessed: 2026-08-23). builders-use-substitutes stays true so the
-# VPS fetches those itself. Force-remote also passes --store with the
-# machines-file ssh-ng URI and --eval-store auto (Nix 2.34+; this host
-# is 2.35) so cargo-package / cargo-src / toolchain paths stay in the
-# VPS store. Default nix build realizes into the local store, then
-# copies each remote output back over SSH. That is local store close,
-# not a builder miss. nix build --no-link skips a local result symlink.
-# -L logs still stream as text. This laptop must not substitute those
-# NARs from cache.nixos.org either. Force-remote nix passes --cores 64 so
-# one workspace rustc can use the builder's cores. The host machines file
-# max-jobs should match that width. Force-remote exports NIX_SSHOPTS (this
-# account's known_hosts; host-key checks stay on) and copies that host key
-# onto the builders line for nix-daemon SSH. Default `just check` /
-# `just ci` stay on this machine's Nix path. They do not require the
-# remote builder. `just check-local` runs cargo on this host. GitHub
-# Actions must not use check-remote, test-remote, or cargo-remote.
+# Grok OSS recipes. GitHub Actions must not call check-remote, test-remote, or cargo-remote.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# `just` with no recipe → list (just 1.x+; same as CLI `just --default-list` / `JUST_DEFAULT_LIST=1`).
 set default-list
 
-# Host system for flake check attributes (e.g. x86_64-linux).
-# Prefer CI_SYSTEM (GHA sets it). Local default: uname map — do not call `nix`
-# at just parse time (a broken host nix would fail every recipe). Recipe-time
-# current_system / require_system use the same uname map in this justfile.
-# They must not require a prebuilt grok-nix-helper. Top-level backticks
-# cannot expand {{ justfile_directory() }}, so keep uname inline here.
-# Attribute sinks use {{ system }} only after require_system.
+# CI_SYSTEM, else inline uname. Do not call nix at parse time.
 system := env_var_or_default("CI_SYSTEM", `case "$(uname -s)-$(uname -m)" in Linux-x86_64) echo x86_64-linux;; Linux-aarch64|Linux-arm64) echo aarch64-linux;; Darwin-x86_64) echo x86_64-darwin;; Darwin-arm64) echo aarch64-darwin;; *) echo "unsupported $(uname -s)-$(uname -m); set CI_SYSTEM=..." >&2; exit 1;; esac`)
 
-# Nix flags when CI_LOW_MEM=1: cap cores/jobs for pure nix steps.
+# When CI_LOW_MEM=1, cap cores and jobs on pure nix steps.
 nix_low_mem_opts := if env_var_or_default("CI_LOW_MEM", "") == "1" { "--option cores 2 --option max-jobs 1" } else { "" }
 
-# Free GHA (~4 vCPU / 16GB) sets CI_LOW_MEM=1.
 low_mem := env_var_or_default("CI_LOW_MEM", "")
 
-# ---------------------------------------------------------------------------
-# Transient network resilience (free GHA flake-input / binary-cache flakes)
-#
-# NIX_CONFIG knobs -- keep in sync with .github/workflows/ci.yml job env:
-#   download-attempts          -- retry individual downloads (default 5)
-#   connect-timeout            -- TCP connect timeout seconds
-#   stalled-download-timeout   -- abort hung transfers
-#   http-connections           -- parallel HTTP fetches (lower = less flaky)
-#
-# nix_retry wraps whole `nix ...` invocations when per-download knobs are not
-# enough (e.g. flake metadata 503 HTML). Backoff: 5s, 15s, 45s.
-#
-# Unclassified non-zero exits retry (GHA flake-input 502/503, downloads).
-# Hard remote-assign misses (failed to start SSH connection, Failed to
-# find a machine for remote build, or missing system features after the
-# client scheduled the drv) exit on attempt 1 with no sleep. Hard quality
-# misses (rustfmt Diff in, clippy/rustc could not compile, cargo --locked
-# lockfile mismatch, cargo nextest test run failed) also exit on attempt 1.
-# Linker SIGKILL (collect2 `ld returned 137`, 128+9) is builder memory,
-# not a rustc type error: rustc wraps it as could-not-compile, but that
-# class retries like a flake 502. Real rustc/clippy fails still fail-fast.
-# Cargo payloads stay outside nix_retry so a permanent compile fails once.
-# Local fail-fast: NIX_RETRY_ATTEMPTS=1 just mem-guard
-# Override attempts: NIX_RETRY_ATTEMPTS=5 just mem-guard
-#
-# Security: nix_retry execs the +cmd words as argv ("$@"), then appends
-# force-remote flags. Never pass untrusted user input as those words.
-# ---------------------------------------------------------------------------
+# Keep in sync with .github/workflows/ci.yml.
 export NIX_CONFIG := '''
 download-attempts = 5
 connect-timeout = 30
@@ -101,11 +20,7 @@ stalled-download-timeout = 100
 http-connections = 4
 '''
 
-# Resolve grok-nix-helper: GROK_NIX_HELPER, PATH, result/bin, crate target.
-# Never cargo/rustc the helper on this laptop. Never nix-build .#grok-nix-helper
-# (check-remote preflight and nix_retry / flake-meta are justfile; later
-# recipes that still need the binary locate only).
-# Does not print NIX_SSHOPTS, tokens, or GROK_HOME.
+# Locate only. Do not cargo or nix-build the helper on this laptop.
 [private]
 grok_nix_helper_bin:
     #!/usr/bin/env bash
@@ -136,10 +51,7 @@ grok_nix_helper_bin:
     echo "grok-nix-helper is not on PATH and GROK_NIX_HELPER is unset." >&2
     exit 2
 
-# Argv trampoline into grok-nix-helper. One remaining shebang so "$@" is the
-# subcommand words (a # in a word must not become a bash comment). Assign the
-# path first: bash set -e does not stop `exec "$(failing-cmd)"`, which becomes
-# `exec: : not found`.
+# Assign the helper path, then exec it. Do not exec a command substitution.
 [private]
 [positional-arguments]
 grok_helper +cmd:
@@ -152,8 +64,7 @@ grok_helper +cmd:
     fi
     exec "${helper}" "$@"
 
-# Print the Nix system triple (CI_SYSTEM or uname map). No host nix call.
-# Same map as parse-time `system :=`. Does not require grok-nix-helper.
+# CI_SYSTEM or the same uname map. No host nix and no helper binary.
 [private]
 current_system:
     #!/usr/bin/env bash
@@ -173,19 +84,13 @@ current_system:
     fi
     printf '%s\n' "${sys}"
 
-# Fail fast if the host system string is not safe for shell/attr interpolation.
-# Same source as `system` (CI_SYSTEM or uname). Never interpolate `{{ system }}`
-# into this recipe (single-quote in CI_SYSTEM must not break assignment).
-# Recipes that expand `{{ system }}` into nix attr paths depend on this first.
-# Does not require a prebuilt grok-nix-helper.
+# Refuse an unsafe system string. Do not interpolate system into this recipe.
 [private]
 require_system:
     #!/usr/bin/env bash
     set -euo pipefail
     sys="$(just current_system)"
-    # Same interpolation rule as system_safe_for_interpolation:
-    # known triples, or two [A-Za-z0-9_]+ tokens with a digit or underscore
-    # (so a just recipe name like just-one is not a Nix system).
+    # Known triples, or two tokens that include a digit or underscore.
     if [[ "${sys}" =~ ^(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)$ ]]; then
       exit 0
     fi
@@ -196,12 +101,7 @@ require_system:
     echo "    expected a Nix system like x86_64-linux (cpu-os), not a just recipe name" >&2
     exit 2
 
-# Fail loud before `just check-remote` starts Nix or cargo. Justfile / uname
-# / SSH preflight: no grok-nix-helper, no nix-build of the helper.
-# GROK_NIX_REMOTE_SYSTEM_FEATURES injects the daemon list so tests skip live
-# SSH. ssh-keygen on GROK_NIX_KNOWN_HOSTS. Live path: BatchMode to Host
-# surmount-1, then nix config show. Require surmount-remote. The helper
-# subcommand require-remote-builder stays for remote-named-cargo.
+# SSH preflight only. No helper binary. Require surmount-remote.
 [private]
 require_remote_builder:
     #!/usr/bin/env bash
@@ -322,25 +222,12 @@ require_remote_builder:
 
     echo "==> just check-remote: using builders file ${file}"
     echo "==> just check-remote: NIX_SSHOPTS uses this account's known_hosts (host-key checks stay on)"
-    echo "==> just check-remote: rustc, clippy, and nextest require the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job."
-    echo "==> just check-remote: force-remote nix sets max-jobs 0. This laptop must not build. Fixed-output derivations and toolchain downloads (crates.io, static.rust-lang.org) go to the remote builder. This laptop must not curl those hosts for this gate. The VPS fetches them from the web (builders-use-substitutes)."
-    echo "==> just check-remote: force-remote nix uses --store ssh-ng (same machines-file builder) and --eval-store auto. Cargo-package NARs stay on the VPS. This laptop does not download those NARs from the builder, and does not substitute them from cache.nixos.org. -L logs still stream. nix build --no-link skips a local result symlink."
-    echo "==> just check-remote: force-remote nix uses --cores 64. Host machines max-jobs should advertise that many jobs on the builder."
+    echo "==> just check-remote: rustc, clippy, and nextest run on the builder. This laptop does not run them. The builder must list surmount-remote."
+    echo "==> just check-remote: source is rsynced to /home/nixbuilder/grok-oss-src. Incremental cargo output stays at /home/nixbuilder/grok-oss-target on that machine."
+    echo "==> just check-remote: this recipe does not upload a cargo target directory and does not realize the quality derivation."
 
-# Retry a nix (or other) command. Live body is this recipe: argv exec of
-# "$@", fail-fast on quality/SSH, force-remote flags when
-# GROK_NIX_FORCE_REMOTE=1. Does not go through grok_helper /
-# grok_nix_helper_bin. Missing helper must not fail check-remote /
-# flake-meta. Integer-validates NIX_RETRY_ATTEMPTS (default 4). Prints a
-# clear banner per attempt. Unclassified failures retry. Hard SSH /
-# no-remote-machine / missing-system-features / rustfmt Diff-in / clippy
-# could-not-compile / cargo --locked lockfile mismatch / nix fixed-output
-# hash mismatch misses exit on attempt 1 (no 5s/15s/45s sleep). Use only
-# around store realization / flake eval, never around host cargo compile
-# payloads.
-#
-# Honor NIX_BIN by putting that binary's directory first on PATH. Exec is
-# argv ("$@"), never eval. Never set -- the machines-file line over "$@".
+# Argv exec. Do not route through the helper. Do not set -- over the command.
+# Retry ld returned 137. Fail fast on SSH and on a real compile error.
 [private]
 [positional-arguments]
 nix_retry +cmd:
@@ -442,8 +329,7 @@ nix_retry +cmd:
         echo "==> nix_retry: cargo fmt / rustfmt check failed (Diff in). That is a quality fail, not a flake 502/503. Format the listed files and retry. Not retrying this hard quality miss." >&2
         return 0
       fi
-      # rustc wraps a SIGKILL'd linker as could-not-compile. 137 is
-      # 128+9 SIGKILL (OOM killer). Retry as infra, not a type error.
+      # Linker SIGKILL is not a type error. Check it before could-not-compile.
       if grep -q 'ld returned 137' "${logf}"; then
         return 1
       fi
@@ -545,8 +431,7 @@ nix_retry +cmd:
         --cores 64
         --store "${store_uri}"
       )
-      # `nix store cat` rejects --eval-store. `nix build` / flake metadata
-      # still use auto so cargo-package NARs stay on the VPS.
+      # store cat rejects --eval-store. Other commands still pass --eval-store auto.
       if [[ "${2:-}" != "store" ]]; then
         extra+=(--eval-store auto)
       fi
@@ -623,48 +508,10 @@ nix_retry +cmd:
       n=$((n + 1))
     done
 
-# ---------------------------------------------------------------------------
-# CI vs release vs local quality
-#
-# CI is for checks only — never a release package (`nix build .#grok-oss`).
-# Shipping from CI would blur the trust boundary (supply chain). Optional
-# packaging is for humans: `just build` / `just smoke` / `just install-nix`.
-#
-# GHA (see .github/workflows/ci.yml): quality job runs flake-meta, ci-prep,
-# and `just test` (same chain as `just ci`, not the `just ci` entrypoint) —
-# not a release build. GHA always sets CI_LOW_MEM=1 and CI_SYSTEM=x86_64-linux.
-#
-# `just check` / `just ci` = full Nix local gate (same recipe chain as GHA
-#   quality). Run before you push when Nix on this machine is usable. No
-#   pre-commit hook required for this.
-# `just check-local` = host cargo only: fmt --all -- --check, then workspace
-#   clippy --all-targets --locked with -D warnings, then workspace nextest
-#   --locked, then cargo test --doc --workspace --locked. Use this when the
-#   VPS is down. It is not an alias of `just check`.
-# `just test` = fmt, clippy (-D warnings, workspace --all-targets),
-#   workspace nextest, doctests (members include cargo-mem-guard and
-#   grok-nix-helper; nextest covers those tests).
-# `just test-extra` = local-only extras CI does not run (cross-target clippy,
-#   nix_retry smoke).
-#
-# There is no `ci-quick` or `ci-host` recipe — use `check`/`check-local`/`ci` or `test`.
-# Optional `check-remote` sends that same full cargo gate (fmt, workspace
-# clippy --all-targets, nextest, doctests) to the remote builder
-# (surmount-remote). Named `just test-remote` / `just cargo-remote` send
-# a filter (cargo test / nextest / clippy / build / check) the same way.
-# Caller max-jobs is 0: FODs and toolchain downloads must not run on this
-# laptop. Default `just check` / `just ci` stay on this machine's Nix path.
-#
-# Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
-# nix monorepo release build — that OOMs on ~16GB runners). Same flag also
-# enables store-only PATH scrub in cargo-ci (see recipe comment).
-# ---------------------------------------------------------------------------
-
-# Alias: same full gate as `ci` (preferred short name before push).
+# Same Nix gate as ci.
 check: ci
 
-# Host cargo quality: fmt, then workspace clippy with -D warnings, then
-# nextest, then doctests. Does not alias just check.
+# Host cargo only. Not an alias of check.
 check-local:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -683,72 +530,227 @@ check-local:
     echo "just check-local passed"
 
 check-remote:
-    #!/usr/bin/env bash
-    # Optional remote gate: flake metadata plus the same workspace cargo gate as
-    # just check (fmt, workspace clippy --all-targets, nextest run,
-    # doctests) as a Nix derivation.
-    # rustc requires the remote builder's surmount-remote feature.
-    # Optional remote gate. Default local check and ci recipes stay on this machine's Nix path.
-    set -euo pipefail
-    export GROK_NIX_FORCE_REMOTE=1
-    just require_system
-    just require_remote_builder
-    export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
-    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
-    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
-    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
-      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
-    else
-      export NIX_SSHOPTS="${extra_ssh}"
-    fi
-    # Nix copies a dirty git flake before the derivation filter runs, and that
-    # copy includes gitignored cargo output. Build from a snapshot of tracked
-    # files and untracked files that are not gitignored.
-    snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
-    trap 'rm -rf "$snapshot"' EXIT
-    git ls-files -z --cached --others --exclude-standard \
-      | rsync -a --from0 --files-from=- ./ "${snapshot}/"
-    if find "$snapshot" -type d -name target -print -quit | grep -q .; then
-      echo "just check-remote: snapshot still contains a target directory" >&2
-      exit 2
-    fi
-    # Nix ssh-ng store copy sends the whole source archive on every hash change.
-    # rsync sends changed files. The builder then copies that directory into its
-    # own store. The laptop does not upload the archive.
-    builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
-    builder_field="${builder_field%%\?*}"
-    ssh_spec="${builder_field#ssh-ng://}"
-    if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
-      echo "just check-remote: builders file has no ssh-ng destination" >&2
-      exit 2
-    fi
-    remote_src="/home/nixbuilder/grok-oss-src"
-    echo "==> just check-remote: rsync filtered source to the builder. The first sync sends the crate tree. Later syncs send changed files."
-    # Do not print the builders destination.
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
-    rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
-    echo "==> just check-remote: flake metadata on the builder"
-    # After rsync. nix_retry would add --store ssh-ng and copy this source from the laptop.
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
-    echo "==> just check-remote: nix build on the builder from the synced source"
-    # Single quotes keep '#' from becoming a remote-shell comment.
-    out="$(ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix build -L 'path:${remote_src}#workspace-cargo-quality' --print-out-paths --cores 64 --no-link" | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
-    if [ -z "${out}" ]; then
-      echo "just check-remote: missing quality store path in the builder nix build output" >&2
-      exit 2
-    fi
-    echo "==> just check-remote: quality output ${out}"
-    echo "==> just check-remote: quality receipt (printed even when Nix reuses a previous result)"
-    ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" nix store cat "${out}/quality-summary.txt"
+	#!/usr/bin/env bash
+	set -euo pipefail
+	export GROK_NIX_FORCE_REMOTE=1
+	just require_system
+	just require_remote_builder
+	export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+	known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+	extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+	if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+	  export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+	else
+	  export NIX_SSHOPTS="${extra_ssh}"
+	fi
+	# Snapshot tracked and untracked files. Skip gitignored cargo output.
+	snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
+	trap 'rm -rf "$snapshot"' EXIT
+	git ls-files -z --cached --others --exclude-standard \
+	  | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+	if find "$snapshot" -type d -name target -print -quit | grep -q .; then
+	  echo "just check-remote: snapshot still contains a target directory" >&2
+	  exit 2
+	fi
+	builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
+	builder_field="${builder_field%%\?*}"
+	ssh_spec="${builder_field#ssh-ng://}"
+	if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
+	  echo "just check-remote: builders file has no ssh-ng destination" >&2
+	  exit 2
+	fi
+	remote_src="/home/nixbuilder/grok-oss-src"
+	echo "==> just check-remote: rsync filtered source to the builder. The first sync sends the crate tree. Later syncs send changed files."
+	# Do not print the builders destination. Do not upload a cargo target.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
+	rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
+	echo "==> just check-remote: flake metadata on the builder"
+	# On the builder. Do not send this tree back through nix_retry --store.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
+	echo "==> just check-remote: fmt, clippy, nextest, and doctests on the builder"
+	# Do not realize the quality derivation.
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "bash -s" <<-'GROK_CHECK_REMOTE_SCRIPT'
+	set -euo pipefail
+	mkdir -p /home/nixbuilder/grok-oss-target
+	cat > /home/nixbuilder/grok-oss-target/run-quality.sh <<-'GROK_CHECK_REMOTE_QUALITY'
+	set -euo pipefail
+	cd /home/nixbuilder/grok-oss-src
+	if [[ -z "${GROK_CHECK_REMOTE_SANDBOX:-}" ]]; then
+	  if ! command -v bwrap >/dev/null 2>&1; then
+	    echo "just check-remote: bubblewrap is not on the dev-shell PATH" >&2
+	    exit 2
+	  fi
+	  etc_copy=/home/nixbuilder/grok-oss-target/etc-overlay
+	  rm -rf "${etc_copy}"
+	  mkdir -p "${etc_copy}"
+	  # This copies readable entries from surmount-1 /etc and skips root-only files.
+	  while IFS= read -r -d '' src; do
+	    rel="${src#/etc/}"
+	    dest="${etc_copy}/${rel}"
+	    if [[ ! -r "${src}" ]]; then
+	      continue
+	    fi
+	    if [[ -L "${src}" ]]; then
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    elif [[ -d "${src}" ]]; then
+	      mkdir -p "${dest}"
+	    else
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    fi
+	  done < <(find /etc -mindepth 1 -print0 2>/dev/null || true)
+	  rm -f "${etc_copy}/hosts"
+	  cp -L /etc/hosts "${etc_copy}/hosts"
+	  if [[ -L "${etc_copy}/hosts" || ! -f "${etc_copy}/hosts" ]]; then
+	    echo "just check-remote: could not make a regular /etc/hosts for the quality sandbox" >&2
+	    exit 2
+	  fi
+	  export GROK_CHECK_REMOTE_SANDBOX=1
+	  # Bubblewrap binds host /etc/passwd over the overlay copy.
+	  exec bwrap --dev-bind / / --tmpfs /tmp --bind "${etc_copy}" /etc --ro-bind /etc/passwd /etc/passwd --die-with-parent bash /home/nixbuilder/grok-oss-target/run-quality.sh
+	fi
+	export TMPDIR=/tmp
+	export TEMP=/tmp
+	export TMP=/tmp
+	unset no_proxy NO_PROXY http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy || true
+	# Unset SSH_CONNECTION SSH_TTY SSH_CLIENT ET_VERSION.
+	unset SSH_CONNECTION SSH_TTY SSH_CLIENT ET_VERSION || true
+	clean_path=""
+	IFS=':' read -ra path_parts <<< "${PATH}"
+	for part in "${path_parts[@]}"; do
+	  case "${part}" in
+	    /nix/store/*) clean_path="${clean_path:+${clean_path}:}${part}" ;;
+	  esac
+	done
+	if [[ -z "${clean_path}" ]]; then
+	  echo "just check-remote: dev-shell PATH has no /nix/store entries" >&2
+	  exit 2
+	fi
+	export PATH="${clean_path}"
+	while IFS= read -r -d '' assignment; do
+	  name="${assignment%%=*}"
+	  value="${assignment#*=}"
+	  case "${value}" in
+	    *per-user*)
+	      if [[ -n "${name}" && "${name}" != "PATH" ]]; then
+	        unset "${name}" || true
+	      fi
+	      ;;
+	  esac
+	done < <(env -0)
+	# Cargo output stays at /home/nixbuilder/grok-oss-target.
+	export CARGO_TARGET_DIR=/home/nixbuilder/grok-oss-target
+	export CARGO_INCREMENTAL=1
+	# Keep the Nix cc wrapper. NIX_ENFORCE_PURITY=0.
+	export NIX_ENFORCE_PURITY=0
+	if ! command -v mold >/dev/null 2>&1; then
+	  echo "just check-remote: mold is not on the dev-shell PATH" >&2
+	  exit 2
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+	  echo "just check-remote: python3 is not on the dev-shell PATH" >&2
+	  exit 2
+	fi
+	unset CARGO_ENCODED_RUSTFLAGS
+	export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+	lib_path=""
+	if command -v pkg-config >/dev/null 2>&1; then
+	  for pc in libssl libcrypto dbus-1; do
+	    libdir="$(pkg-config --variable=libdir "${pc}" 2>/dev/null || true)"
+	    if [[ -n "${libdir}" && "${lib_path}" != *"${libdir}"* ]]; then
+	      lib_path="${lib_path:+${lib_path}:}${libdir}"
+	    fi
+	  done
+	fi
+	if [[ -n "${DUCKDB_LIB_DIR:-}" ]]; then
+	  lib_path="${lib_path:+${lib_path}:}${DUCKDB_LIB_DIR}"
+	fi
+	if [[ -n "${lib_path}" ]]; then
+	  export LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+	fi
+	export RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
+	export GROK_DISABLE_SHARED_HARNESS_SECRETS="${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+	export GROK_CREDENTIALS_FORCE_FILE="${GROK_CREDENTIALS_FORCE_FILE:-1}"
+	export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
+	unset NO_COLOR
+	unset CARGO_TERM_COLOR
+	unset OPENROUTER_API_KEY
+	mkdir -p frontend/apps/grok-desktop/scripts
+	cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
+	cargoJobs="${NIX_BUILD_CORES:-64}"
+	case "${cargoJobs}" in
+	  "" | *[!0-9]*) cargoJobs=64 ;;
+	esac
+	if [ "${cargoJobs}" -gt 64 ]; then
+	  cargoJobs=64
+	fi
+	if [ "${cargoJobs}" -le 64 ]; then
+	  cargoJobs=64
+	fi
+	export CARGO_BUILD_JOBS="${cargoJobs}"
+	linkJobs="${CARGO_BUILD_JOBS}"
+	if [ "${linkJobs}" -gt 32 ]; then
+	  linkJobs=32
+	fi
+	export CARGO_LINK_JOBS="${linkJobs}"
+	export CARGO_PROFILE=dev
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	echo "workspace cargo jobs=${CARGO_BUILD_JOBS} link jobs=${CARGO_LINK_JOBS} NIX_BUILD_CORES=${NIX_BUILD_CORES:-unset}"
+	workspace_run_make_jobserver() {
+	  unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	  if [ "$#" -lt 1 ]; then
+	    echo "workspace_run_make_jobserver: missing command" >&2
+	    exit 2
+	  fi
+	  mk="${TMPDIR:-/tmp}/workspace-cargo-jobserver.mk"
+	  {
+	    printf 'all:\n\t+env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 '
+	    printf '%q ' "$@"
+	    printf '\n'
+	  } > "${mk}"
+	  echo "workspace cargo make -j${CARGO_BUILD_JOBS} jobserver: $*"
+	  make -j"${CARGO_BUILD_JOBS}" --no-print-directory -f "${mk}"
+	}
+	nice -n 19 cargo fmt --all -- --check
+	clippy_driver="$(command -v clippy-driver || true)"
+	if [[ -z "${clippy_driver}" || ! -x "${clippy_driver}" ]]; then
+	  echo "just check-remote: clippy-driver not on PATH" >&2
+	  exit 2
+	fi
+	export RUSTC_WORKSPACE_WRAPPER="${clippy_driver}"
+	export CLIPPY_ARGS="-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__"
+	workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --all-targets --locked
+	unset RUSTC_WORKSPACE_WRAPPER CLIPPY_ARGS
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	nextest_log="${CARGO_TARGET_DIR}/nextest.log"
+	if ! command -v rg >/dev/null 2>&1; then
+	  echo "just check-remote: rg not on PATH" >&2
+	  exit 2
+	fi
+	CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" nice -n 19 cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" 2>&1 | tee "${nextest_log}"
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	workspace_run_make_jobserver cargo test --workspace --doc --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_LINK_JOBS"
+	summary="$(rg -a -F -n 'Summary [' "${nextest_log}" | tail -n 1 || true)"
+	if [[ -z "${summary}" ]]; then
+	  echo "just check-remote: nextest Summary line missing" >&2
+	  exit 2
+	fi
+	{
+	  echo "workspace-cargo-quality receipt"
+	  echo "fmt: cargo fmt --all -- --check"
+	  echo "clippy: cargo check --workspace --all-targets (clippy-driver -D warnings)"
+	  echo "${summary}"
+	  echo "doctests: cargo test --workspace --doc"
+	} > /home/nixbuilder/grok-oss-target/quality-summary.txt
+	GROK_CHECK_REMOTE_QUALITY
+	cd /home/nixbuilder/grok-oss-src
+	nix develop 'path:/home/nixbuilder/grok-oss-src' -c bash /home/nixbuilder/grok-oss-target/run-quality.sh
+	GROK_CHECK_REMOTE_SCRIPT
+	echo "==> just check-remote: quality receipt"
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "cat /home/nixbuilder/grok-oss-target/quality-summary.txt"
 
-# Named cargo on the same remote builder as check-remote (surmount-remote).
-# Kind is test, nextest, clippy, build, or check. Remaining words are the
-# cargo/nextest argv after that subcommand. rustc does not run on this
-# laptop. GitHub Actions must not call this recipe.
-#
-#   just cargo-remote test -p xai-grok-pager --lib -- actions::defaults
-#   just cargo-remote clippy -p xai-grok-pager --all-targets -- -D warnings
-#   just cargo-remote build -p xai-grok-pager
+# rustc does not run on this laptop. GitHub Actions must not call this recipe.
 [positional-arguments]
 cargo-remote *args: require_system
     #!/usr/bin/env bash
@@ -756,21 +758,25 @@ cargo-remote *args: require_system
     export GROK_NIX_FORCE_REMOTE=1
     just grok_helper remote-named-cargo -- "$@"
 
-# Named cargo test on the remote builder. Same path as cargo-remote test.
-# Example: just test-remote -p xai-grok-pager --lib -- actions::defaults
-# That is cargo test --locked (tests execute; not compile-only). Full gate:
-# just check-remote.
 [positional-arguments]
 test-remote *args: require_system
     #!/usr/bin/env bash
     set -euo pipefail
     export GROK_NIX_FORCE_REMOTE=1
+    # Empty filter and --no-run are local rejects. Do not locate grok-nix-helper first.
+    if [[ "$#" -eq 0 ]]; then
+      echo "just test-remote: missing test filter. Pass a filter (for example -p xai-grok-pager --lib -- actions::defaults)." >&2
+      echo "Refusing to run the whole workspace on the builder from an empty filter. Full gate: just check-remote." >&2
+      exit 2
+    fi
+    for a in "$@"; do
+      if [[ "${a}" == "--no-run" ]]; then
+        echo "just test-remote / just cargo-remote test runs the tests on the remote builder. Do not pass --no-run (that is compile-only)." >&2
+        exit 2
+      fi
+    done
     just grok_helper remote-named-cargo -- test "$@"
 
-# Shared body for test-remote / cargo-remote. Logic is grok-nix-helper
-# remote-named-cargo: validate kind/filter (reject --no-run), require_remote_builder,
-# GROK_NIX_FORCE_REMOTE=1, GROK_REMOTE_CARGO_KIND, GROK_REMOTE_TEST_ARGS,
-# nix build --impure ".#workspace-cargo-named-test".
 [private]
 [positional-arguments]
 remote_named_cargo *args: require_system
@@ -779,7 +785,6 @@ remote_named_cargo *args: require_system
     export GROK_NIX_FORCE_REMOTE=1
     just grok_helper remote-named-cargo -- "$@"
 
-# Full local gate — same recipe chain as GHA quality (flake + prep + all tests/lints).
 ci: require_system
     just flake-meta
     just ci-prep
@@ -787,51 +792,40 @@ ci: require_system
     @rm -f .ci-started
     @echo "CI passed"
 
-# Store prep before cargo under CI_LOW_MEM (mem-guard + ci-tools + .ci-started).
-# Permanent cargo failures must not re-enter the outer GHA bootstrap loop.
 ci-prep: require_system mem-guard
     @echo "==> ci-prep: realize .#ci-tools (nix_retry)"
     just nix_retry nix build -L {{ nix_low_mem_opts }} .#ci-tools
     @touch .ci-started
 
-# Refresh the one workspace Cargo.lock, then flake.lock. Does not compile.
-# Does not run just check-remote.
+# Refreshes locks only. Does not compile.
 update:
     @echo "==> cargo update (workspace)"
     cargo update --manifest-path Cargo.toml
     @echo "==> nix flake update"
     nix flake update
 
-# Prove the flake evaluates (cheap; fails fast on lock/input breakage).
-# Uses just nix_retry. Does not locate a helper binary.
 flake-meta:
     @echo "==> flake-meta"
     just nix_retry nix flake metadata
 
-# Optional pure-nix release package (NOT CI). For local packaging / install-nix.
+# Not the CI gate.
 build:
     @echo "==> build .#grok-oss{{ if low_mem == "1" { " (low-mem nix opts)" } else { "" } }} [not CI]"
     just nix_retry nix build -L {{ nix_low_mem_opts }} .#grok-oss
 
-# Optional: binary exists and runs a version probe (depends on release build).
 smoke: build
     @echo "==> smoke [not CI]"
     test -x ./result/bin/grok-oss
     ./result/bin/grok-oss --version
 
-# Optional crane cargo-check of pager-bin (NOT CI quality; prefer just test).
 cargo-check: require_system
     @echo "==> cargo-check [not CI quality]"
     just nix_retry nix build -L {{ nix_low_mem_opts }} ".#checks.{{ system }}.cargoCheck"
 
-# Optional flake-only re-run of openrouter credential tests (offline; not a
-# separate GHA job). Prefer `just test` / `cargo test -p xai-grok-shell --test
-# openrouter_credentials` for the normal path.
 openrouter-tests: require_system
     @echo "==> openrouter-tests (optional flake check; covered by just test)"
     just nix_retry nix build -L {{ nix_low_mem_opts }} ".#checks.{{ system }}.openrouter-credentials"
 
-# Build cargo-mem-guard package + unit tests as flake check.
 mem-guard: require_system
     @echo "==> build .#cargo-mem-guard{{ if low_mem == "1" { " (low-mem nix opts)" } else { "" } }}"
     just nix_retry nix build -L {{ nix_low_mem_opts }} .#cargo-mem-guard
@@ -842,25 +836,8 @@ mem-guard: require_system
     @echo "==> check .#grok-nix-helper-tests"
     just nix_retry nix build -L {{ nix_low_mem_opts }} ".#checks.{{ system }}.grok-nix-helper-tests"
 
-# Run a cargo (or other) command; under CI_LOW_MEM=1 wrap with cargo-mem-guard
-# via devShells.ci (mold + pressure defaults). Cargo payloads are never
-# nix_retry'd (permanent compile fails once).
-#
-# Env hygiene (always):
-#   - unset NO_COLOR, CARGO_TERM_COLOR, OPENROUTER_API_KEY
-#   - set harness secret disables + loopback proxy trust + runfiles dummy
-#
-# PATH hygiene (CI_LOW_MEM=1 only — GHA + local closest-CI repro):
-#   nix develop .#ci prepends ci-tools/stdenv store bins but keeps host PATH
-#   after. grok-nix-helper hermetic-path rebuilds PATH as a /nix/store
-#   allowlist so optional desktop tools (pw-record, parec, arecord, ...) cannot
-#   flip unit tests. Not a recorder denylist. git is in ci-tools for the same
-#   reason. Interactive `just dev` / bare cargo keep impure host PATH.
-#   Escape hatch: GROK_CI_ALLOW_HOST_PATH=1.
-#
-# RULES_RUST_RUNFILES_WORKSPACE_NAME: --all-features enables xai-test-utils'
-# optional `bazel`/`runfiles` dep (Bazel-only). That crate needs this env at
-# compile time; set a dummy so cargo/host gates are not blocked.
+# Do not wrap this cargo payload in nix_retry.
+# CI_LOW_MEM scrubs PATH to nix-store bins. GROK_CI_ALLOW_HOST_PATH=1 keeps the host PATH.
 [private]
 [positional-arguments]
 cargo-ci +cmd:
@@ -868,39 +845,22 @@ cargo-ci +cmd:
     set -euo pipefail
     just grok_helper cargo-ci -- "$@"
 
-# Enter the fenix/crane-aligned dev shell (interactive: no retry wrapper).
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just grok_helper ensure-nix-path --export)"
     exec nix develop
 
-# Enter the free-GHA / low-mem host shell (interactive: no retry wrapper).
 dev-ci:
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just grok_helper ensure-nix-path --export)"
     exec nix develop .#ci
 
-# Quality gate (GHA `quality` job + local pre-push). No release build.
-#
-# Cargo host scope (not --all-features): Bazel-only features (default-bazel /
-# runfiles) break plain cargo. Clippy uses --all-targets so it lints lib, bins,
-# tests, examples, benches, and `#[cfg(test)]` (cargo compile units, not extra
-# rustc targets such as aarch64). Unit/integration tests still run via
-# cargo-nextest (process-per-test isolation for globals like theme cache).
-# Doctests stay on `cargo test --doc` (nextest does not run rustdoc tests).
-#
-# Covers: fmt check, clippy -D warnings (--workspace --all-targets; members
-# include cargo-mem-guard and grok-nix-helper), workspace nextest, doctests.
-# Workspace nextest runs those member crate tests; no late cargo test
-# --manifest-path.
+# Clippy is --all-targets. Do not pass --manifest-path.
 test: test-fmt test-clippy test-unit test-doc
     @echo "just test passed"
 
-# Local-only extras CI does not run. Grep-only justfile/flake contracts live
-# in grok-nix-helper `justfile_contracts` (proved by workspace nextest).
-# Remaining recipes here actually run nix, cargo, or the helper.
 test-extra: test-clippy-targets test-clippy-all-targets test-ensure-working-nix-path test-nix-retry-smoke test-nix-retry-does-not-require-helper-binary test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-linker-sigkill-retries test-nix-retry-locked-lockfile-fail-fast test-nix-retry-fixed-output-hash-mismatch-fail-fast test-nix-retry-nextest-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-clippy-uses-many-workers test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features test-test-remote-workspace-rustc-not-local-eligible test-test-remote-requires-filter
     @echo "just test-extra passed"
 
@@ -912,9 +872,6 @@ test-clippy:
     @echo "==> cargo clippy --workspace --all-targets (-D warnings)"
     just cargo-ci cargo clippy --workspace --all-targets --locked -- -D warnings
 
-# Process-per-test runner. Requires cargo-nextest on PATH (devShell / ci-tools /
-# or `cargo install cargo-nextest`). Under CI_LOW_MEM, cargo-mem-guard wraps the
-# whole `cargo nextest` invocation and caps compile jobs via CARGO_BUILD_JOBS.
 test-unit:
     @echo "==> cargo nextest run --workspace"
     just cargo-ci cargo nextest run --workspace --locked
@@ -923,8 +880,6 @@ test-doc:
     @echo "==> cargo test --workspace --doc"
     just cargo-ci cargo test --workspace --doc --locked
 
-# Optional named filters. Default `just test` already runs these via
-# workspace nextest.
 test-mem-guard:
     @echo "==> cargo nextest run -p cargo-mem-guard"
     just cargo-ci cargo nextest run -p cargo-mem-guard --locked
@@ -933,8 +888,6 @@ test-grok-nix-helper:
     @echo "==> cargo nextest run -p grok-nix-helper"
     just cargo-ci cargo nextest run -p grok-nix-helper --locked
 
-# Instantiated quality buildPhase still needs host nix eval. Source greps
-# live in grok-nix-helper justfile_contracts. Does not realize rustc.
 test-clippy-all-targets:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -952,8 +905,7 @@ test-clippy-all-targets:
     fi
     echo "test-clippy-all-targets: ok (instantiated quality buildPhase cargo check --all-targets)"
 
-# Cross-target clippy (local / test-extra). Not on free GHA quality job.
-# Override: EXTRA_CLIPPY_TARGETS="aarch64-unknown-linux-gnu ..."
+# EXTRA_CLIPPY_TARGETS overrides the non-host target.
 test-clippy-targets:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -973,8 +925,6 @@ test-clippy-targets:
       fi
     done
 
-# Smoke-test check-remote fail-loud: a missing builders file must exit 2
-# before any Nix or cargo work. Not on default `just test`.
 test-check-remote-builders-file-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1001,14 +951,6 @@ test-check-remote-builders-file-smoke:
     fi
     echo "test-check-remote-builders-file-smoke: ok (missing builders file exited ${status})"
 
-# Prove `just check-remote` sends the same cargo gate as `just check` /
-# `just ci` (`just test`: fmt, clippy, workspace nextest, doctests)
-# through a remote Nix derivation (builders file via
-# nix_retry, rustc requires big-parallel). Tests must actually run, not
-# compile-only `--no-run`. Does not realize that derivation. Default
-# `just ci` must still be local host cargo. GHA must not call check-remote.
-# Instantiated quality attr. Source greps live in grok-nix-helper
-# justfile_contracts. Does not run check-remote or realize rustc.
 test-check-remote-cargo-is-remote-nix-derivation:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1025,13 +967,6 @@ test-check-remote-cargo-is-remote-nix-derivation:
     fi
     echo "test-check-remote-cargo-is-remote-nix-derivation: ok (check-remote builds ${drv})"
 
-# Force-remote must set caller max-jobs 0 so crates.io FODs, toolchain
-# tarballs, and crane vendor unpacks cannot run on this laptop. Nix 2.4+
-# overrides preferLocalBuild when the caller has no local job slots
-# (https://github.com/NixOS/nix/issues/5646 accessed: 2026-08-23).
-# rustc still requires surmount-remote + big-parallel. Instantiated attr
-# only; source greps live in grok-nix-helper justfile_contracts and
-# force_remote.rs. Does not run check-remote or realize rustc.
 test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1048,19 +983,6 @@ test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
     fi
     echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: ok (caller max-jobs 0; rustc requires big-parallel)"
 
-# Remote rustc must not stay 8-wide or inherit CARGO_BUILD_JOBS=2 from the
-# low-memory package sandbox. Force-remote nix must pass --cores 64 so
-# NIX_BUILD_CORES follows the builder, and workspace-cargo-quality must set
-# CARGO_BUILD_JOBS to 64 (jobs 64 from --cores 64). Every cargo on that
-# path is nice -n 19. Cargo check and cargo test --doc must pass --jobs
-# on argv from those cores (capped at 64), after the subcommand
-# (`cargo check --jobs N`; cargo 1.97 has no global `cargo --jobs`),
-# and must drop MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token jobserver cannot
-# ignore --jobs. cargo nextest run uses CARGO_BUILD_JOBS for rustc.
-# Must use the dev profile like local `just test-clippy`, not crane's
-# default --release check (one rustc thread at opt-level 3).
-# Host machines max-jobs lives outside this tree. Does not realize the
-# derivation.
 test-check-remote-uses-builder-cores:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1185,9 +1107,7 @@ test-check-remote-uses-builder-cores:
       echo "test-check-remote-uses-builder-cores: expected CARGO_PROFILE=dev on workspace-cargo-quality, got ${profile}" >&2
       exit 1
     fi
-    # Instantiated buildPhase is what the remote builder runs. Source greps
-    # can pass while crane preBuild copies NIX_BUILD_CORES=1 into
-    # CARGO_BUILD_JOBS and a 1-token jobserver ignores later --jobs.
+    # Check the instantiated buildPhase. A source grep can miss the jobserver.
     phase="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.buildPhase")"
     if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${phase}"; then
       echo "test-check-remote-uses-builder-cores: instantiated buildPhase must pass cargo check --jobs from CARGO_BUILD_JOBS (jobs 64 from NIX_BUILD_CORES) for workspace clippy." >&2
@@ -1272,14 +1192,6 @@ test-check-remote-uses-builder-cores:
     fi
     echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 64 from cores on argv; nice -n 19; CARGO_PROFILE=dev; package sandbox still 2)"
 
-# `cargo clippy --workspace --jobs N` is an external cargo-clippy binary.
-# The outer cargo may start a 1-token GNU jobserver from
-# available_parallelism() (often 1 in a Nix sandbox). Inner `--jobs N` is
-# then ignored: one clippy-driver, sequential Checking, idle cores.
-# Quality must lint via builtin `cargo check` + clippy-driver under a GNU
-# make jobserver with $CARGO_BUILD_JOBS tokens (64 from --cores 64).
-# Every cargo is nice -n 19. Must not loop `cargo clippy -p` with -j1.
-# Does not realize rustc.
 test-check-remote-clippy-uses-many-workers:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1430,11 +1342,6 @@ test-check-remote-clippy-uses-many-workers:
     fi
     echo "test-check-remote-clippy-uses-many-workers: ok (cargo check + clippy-driver; make -j\$CARGO_BUILD_JOBS jobserver; nice -n 19; no cargo clippy dispatcher; no -j1 crate loop)"
 
-# Dummy workspace deps stubs do not need the pager build-id. GROK_GIT_SHA
-# from dirtyShortRev must not be on workspace-cargo-quality-deps or a dirty
-# tree (even files cargo filter drops) busts the remote crates.io cache.
-# grok-oss and quality still inject GROK_GIT_SHA (pager-bin build.rs).
-# Instantiates .drv files only. Does not realize rustc or run check-remote.
 test-check-remote-deps-omit-git-sha:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1506,12 +1413,6 @@ test-check-remote-deps-omit-git-sha:
     fi
     echo "test-check-remote-deps-omit-git-sha: ok (deps omit GROK_GIT_SHA; grok-oss and quality keep it)"
 
-# requiredSystemFeatures=big-parallel only keeps rustc off this machine when
-# local Nix does not advertise that feature. This host's user config does
-# advertise it, so force-remote must pass --option system-features that omit
-# big-parallel (and benchmark) on the caller. Caller max-jobs 0 is required
-# so FODs cannot take a local slot either. Does not realize the workspace
-# rustc derivation.
 test-check-remote-omits-local-big-parallel:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1552,14 +1453,6 @@ test-check-remote-omits-local-big-parallel:
     fi
     echo "test-check-remote-omits-local-big-parallel: ok (local system-features omit big-parallel; rustc still requires it)"
 
-# --option system-features is not what the local nix-daemon builder uses.
-# This host still advertises big-parallel by default (see
-# https://nix.dev/manual/nix/2.28/command-ref/conf-file.html#conf-system-features
-# accessed: 2026-08-18). Workspace rustc .drv files must require a feature
-# this laptop never has. The host machines file must advertise that same
-# feature on the ssh-ng builder. nix build --dry-run only lists missing
-# outputs; it is not a machine-assignment proof. Does not run check-remote.
-# Does not realize the quality derivation.
 test-check-remote-workspace-rustc-not-local-eligible:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1629,16 +1522,10 @@ test-check-remote-workspace-rustc-not-local-eligible:
     fi
     echo "test-check-remote-workspace-rustc-not-local-eligible: ok (rustc requires surmount-remote; local Nix does not advertise it; machines file does)"
 
-# require_remote_builder is on check-remote. User SSH to Host surmount-1
-# is not the nix build path. An empty known_hosts (or missing NIX_SSHOPTS
-# host-key file) must fail even when a dummy ssh-ng machines file exists.
-# Does not run check-remote or realize quality.
 test-check-remote-preflight-same-path-as-nix-ssh:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Source contracts live in grok-nix-helper require_remote_builder.rs
-    # and justfile_contracts. This recipe is the runtime probe only.
-    # Do not grep the require_remote_builder trampoline body.
+    # Runtime probe only. Do not grep the preflight recipe body.
     if ! grep -qE 'just require_remote_builder' "{{ justfile_directory() }}/justfile"; then
       echo "test-check-remote-preflight-same-path-as-nix-ssh: check-remote must invoke require_remote_builder:" >&2
       exit 1
@@ -1685,16 +1572,10 @@ test-check-remote-preflight-same-path-as-nix-ssh:
     fi
     echo "test-check-remote-preflight-same-path-as-nix-ssh: ok (same-path preflight; empty known_hosts fails; surmount-1 is not enough)"
 
-# require_remote_builder must notice when the scheduled remote's nix-daemon
-# will refuse surmount-remote (client machines file already advertises it).
-# Tests inject GROK_NIX_REMOTE_SYSTEM_FEATURES so this never SSHs to a live
-# builder. Does not run check-remote or realize quality.
 test-check-remote-preflight-remote-daemon-features:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Source contracts live in grok-nix-helper require_remote_builder.rs
-    # and justfile_contracts. This recipe is the runtime probe only.
-    # Do not grep the require_remote_builder trampoline body.
+    # Runtime probe only. Do not grep the preflight recipe body.
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "${tmpdir}"' EXIT
     machines="${tmpdir}/machines"
@@ -1761,8 +1642,6 @@ test-check-remote-preflight-remote-daemon-features:
     fi
     echo "test-check-remote-preflight-remote-daemon-features: ok (inject miss fails; inject with surmount-remote passes; no live SSH)"
 
-# Instantiates the named-test drv only. rustc requires surmount-remote so
-# this laptop is not eligible. Does not run test-remote or realize rustc.
 test-test-remote-workspace-rustc-not-local-eligible:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1785,13 +1664,11 @@ test-test-remote-workspace-rustc-not-local-eligible:
     fi
     echo "test-test-remote-workspace-rustc-not-local-eligible: ok (named-test rustc requires surmount-remote; preferLocalBuild=false)"
 
-# A missing filter or --no-run must exit 2 before require_remote_builder /
-# Nix. Does not SSH and does not realize rustc.
 test-test-remote-requires-filter:
     #!/usr/bin/env bash
     set -euo pipefail
     set +e
-    empty_out="$(just test-remote 2>&1)"
+    empty_out="$(env -u GROK_NIX_HELPER just test-remote 2>&1)"
     empty_status=$?
     set -e
     if [[ "${empty_status}" -ne 2 ]]; then
@@ -1804,13 +1681,23 @@ test-test-remote-requires-filter:
       echo "${empty_out}" >&2
       exit 1
     fi
+    if grep -qF 'grok-nix-helper is not on PATH' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty just test-remote must not print grok-nix-helper is not on PATH:" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
+    if ! grep -qF 'missing test filter' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty just test-remote must name a missing test filter (recipe failed alone is not enough):" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
     if grep -qE 'nix attempt|nix build' <<<"${empty_out}"; then
       echo "test-test-remote-requires-filter: empty filter must not start nix build:" >&2
       echo "${empty_out}" >&2
       exit 1
     fi
     set +e
-    norun_out="$(just test-remote --no-run 2>&1)"
+    norun_out="$(env -u GROK_NIX_HELPER just test-remote --no-run 2>&1)"
     norun_status=$?
     set -e
     if [[ "${norun_status}" -ne 2 ]]; then
@@ -1838,8 +1725,6 @@ test-test-remote-requires-filter:
       exit 1
     fi
     echo "test-test-remote-requires-filter: ok (empty filter and --no-run exit 2 before nix)"
-# Probe must find a real nix (PATH store copy, or distro package after GC).
-# A /bin/true named nix is not working. NIX_BIN still honors a stub (smokes).
 test-ensure-working-nix-path:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1889,7 +1774,6 @@ test-ensure-working-nix-path:
     fi
     echo "test-ensure-working-nix-path: ok (host nix after GC skip; /bin/true rejected; NIX_BIN stub honored)"
 
-# `false` (proves banner + integer path). Also checks invalid attempts reject.
 test-nix-retry-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1907,7 +1791,6 @@ test-nix-retry-smoke:
       echo "${out}" >&2
       exit 1
     fi
-    # Integer validation path (fail-fast, no retries of false).
     set +e
     bad_out="$(NIX_RETRY_ATTEMPTS=nope just nix_retry true 2>&1)"
     bad_status=$?
@@ -1923,8 +1806,6 @@ test-nix-retry-smoke:
     fi
     echo "test-nix-retry-smoke: ok (false failed after 2 attempts, exit ${status}; invalid attempts rejected)"
 
-# check-remote / flake-meta / nix_retry must not fail because the helper
-# binary is missing. Does not run nix flake metadata.
 test-nix-retry-does-not-require-helper-binary:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1947,9 +1828,6 @@ test-nix-retry-does-not-require-helper-binary:
     fi
     echo "test-nix-retry-does-not-require-helper-binary: ok (true succeeded without locating a helper binary)"
 
-# Hard SSH / no-remote-machine text is not a flake 502/503. nix_retry must
-# exit on attempt 1 with that status and must not sleep 5s/15s/45s.
-# Unclassified failures still retry (see test-nix-retry-smoke).
 test-nix-retry-hard-remote-miss-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2008,10 +1886,6 @@ test-nix-retry-hard-remote-miss-fail-fast:
     run_case no-machine 'Failed to find a machine for remote build'
     echo "test-nix-retry-hard-remote-miss-fail-fast: ok (both hard-remote strings exited on attempt 1)"
 
-# The remote nix-daemon scheduled the drv (client machines file advertises
-# surmount-remote) then refused it: missing system features. That is not a
-# flake 502/503. nix_retry must exit on attempt 1 and must not sleep
-# 5s/15s/45s. Does not run check-remote or realize a derivation.
 test-nix-retry-missing-system-features-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2079,9 +1953,6 @@ test-nix-retry-missing-system-features-fail-fast:
     fi
     echo "test-nix-retry-missing-system-features-fail-fast: ok (missing system features exited on attempt 1)"
 
-# cargo fmt --check / rustfmt prints "Diff in <path>". That is a quality
-# fail, not a flake 502/503. nix_retry must exit on attempt 1 and must not
-# sleep 5s/15s/45s. Does not run check-remote or realize a derivation.
 test-nix-retry-rustfmt-diff-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2144,9 +2015,6 @@ test-nix-retry-rustfmt-diff-fail-fast:
     fi
     echo "test-nix-retry-rustfmt-diff-fail-fast: ok (Diff in rustfmt check exited on attempt 1)"
 
-# cargo clippy -D warnings / rustc prints "error: could not compile". That is
-# a quality fail, not a flake 502/503. nix_retry must exit on attempt 1 and
-# must not sleep 5s/15s/45s. Does not run check-remote or realize a derivation.
 test-nix-retry-clippy-compile-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2209,12 +2077,6 @@ test-nix-retry-clippy-compile-fail-fast:
     fi
     echo "test-nix-retry-clippy-compile-fail-fast: ok (could not compile exited on attempt 1)"
 
-# rustc wraps a SIGKILL'd linker as "error: could not compile". That is
-# builder memory (exit 137 = 128+9 SIGKILL), not a rustc type error.
-# nix_retry must retry like a flake 502, not fail-fast as clippy/rustc.
-# A log that has only "could not compile" (no ld returned 137) still
-# fail-fasts (test-nix-retry-clippy-compile-fail-fast). Does not run
-# check-remote or realize a derivation.
 test-nix-retry-linker-sigkill-retries:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2255,10 +2117,6 @@ test-nix-retry-linker-sigkill-retries:
     fi
     echo "test-nix-retry-linker-sigkill-retries: ok (ld returned 137 retried, not fail-fast compile)"
 
-# cargo --locked prints "cannot update the lock file" / "--locked was passed"
-# when Cargo.toml is ahead of Cargo.lock. That is a quality fail, not a
-# flake 502/503. nix_retry must exit on attempt 1 and must not sleep
-# 5s/15s/45s. Does not run check-remote or realize a derivation.
 test-nix-retry-locked-lockfile-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2326,11 +2184,6 @@ test-nix-retry-locked-lockfile-fail-fast:
     fi
     echo "test-nix-retry-locked-lockfile-fail-fast: ok (cannot update the lock file exited on attempt 1)"
 
-# Nix prints "hash mismatch in fixed-output derivation" when a FOD sha256 pin
-# is stale (for example channel-rust-stable.toml after a rust-stable
-# publish). That is a pin miss, not a flake 502/503. nix_retry must exit on
-# attempt 1 and must not sleep 5s/15s/45s. Does not run check-remote or
-# realize a derivation.
 test-nix-retry-fixed-output-hash-mismatch-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2393,10 +2246,6 @@ test-nix-retry-fixed-output-hash-mismatch-fail-fast:
     fi
     echo "test-nix-retry-fixed-output-hash-mismatch-fail-fast: ok (hash mismatch in fixed-output derivation exited on attempt 1)"
 
-# cargo nextest prints "error: test run failed" when the suite is red. That
-# is a quality fail, not a flake 502/503. nix_retry must exit on attempt 1
-# and must not sleep 5s/15s/45s. Does not run check-remote or realize a
-# derivation.
 test-nix-retry-nextest-fail-fast:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2464,15 +2313,6 @@ test-nix-retry-nextest-fail-fast:
     fi
     echo "test-nix-retry-nextest-fail-fast: ok (error: test run failed exited on attempt 1)"
 
-# GROK_NIX_FORCE_REMOTE must keep the caller command as argv0 (nix, or the
-# fake first word this smoke supplies). Copying known_hosts into builders
-# field 8 must not `set --` the machines line over "$@". Force-remote
-# flags stay after that command as --option builders @temp and must
-# include --option max-jobs 0 (this laptop must not build FODs).
-# --store is the machines-file ssh-ng URI and --eval-store auto so the
-# quality graph is not realized into the default local store. nix build
-# also gets --no-link. Does not run check-remote, realize a derivation,
-# or fetch the network.
 test-nix-retry-force-remote-argv-is-nix:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2520,8 +2360,7 @@ test-nix-retry-force-remote-argv-is-nix:
     export GROK_NIX_BUILDERS_FILE="${machines}"
     export GROK_NIX_KNOWN_HOSTS="${hosts}"
     export NIX_RETRY_ATTEMPTS=1
-    # Hermetic: nix_retry sources ensure-working-nix-path. Honor this stub so
-    # the smoke does not need a host nix or a network fetch.
+    # Honor NIX_BIN so this smoke does not call host nix.
     export NIX_BIN="${fake_nix}"
     set +e
     out="$(timeout 8 just nix_retry "${fake_nix}" flake metadata 2>&1)"
@@ -2713,9 +2552,6 @@ test-nix-retry-force-remote-argv-is-nix:
     fi
     echo "test-nix-retry-force-remote-argv-is-nix: ok (argv0 is the command; builders @temp; field 8 present; max-jobs 0; --store ssh-ng; --eval-store auto; nix build --no-link)"
 
-# Force-remote must append ssh-ng URI query max-connections (copy slots).
-# Default Nix is 1 (serial NAR copy). Default here is 8; GROK_NIX_SSH_NG_MAX_CONNECTIONS
-# overrides. Does not print the builders URI or host. Does not run check-remote.
 test-nix-retry-force-remote-ssh-ng-max-connections:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2805,16 +2641,10 @@ test-nix-retry-force-remote-ssh-ng-max-connections:
       exit 1
     fi
     echo "test-nix-retry-force-remote-ssh-ng-max-connections: ok (default max-connections=8; --store reuses that URI; host not printed)"
-# Overrides host -fuse-ld=wild (breaks this link). See comments in recipe body.
-# Strips the installed artifact only: [profile.release] stays unstripped for
-# local debugging; release-dist keeps strip=false for sidecar extract.
-# grok-oss grep is embedded Rust (grep crate + ignore), not a sidecar rg.
-# just install does not cargo-install ripgrep.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
-    # this workspace. Unset encoded rustflags and pin mold only.
+    # Pin mold. Host rustflags often set -fuse-ld=wild.
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     echo "==> nice -n 19 cargo build --release -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
@@ -2828,8 +2658,7 @@ install:
     strip --strip-unneeded target/release/grok-oss
     echo "==> install -> ${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     install -Dm755 target/release/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
-    # Desktop Fish starts with ~/.local/bin and does not read ~/.profile.
-    # Already-open terminals keep that PATH. A symlink makes `grok-oss` resolve there.
+    # Fish starts at ~/.local/bin. Symlink the installed binary there.
     mkdir -p "${HOME}/.local/bin"
     ln -sfn "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" "${HOME}/.local/bin/grok-oss"
     echo "==> verify"
@@ -2837,10 +2666,8 @@ install:
     file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" | grep -q 'stripped' \
       || (echo "install: expected stripped binary" >&2; file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" >&2; exit 1)
 
-# Build release-dist binary, extract .debug sidecar, strip (not CI quality gate).
 build-dist:
-    # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
-    # this workspace. Unset encoded rustflags and pin mold only.
+    # Pin mold. Host rustflags often set -fuse-ld=wild.
     @echo "==> cargo build --profile release-dist -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
       RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}" \
@@ -2854,7 +2681,6 @@ build-dist:
     ls -lh target/release-dist/grok-oss target/release-dist/grok-oss.debug
     file target/release-dist/grok-oss target/release-dist/grok-oss.debug
 
-# Install release-dist binary + grok-oss.debug sidecar to cargo bin (not CI).
 install-dist: build-dist
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     @echo "==> install stripped binary + sidecar -> ${CARGO_HOME:-$HOME/.cargo}/bin/"
@@ -2867,32 +2693,13 @@ install-dist: build-dist
     @test -f "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.debug" \
       || (echo "install-dist: missing sidecar grok-oss.debug" >&2; exit 1)
 
-# Install from Nix result (matches just build / CI; no host cargo linker).
-# Strip after copy: nix fixup may already strip; --strip-unneeded is safe/idempotent.
+# Strip after copy. Nix may already have stripped the binary.
 install-nix: build
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     install -Dm755 ./result/bin/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     strip --strip-unneeded "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
 
-# ---------------------------------------------------------------------------
-# Limits-first path certainty (Slice E2)
-#
-# Never claim "limits-first path certain" without runnable proof.
-# Hermetic suite = rank / bare resolve / memo + JSON path checker unit tests.
-# Live recipe = rebuilt binary `limits --json` + same pure checker (ignored test).
-#
-# Spend order when auto_use_included_limits=true and preferred ≠ api_key:
-#   1. included weekly used < 100% → SuperGrok session only (console omitted)
-#   2. included full + SuperGrok dollar extras > 0 → SuperGrok primary, console failover
-#   3. included full + extras 0/unknown → console primary
-#
-# Dogfood field template: .agents/joins/template-limits-dogfood-window.md
-# ---------------------------------------------------------------------------
-
-# Hermetic path suite: spend-order rank, bare resolve, memo, flat-poll, prepaid
-# lag, Management ForceRefresh policy, and the pure limits --json C1/C3 checker.
-# One command. Run before claiming limits-first path certain.
 check-limits-first-path:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2904,23 +2711,12 @@ check-limits-first-path:
       resolve_api_key_pin sampling_config_auto_use resolve_model_override \
       afterburner_skips_allowance_mark apply_billing_100_pct_with_positive_extras
     echo "==> xai-grok-pager: flat_poll + prepaid lag + ForceRefresh policy + path checker"
-    # Filters: flat_poll / prepaid_lag match honesty tests; management_meter_cache
-    # + should_clear_management cover ForceRefresh; check_limits_first is E2 SoT.
     just cargo-ci cargo test -p xai-grok-pager --lib --locked -- \
       flat_poll prepaid_lag \
       management_meter_cache_policy should_clear_management_meter \
       check_limits_first multipoll
     echo "check-limits-first-path passed (hermetic)"
 
-# Live C1/C3 after rebuild: SuperGrok primary while included weekly used < 100%,
-# console not live. Requires auto_use_included_limits=true and preferred ≠ api_key
-# on the home under test. Uses the same pure checker as unit tests.
-#
-# Env:
-#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
-#   LIMITS_FIRST_AUTO_USE — default 1
-#   LIMITS_FIRST_PREFERRED_API_KEY — default 0 (set 1 only when preferred=api_key)
-#   LIMITS_JSON_TIMEOUT_SECS — default 90
 check-limits-first-live:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2964,19 +2760,6 @@ check-limits-first-live:
       live_check_limits_first_from_env_json -- --ignored --nocapture
     echo "check-limits-first-live passed"
 
-# Token economy multipoll evidence harness (P1 path + P2 free SuperGrok period series).
-#
-# Runs `grok-oss limits multipoll` (N samples, default sleep 30s between ends to
-# meet flat-detector min wall). Writes JSONL + summary under
-# `.agents/reports/limits-multipoll-<utc>/` (or --out-dir). Exit 0 when path is
-# OK; exit non-zero only on path failure. Free SuperGrok period flat is
-# measurement only and does not fail the process.
-#
-# Env:
-#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
-#   LIMITS_MULTIPOLL_SAMPLES — default 2
-#   LIMITS_MULTIPOLL_SLEEP_SECS — default 30
-#   LIMITS_MULTIPOLL_OUT_DIR — optional override for --out-dir
 limits-multipoll *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -3003,30 +2786,25 @@ limits-multipoll *ARGS:
     echo "==> limits-multipoll: ${bin} limits multipoll --samples ${samples} --sleep-secs ${sleep_secs} ${extra[*]:-} {{ ARGS }}"
     exec "${bin}" limits multipoll --samples "${samples}" --sleep-secs "${sleep_secs}" ${extra[@]+"${extra[@]}"} {{ ARGS }}
 
-# Upstream monorepo export helpers (see docs/upstream-history.md).
 upstream-detect:
     just grok_helper detect-upstream-export
 
 upstream-import *ARGS:
     just grok_helper import-upstream-export {{ ARGS }}
 
-# Cherry-pick Surmount product onto current xAI tip → onto-xai/<short>
 upstream-put-history *ARGS:
     just grok_helper put-history-on-xai {{ ARGS }}
 
-# Join Surmount main into current onto tip (-s ours; stages merge for signed commit)
 upstream-join-main *ARGS:
     just grok_helper join-main-into-onto {{ ARGS }}
 
-# Fail if AGENTS/FORK/RESIDUAL/helper recon modules missing after recon
 [positional-arguments]
 upstream-assert-process-pins *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     just grok_helper assert-process-pins --root "{{ justfile_directory() }}" "$@"
 
-# Path assert, then remind land agents to walk the existing catalog.
-# Does not replace just check. Does not run cargo (deleted tests stay silent).
+# Does not replace just check. Does not run cargo.
 [positional-arguments]
 upstream-land-filters *ARGS:
     #!/usr/bin/env bash
@@ -3046,7 +2824,6 @@ upstream-land-filters *ARGS:
     echo "Then run the operator cheat-sheet cargo blocks in that catalog."
     echo "just check is quality only. Chrome-only is a failed land."
 
-# Read-only recon probe: branch, CHERRY_PICK/MERGE, UU count, onto-ish, next human action
 recon-status:
     just grok_helper recon-status
 

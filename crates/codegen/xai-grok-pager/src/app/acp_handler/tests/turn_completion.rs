@@ -357,6 +357,53 @@
         ));
     }
 
+    /// A `subagent-completed` wake while the session is TurnRunning must not
+    /// leave the operator on Responding… (tokens already arrived) or Waiting
+    /// for the model… with no reply and no failure. The busy-session guard
+    /// blocks finish_turn today, so the turn never goes idle.
+    #[test]
+    fn subagent_completed_wake_while_turn_running_shows_the_reply() {
+        let reply = "the operator sees the reply";
+        let mut app = make_app_with_agent("sess-wake");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.start_turn(&mut agent.scrollback);
+            agent.session.current_prompt_id = Some("pid-local".into());
+        }
+        let _ = handle(make_agent_chunk_message("sess-wake", reply), &mut app);
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                matches!(agent.session.state, AgentState::TurnRunning),
+                "the session is busy before the wake"
+            );
+            assert!(
+                matches!(
+                    agent.session.turn_activity(),
+                    Some(crate::acp::tracker::TurnActivity::Responding)
+                ),
+                "tokens already arrived, so the visible label is Responding…"
+            );
+        }
+
+        let _ = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "subagent-completed-sa-l2", None),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let saw_reply = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.get(i).map(|e| &e.block),
+                Some(RenderBlock::AgentMessage(block)) if block.text().contains(reply)
+            )
+        });
+        assert!(
+            saw_reply && agent.session.state.is_idle(),
+            "the visible label was Responding…; the operator sees the reply and must not stay on Responding… or Waiting for the model… with no reply and no failure"
+        );
+    }
+
     #[test]
     fn chatty_wake_turn_completed_pushes_one_marker() {
         use crate::app::agent_view::test_fixtures::count_turn_markers;

@@ -1108,9 +1108,17 @@ impl ScrollbackState {
             let prompt_restore_hides_tail = !self.pin_reserve_active
                 && unpadded_max > live_pin
                 && self.scroll_is_on_user_prompt_top();
+            // Finish notes the turn before the last height settle. A short
+            // "Worked for" row must not eat the pin. A response that extends
+            // more than one viewport past that pin is the tail follow is for,
+            // including when the note landed first. Scroll up still clears
+            // follow_mode, so this branch does not pull a reading viewport back.
+            let overflow_rows = unpadded_max.saturating_sub(live_pin);
+            let finish_chrome_only =
+                self.pin_reserve_after_turn && overflow_rows <= self.viewport_height as usize;
             if (content_changed || prompt_restore_hides_tail)
                 && unpadded_max > live_pin
-                && !self.pin_reserve_after_turn
+                && !finish_chrome_only
             {
                 self.follow_preserve_scroll = false;
                 self.release_pin_reserve();

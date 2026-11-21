@@ -150,7 +150,10 @@ xai-grok-file-lock = { workspace = true }
 xai-grok-sampler = { path = "../xai-grok-sampler" }
 # Session FTS search. grok_oss.db and the token-economy ledger also open SQLite.
 xai-grok-session-search = { workspace = true }
-rusqlite = { version = "0.37", features = ["bundled"] }
+# rusqlite 0.43. libsqlite3-sys `bundled` keeps SQLite self-contained.
+# Required libsqlite3-sys is 0.40.0.
+rusqlite = { version = "0.43" }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
@@ -366,9 +369,6 @@ workspace = true
 [build-dependencies]
 # build.rs only downloads ripgrep — no rmcp involvement. Workspace reqwest
 # (0.12) is plenty.
-reqwest = { workspace = true, features = ["blocking"] }
-flate2 = { workspace = true }
-tar = { workspace = true }
 
 [[bin]]
 name = "chat-history-downgrade"

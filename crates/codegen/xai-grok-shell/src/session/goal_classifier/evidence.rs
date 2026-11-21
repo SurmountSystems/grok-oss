@@ -1379,6 +1379,10 @@ mod tests {
 
     // ---- capture_changes_diff fallback paths -----------------
 
+    fn set_mtime(path: impl AsRef<std::path::Path>, time: SystemTime) {
+        std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
+
     /// Run a `git` subcommand from `cwd`; panic on non-zero exit so test setup failures are loud.
     fn git(cwd: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new(super::git_bin())
@@ -1451,11 +1455,7 @@ mod tests {
             .unwrap();
         // Bump the mtime forward so the walkdir filter accepts it even on filesystems with one-second mtime granularity
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("hello.txt"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("hello.txt"), later);
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
             .expect("walkdir fallback must produce a diff")
@@ -1569,11 +1569,7 @@ mod tests {
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("from_walkdir.txt"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("from_walkdir.txt"), later);
 
         // Layer 1 still tries `git diff` against the stale baseline (the file doesn't know there's no repo)
         // It fails and cascades through Layer 2 to Layer 3
@@ -1605,11 +1601,7 @@ mod tests {
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("parseable.txt"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("parseable.txt"), later);
 
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
@@ -1646,11 +1638,7 @@ mod tests {
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("bin.dat"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("bin.dat"), later);
 
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
@@ -1676,16 +1664,14 @@ mod tests {
         tokio::fs::write(tmp.path().join("after.txt"), b"after\n")
             .await
             .unwrap();
-        filetime::set_file_mtime(
+        set_mtime(
             tmp.path().join("at_threshold.txt"),
-            filetime::FileTime::from_unix_time(goal_created_at, 0),
-        )
-        .unwrap();
-        filetime::set_file_mtime(
+            UNIX_EPOCH + Duration::from_secs(u64::try_from(goal_created_at).unwrap()),
+        );
+        set_mtime(
             tmp.path().join("after.txt"),
-            filetime::FileTime::from_unix_time(goal_created_at + 1, 0),
-        )
-        .unwrap();
+            UNIX_EPOCH + Duration::from_secs(u64::try_from(goal_created_at + 1).unwrap()),
+        );
 
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
@@ -1709,21 +1695,13 @@ mod tests {
                 .await
                 .unwrap();
             let later = SystemTime::now() + Duration::from_secs(30);
-            filetime::set_file_mtime(
-                dir.join("blob.bin"),
-                filetime::FileTime::from_system_time(later),
-            )
-            .unwrap();
+            set_mtime(dir.join("blob.bin"), later);
         }
         tokio::fs::write(tmp.path().join("real.txt"), b"keeper\n")
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("real.txt"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("real.txt"), later);
 
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
@@ -1803,11 +1781,7 @@ mod tests {
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("note.md"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("note.md"), later);
 
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
@@ -1827,11 +1801,7 @@ mod tests {
             .await
             .unwrap();
         let later = SystemTime::now() + Duration::from_secs(30);
-        filetime::set_file_mtime(
-            tmp.path().join("big.txt"),
-            filetime::FileTime::from_system_time(later),
-        )
-        .unwrap();
+        set_mtime(tmp.path().join("big.txt"), later);
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await
             .expect("walkdir fallback must succeed")
@@ -1858,7 +1828,7 @@ mod tests {
                 .await
                 .unwrap();
             let later = SystemTime::now() + Duration::from_secs(30);
-            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(later)).unwrap();
+            set_mtime(&path, later);
         }
         let diff = capture_changes_diff(None, tmp.path(), goal_created_at)
             .await

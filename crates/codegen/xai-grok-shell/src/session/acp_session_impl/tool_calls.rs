@@ -142,10 +142,7 @@ pub(super) fn should_intercept_exit_plan_approval(
 }
 /// Whether this tool call exits file-backed plan mode (not inline plan creation).
 pub(super) fn is_file_backed_exit_plan_input(tool_input: &ToolInput) -> bool {
-    if matches!(tool_input, ToolInput::ExitPlanMode(_)) {
-        return true;
-    }
-    false
+    matches!(tool_input, ToolInput::ExitPlanMode(_))
 }
 pub(super) fn is_file_backed_exit_plan_kind(
     kind: Option<xai_grok_tools::types::tool::ToolKind>,

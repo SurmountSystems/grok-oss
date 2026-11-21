@@ -1584,8 +1584,7 @@ fn set_mtime(path: &std::path::Path, time: chrono::DateTime<chrono::Utc>) {
     use std::time::{Duration, UNIX_EPOCH};
     let secs = time.timestamp() as u64;
     let system_time = UNIX_EPOCH + Duration::from_secs(secs);
-    let mtime = filetime::FileTime::from_system_time(system_time);
-    filetime::set_file_mtime(path, mtime).unwrap();
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(system_time)).unwrap();
 }
 fn test_png_bytes() -> Vec<u8> {
     use image::{ImageBuffer, Rgba};

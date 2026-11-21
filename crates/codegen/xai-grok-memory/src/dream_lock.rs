@@ -256,9 +256,12 @@ pub fn sessions_since(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filetime::FileTime;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn set_mtime(path: &Path, time: SystemTime) {
+        std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
 
     // --- DreamLock tests ---
 
@@ -444,7 +447,7 @@ mod tests {
         let legacy = dir.path().join(".dream-lock");
         let t = SystemTime::now() - Duration::from_secs(3600);
         fs::write(&legacy, "").unwrap();
-        filetime::set_file_mtime(&legacy, FileTime::from_system_time(t)).unwrap();
+        set_mtime(&legacy, t);
 
         let read = lock
             .last_consolidated_at()
@@ -467,7 +470,7 @@ mod tests {
 
         fs::write(&lock.path, std::process::id().to_string()).unwrap();
         let old = SystemTime::now() - Duration::from_secs(600);
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
+        set_mtime(&lock.path, old);
 
         // Age 600 exceeds stale_secs 300, so the live PID does not block
         assert!(
@@ -496,7 +499,7 @@ mod tests {
 
         fs::write(&lock.path, "12345").unwrap();
         let old = SystemTime::now() - Duration::from_secs(7200);
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
+        set_mtime(&lock.path, old);
 
         lock.record_consolidation().unwrap();
 
@@ -548,7 +551,7 @@ mod tests {
 
         fs::write(&lock.path, "not-a-pid").unwrap();
         let old = SystemTime::now() - Duration::from_secs(600);
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
+        set_mtime(&lock.path, old);
         assert!(
             lock.try_acquire(300).unwrap().is_some(),
             "a stale corrupt body is reclaimed by the age check"
@@ -577,7 +580,7 @@ mod tests {
         let path = dir.join(format!("{name}.md"));
         fs::write(&path, "test").unwrap();
         let t = SystemTime::now() - Duration::from_secs(age_secs);
-        filetime::set_file_mtime(&path, FileTime::from_system_time(t)).unwrap();
+        set_mtime(&path, t);
     }
 
     #[test]
@@ -603,7 +606,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         let path = sessions.join("2026-01-01-proj-exact000.md");
         fs::write(&path, "test").unwrap();
-        filetime::set_file_mtime(&path, FileTime::from_system_time(cutoff)).unwrap();
+        set_mtime(&path, cutoff);
 
         let result = sessions_since(&sessions, cutoff, None).unwrap();
         assert!(

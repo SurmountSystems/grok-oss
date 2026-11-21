@@ -657,10 +657,7 @@ mod tests {
     }
 
     fn guarantees(cond: &str, kind: &str) -> bool {
-        if word_bounded(cond, &format!("tools.by_kind.{kind}")) && !cond.contains(" or ") {
-            return true;
-        }
-        false
+        word_bounded(cond, &format!("tools.by_kind.{kind}")) && !cond.contains(" or ")
     }
 
     fn assert_guards(template: &str, label: &str) {

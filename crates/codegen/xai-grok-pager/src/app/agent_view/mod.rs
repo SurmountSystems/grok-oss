@@ -174,6 +174,7 @@ mod panes;
 mod paste;
 pub(crate) use kept_plan::KeptPlan;
 mod plan;
+mod plan_image_tesseract;
 #[cfg(test)]
 pub(crate) use plan::MAX_KEPT_PLAN_FILE_BYTES;
 pub(crate) use plan::{

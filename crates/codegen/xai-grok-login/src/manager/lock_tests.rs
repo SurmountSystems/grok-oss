@@ -45,15 +45,13 @@ fn unparseable_holder_classifies_alive_when_fresh_and_stuck_when_old() {
         "fresh empty lock must be assumed alive"
     );
 
-    let old = filetime::FileTime::from_unix_time(
-        (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64)
-            - (STALE_LOCK_TIMEOUT_SECS as i64 + 30),
-        /*nanos*/ 0,
-    );
-    filetime::set_file_mtime(&lock_path, old).unwrap();
+    let old_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - (STALE_LOCK_TIMEOUT_SECS + 30);
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(old_secs);
+    std::fs::set_times(&lock_path, std::fs::FileTimes::new().set_modified(old)).unwrap();
 
     let holder = read_holder(&mut file);
     assert_eq!(
@@ -356,9 +354,8 @@ fn subprocess_lock_holder() {
             file.set_len(0).unwrap();
             file.sync_all().unwrap();
             if age_secs > 0 {
-                let old =
-                    filetime::FileTime::from_unix_time((now - age_secs) as i64, /*nanos*/ 0);
-                filetime::set_file_mtime(lock_path, old).unwrap();
+                let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now - age_secs);
+                std::fs::set_times(lock_path, std::fs::FileTimes::new().set_modified(old)).unwrap();
             }
         }
         other => panic!("unknown lock-holder mode: {other:?}"),

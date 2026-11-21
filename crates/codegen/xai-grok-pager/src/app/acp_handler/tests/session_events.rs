@@ -348,6 +348,76 @@
         );
     }
 
+    /// Same send failure must not append a new identical yellow row per attempt.
+    /// One notice while retries continue. After they stop, that sentence stays.
+    #[test]
+    fn same_send_failure_retries_keep_one_network_request_notice() {
+        let raw = "error sending request for url (https://api.x.ai/v1/responses)";
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let notice_rows = |scrollback: &ScrollbackState| -> Vec<String> {
+            (0..scrollback.len())
+                .filter_map(|i| match scrollback.get(i).map(|entry| &entry.block) {
+                    Some(RenderBlock::SessionEvent(block)) => Some(block.event.message()),
+                    _ => None,
+                })
+                .filter(|text| {
+                    text.contains("Network request failed") && text.contains("retrying")
+                })
+                .collect()
+        };
+        for attempt in 1..=4 {
+            apply_retry_state(
+                &RetryState::Retrying {
+                    attempt,
+                    max_retries: 5,
+                    reason: raw.into(),
+                    error_type: Some("http".into()),
+                },
+                &mut session,
+                &mut scrollback,
+                false,
+            );
+        }
+        let during = notice_rows(&scrollback);
+        assert_eq!(
+            during.len(),
+            1,
+            "several retries of the same send failure must leave one notice, got {during:?}"
+        );
+        assert!(
+            during[0].contains("Network request failed"),
+            "notice must name the network request failure, got {}",
+            during[0]
+        );
+        assert!(
+            during[0].contains("retrying"),
+            "notice must say retrying while attempts continue, got {}",
+            during[0]
+        );
+        apply_retry_state(
+            &RetryState::Exhausted {
+                attempts: 4,
+                reason: raw.into(),
+                is_rate_limited: false,
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        let after = notice_rows(&scrollback);
+        assert_eq!(
+            after.len(),
+            1,
+            "exhausted retries must not stack another copy and must not delete the notice, got {after:?}"
+        );
+        assert!(
+            after[0].contains("Network request failed") && after[0].contains("retrying"),
+            "the failure the operator can read must keep the sentence, got {}",
+            after[0]
+        );
+    }
+
     /// Live hang: StreamResumed after attempt 1 painted leftover
     /// "reconnecting" plus the phase timer. After headers, the wait is
     /// first token. Do not call that reconnecting.

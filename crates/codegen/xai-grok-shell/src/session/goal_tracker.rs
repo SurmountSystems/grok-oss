@@ -528,6 +528,11 @@ pub struct GoalOrchestration {
     /// So the "Verifying…" badge survives the token-accounting and continuation `GoalUpdated`s that fire mid-verification.
     #[serde(skip)]
     pub verifying_in_flight: bool,
+
+    /// One-shot host sentence when the research role's sampling window filled
+    /// and a new research session was started. Not a pause. Not persisted.
+    #[serde(skip)]
+    pub research_session_replaced_note: Option<String>,
 }
 
 impl GoalOrchestration {
@@ -595,6 +600,7 @@ impl GoalTracker {
         // `planning_in_flight` / `verifying_in_flight` are `#[serde(skip)]` but in-memory-clone callers bypass that; reset explicitly
         snapshot.planning_in_flight = false;
         snapshot.verifying_in_flight = false;
+        snapshot.research_session_replaced_note = None;
         // Token records anchoring a resumed skeptic-0's marginal accounting are in-memory only
         // A post-restart resume would re-count its full prior cumulative as fresh spend, so cold-spawn instead
         snapshot.skeptic0_session_id = None;
@@ -847,6 +853,7 @@ impl GoalTracker {
             live_tool_call_count: 0,
             planning_in_flight: false,
             verifying_in_flight: false,
+            research_session_replaced_note: None,
         });
         self.active_since = Some(Instant::now());
         self.record_event(GoalEvent::GoalCreated, None);
@@ -1230,6 +1237,7 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
         live_tool_call_count: 0,
         planning_in_flight: false,
         verifying_in_flight: false,
+        research_session_replaced_note: None,
     }
 }
 

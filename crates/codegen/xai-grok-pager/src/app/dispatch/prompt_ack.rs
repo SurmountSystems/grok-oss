@@ -1,8 +1,13 @@
-//! Fail-safe for a prompt the agent never acknowledged: abort the turn locally, put the text back, tell the shell.
+//! Fail-safe for a prompt the session never took: abort that turn locally, put the text back, tell the shell.
+//!
+//! A `TurnRunning` pane whose `current_prompt_id` is the armed watch already took the prompt. At the hard
+//! deadline that watch is disarmed. The composer is not restored, the turn is not aborted, and no ack signal
+//! is logged. `TurnCancelling` that still owns the watch still aborts, so a wedged Esc cannot sit on
+//! "Cancelling...". A running turn with no `current_prompt_id` never took the prompt, so the deadline still
+//! restores the composer. A different current id, and an idle pane, drop the watch with no restore.
 //!
 //! Runs from the event loop's animation tick like the other `reconcile_overdue_*` recoveries.
-//! It never adopts, re-sends, or drains: the pane ends Idle with the prompt in the composer and the
-//! prompt id recorded as rewound, so any late acknowledgment for it is dropped by the existing gates.
+//! It never adopts, re-sends, or drains.
 
 use super::turn::{RewindTarget, emit_cancel_turn, finish_turn_view, rewind_in_flight_prompt};
 use crate::app::actions::Effect;
@@ -39,7 +44,8 @@ fn prompt_ack_timeout_notice(limit: Duration, disposition: PromptAckDisposition)
     )
 }
 
-/// Poll every armed acknowledgment watch: log the soft notice once, and past the hard deadline abort the turn.
+/// Poll every armed acknowledgment watch: log the soft notice once, and past the hard deadline either disarm
+/// a running owned turn or abort a prompt the session never took.
 /// Returns `None` when nothing changed; `Some(effects)` (possibly empty) when a notice or abort needs a redraw.
 pub(crate) fn reconcile_overdue_prompt_acks(
     app: &mut AppView,
@@ -80,26 +86,34 @@ fn poll_prompt_ack_for_agent(
     let Some(watch) = agent.prompt_ack.as_mut() else {
         return false;
     };
-    // Stale guard: only the live turn's own watch may fire; anything else is dropped without effect
-    // Cancelling stays armed so an Esc during the wedge cannot park the pane on "Cancelling…" forever
-    let busy = matches!(
-        agent.session.state,
-        AgentState::TurnRunning | AgentState::TurnCancelling
-    );
+    // A different prompt is already current. Drop this watch. Do not restore over it.
+    let running = agent.session.state.is_turn_running();
+    let cancelling = matches!(agent.session.state, AgentState::TurnCancelling);
     let owns_turn = agent.session.current_prompt_id.as_deref() == Some(watch.prompt_id());
-    if !busy || !owns_turn {
+    if agent.session.current_prompt_id.is_some() && !owns_turn {
+        agent.prompt_ack = None;
+        return false;
+    }
+    // Idle drops a stale watch: the session is not mid-prompt, so there is nothing to put back.
+    // A running turn with no current id never took this prompt, so the watch stays until the deadline.
+    // Cancelling that still owns the watch stays armed so a wedged Esc cannot sit on "Cancelling...".
+    let never_took = running && agent.session.current_prompt_id.is_none();
+    let hold = (owns_turn && (running || cancelling)) || never_took;
+    if !hold {
         agent.prompt_ack = None;
         return false;
     }
     let session_id = agent.session.session_id.clone();
-    match watch.poll(now, deadlines) {
+    let prompt_id = watch.prompt_id().to_owned();
+    let outcome = watch.poll(now, deadlines);
+    match outcome {
         PromptAckOutcome::Waiting => false,
         PromptAckOutcome::SoftNotice { waited } => {
             crate::unified_log::write_direct_warn(
                 "prompt.ack_soft_notice",
                 session_id.as_ref().map(|s| s.0.as_ref()),
                 Some(serde_json::json!({
-                    "prompt_id": watch.prompt_id(),
+                    "prompt_id": prompt_id,
                     "waited_ms": waited.as_millis() as u64,
                     "limit_ms": deadlines.hard.as_millis() as u64,
                 })),
@@ -108,7 +122,12 @@ fn poll_prompt_ack_for_agent(
         }
         PromptAckOutcome::Expired { waited } => {
             agent.prompt_ack = None;
-            effects.extend(fire_fail_safe(agent, waited, deadlines));
+            // The live turn already holds this id. Disarm only. No composer restore, no abort,
+            // and no QueueChanged / SessionUpdate / TurnEnded signal.
+            if running && owns_turn {
+                return false;
+            }
+            effects.extend(fire_fail_safe(agent, prompt_id, waited, deadlines));
             true
         }
     }
@@ -130,14 +149,15 @@ pub(super) fn restore_target(agent: &AgentView) -> Option<RewindTarget> {
     }
 }
 
-/// Abort the unacknowledged turn: restore the text, end the turn as aborted, notify, and send a rewind cancel.
-/// Order matters: `finish_turn` clears `in_flight_prompt` and `current_prompt_id`, so both are captured first.
+/// Abort a prompt the session never took: restore the text, end the turn as aborted, notify, and send a rewind cancel.
+/// `prompt_id` is the watch's id. `current_prompt_id` is missing in that case, so it cannot be the source.
+/// Order matters: `finish_turn` clears `in_flight_prompt` and `current_prompt_id`, so the stash is read first.
 fn fire_fail_safe(
     agent: &mut AgentView,
+    prompt_id: String,
     waited: Duration,
     deadlines: &PromptAckDeadlines,
 ) -> Option<Effect> {
-    let prompt_id = agent.session.current_prompt_id.clone()?;
     let session_id = agent.session.session_id.clone();
     let was_cancelling = agent.session.state.is_cancelling();
     let prompt_kind = if agent.bash_turn {

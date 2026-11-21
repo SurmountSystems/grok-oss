@@ -316,7 +316,7 @@ impl BatchDreamStore {
         let (generation, lock_expiry) = transaction.query_row(
             "SELECT generation, expires_at FROM consolidation_lock WHERE singleton = 1",
             [],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            |row| Ok((sqlite_u64_column(row, 0)?, row.get::<_, Option<i64>>(1)?)),
         )?;
         if lock_expiry.is_some_and(|expiry| expiry > request.now) {
             return Err(BatchDreamError::Busy);
@@ -344,6 +344,7 @@ impl BatchDreamStore {
         let generation = generation
             .checked_add(1)
             .ok_or_else(|| BatchDreamError::Invalid("lease generation overflows".to_owned()))?;
+        let generation_sql = sqlite_bind_u64(generation)?;
         let lease = BatchLease {
             operation_id: format!("batch_dream_{generation}"),
             owner: request.owner.to_owned(),
@@ -354,17 +355,23 @@ impl BatchDreamStore {
         transaction.execute(
             "UPDATE consolidation_lock SET owner = ?1, generation = ?2, expires_at = ?3
              WHERE singleton = 1",
-            params![lease.owner, generation, expires_at],
+            params![lease.owner, generation_sql, expires_at],
         )?;
         transaction.execute(
             "INSERT INTO consolidation_operations(operation_id, status, owner, generation, created_at)
              VALUES (?1, 'claimed', ?2, ?3, ?4)",
-            params![lease.operation_id, lease.owner, generation, request.now],
+            params![lease.operation_id, lease.owner, generation_sql, request.now],
         )?;
         transaction.execute(
             "INSERT INTO batch_dream_batches(operation_id, owner, generation, expires_at, status, created_at)
              VALUES (?1, ?2, ?3, ?4, 'claimed', ?5)",
-            params![lease.operation_id, lease.owner, generation, expires_at, request.now],
+            params![
+                lease.operation_id,
+                lease.owner,
+                generation_sql,
+                expires_at,
+                request.now
+            ],
         )?;
         for note in &lease.notes {
             transaction.execute(
@@ -560,7 +567,12 @@ impl BatchDreamStore {
                   AND l.expires_at > ?4 AND b.generation = l.generation
                   AND b.status = 'claimed'
              )",
-            params![lease.operation_id, lease.owner, lease.generation, now],
+            params![
+                lease.operation_id,
+                lease.owner,
+                sqlite_bind_u64(lease.generation)?,
+                now
+            ],
             |row| row.get(0),
         )?;
         if is_valid {
@@ -701,6 +713,15 @@ fn mark_invalid(connection: &rusqlite::Connection, relative: &str, reason: &str)
         params![relative, reason],
     )?;
     Ok(())
+}
+
+pub(crate) fn sqlite_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+pub(crate) fn sqlite_bind_u64(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 fn modified_unix_seconds(metadata: &std::fs::Metadata) -> i64 {

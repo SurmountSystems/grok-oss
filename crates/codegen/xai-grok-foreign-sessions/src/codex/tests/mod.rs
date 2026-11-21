@@ -3,7 +3,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use filetime::FileTime;
 use rusqlite::{Connection, params, types::Value as SqlValue};
 use serde_json::json;
 use tempfile::TempDir;
@@ -64,7 +63,7 @@ fn create_db(path: &Path, rows: &[DbRow<'_>]) {
 }
 
 fn touch(path: &Path, time: SystemTime) {
-    filetime::set_file_mtime(path, FileTime::from_system_time(time)).unwrap();
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
 }
 
 fn session_day(root: &Path, now: SystemTime) -> PathBuf {

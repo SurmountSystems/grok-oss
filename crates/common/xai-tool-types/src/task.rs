@@ -544,10 +544,7 @@ pub fn should_continue_parent_work(
     }
     // "while waiting, spawn …" — parent still has the waiting work.
     let last_l = last.to_ascii_lowercase();
-    if last_l.contains("while waiting") || last_l.contains("whilst waiting") {
-        return true;
-    }
-    false
+    last_l.contains("while waiting") || last_l.contains("whilst waiting")
 }
 
 fn blob_has_exec(text: &str) -> bool {

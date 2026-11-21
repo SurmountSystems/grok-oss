@@ -664,6 +664,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
     }
 }
 /// Record the shell's latest `session/new` setup step so a create timeout can name where it stalled.
+/// `response_ready` means start can finish: leave "Starting session..." and deliver a prompt queued during start.
 fn handle_session_setup_phase(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -689,11 +690,26 @@ fn handle_session_setup_phase(notif: &acp::ExtNotification, app: &mut AppView) -
     let Some(session_id) = payload.session_id.as_deref() else {
         return false;
     };
-    let Some(agent) = setup_phase_target_agent(app, session_id) else {
-        return false;
+    let ready = {
+        let Some(agent) = setup_phase_target_agent(app, session_id) else {
+            return false;
+        };
+        agent.session_new_phase = Some(phase);
+        if phase != xai_grok_shell::agent::SessionSetupPhase::ResponseReady {
+            return false;
+        }
+        if agent.session.session_id.is_some() {
+            return false;
+        }
+        let Some(pending_id) = agent.pending_session_id.clone() else {
+            return false;
+        };
+        if pending_id.0.as_ref() != session_id {
+            return false;
+        }
+        (agent.session.id, pending_id)
     };
-    agent.session_new_phase = Some(phase);
-    false
+    crate::app::dispatch::finish_session_start_on_response_ready(app, ready.0, ready.1)
 }
 fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Some(banner) = crate::acp::version_mismatch_banner(notif.params.get()) else {

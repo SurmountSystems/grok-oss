@@ -3102,6 +3102,60 @@ fn auth_url_ready_without_url_leaves_connecting_splash() {
     );
 }
 
+/// Welcome Login (`l`) starts the authenticate task. A URL poll that has not
+/// published a URL yet must leave that task running.
+#[test]
+fn welcome_login_does_not_paint_login_did_not_start_while_the_starter_can_run() {
+    let rt = test_runtime();
+    let mut app = test_app();
+    let (task, seq) = install_live_auth_task(&mut app, &rt);
+    assert!(
+        app.auth_state.is_connecting_splash(),
+        "precondition: welcome Login started the connecting splash, got {:?}",
+        app.auth_state
+    );
+    let mut task = task;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthUrlReady {
+            request_seq: seq,
+            auth_url: None,
+            external: false,
+            mode: None,
+        }),
+        &mut app,
+    );
+
+    let painted = match &app.auth_state {
+        AuthState::Pending { error: Some(error) } => error.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        !painted.contains("Login did not start. Press l to try again."),
+        "welcome Login must not paint \"Login did not start. Press l to try again.\" while the starter can run, got {painted:?} state {:?}",
+        app.auth_state
+    );
+    assert!(
+        matches!(app.auth_state, AuthState::Authenticating { .. }),
+        "welcome Login must keep the login flow started, got {:?}",
+        app.auth_state
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelAuth { .. })),
+        "must not cancel a starter that can still run, got {effects:?}"
+    );
+    let finished = rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut task).await
+    });
+    assert!(
+        finished.is_err(),
+        "Login did not start. Press l to try again. must not be reached by cancelling a starter that can still run"
+    );
+    task.abort();
+}
+
 #[test]
 fn auth_url_ready_with_url_keeps_authenticating() {
     let mut app = test_app();

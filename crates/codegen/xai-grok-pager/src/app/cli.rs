@@ -203,10 +203,73 @@ See ~/.grok/README.md for more information.
     /// Disabled by default and enabled server-side per account; set `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
+    /// Print a short text view of a pseudoterminal session this command starts.
+    /// Later eyes verbs use that same session.
+    /// This does not attach to a window that is already open, and it does not call the model.
+    Eyes(EyesArgs),
     /// Open the Agent Dashboard view at startup.
     /// The dashboard shows every session, top-level and subagents.
     /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
     Dashboard,
+}
+/// `grok-oss eyes` verbs. They share the pseudoterminal session the first verb starts.
+#[derive(Debug, clap::Args, Clone)]
+pub struct EyesArgs {
+    #[command(subcommand)]
+    pub command: EyesCommand,
+}
+#[derive(Debug, Subcommand, Clone)]
+pub enum EyesCommand {
+    /// Print at most ten lines from the session this command started.
+    /// This does not call the model.
+    Look,
+    /// Insert text into the composer. Does not press Enter.
+    Type {
+        /// Text to insert. `enter` is the five letters e-n-t-e-r and does not submit.
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            num_args = 1..,
+            value_name = "TEXT"
+        )]
+        text: Vec<String>,
+    },
+    /// Send one named key. Enter submits. Escape goes back. Tab moves focus.
+    Key {
+        /// One key. A single letter inserts that letter when the composer is focused.
+        #[arg(value_name = "KEY")]
+        key: String,
+    },
+    /// Activate one control by its visible label.
+    Touch {
+        /// Visible label. `approve`, `comment`, `revise`, and `exit` are the plan targets.
+        #[arg(value_name = "LABEL")]
+        label: String,
+    },
+    /// Move the plan body or the transcript by a signed line count.
+    Scroll {
+        /// Positive moves toward the end.
+        #[arg(
+            allow_hyphen_values = true,
+            allow_negative_numbers = true,
+            value_name = "LINES"
+        )]
+        lines: i64,
+    },
+    /// Fail unless the latest look contains every string.
+    Expect {
+        /// Each string must appear. Repeated strings all have to match.
+        #[arg(
+            required = true,
+            num_args = 1..,
+            allow_hyphen_values = true,
+            value_name = "TEXT"
+        )]
+        text: Vec<String>,
+    },
+    /// Judge the latest look and change nothing.
+    Score,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]

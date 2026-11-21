@@ -587,9 +587,10 @@ async fn failed_job_leaves_rg_the_rest_of_the_deadline() {
 
     let resolved = source.resolve(&config, &tracing::Span::none()).await;
 
-    let ResolvedSource::Rg { mut rg, deadline } = resolved else {
+    let ResolvedSource::Rg { rg, deadline } = resolved else {
         panic!("a failed job falls back to rg");
     };
+    let mut rg = *rg;
     rg.kill_and_reap().await;
     assert_eq!(request.deadline, deadline);
 }

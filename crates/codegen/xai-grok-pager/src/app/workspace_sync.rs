@@ -151,10 +151,7 @@ fn provisional_agent_ids(
 /// Whether `agent` can ever become a workspace member; the session id is checked separately because it binds late.
 fn is_adoptable(agent: &AgentView) -> bool {
     let cwd = agent.session.cwd.to_string_lossy();
-    if agent.conversation_entry || !agent.session.cwd.is_absolute() || cwd.len() > MAX_CWD_BYTES {
-        return false;
-    }
-    true
+    !agent.conversation_entry && agent.session.cwd.is_absolute() && cwd.len() <= MAX_CWD_BYTES
 }
 fn agent_to_new_member(agent: &AgentView) -> Option<NewMember> {
     if !is_adoptable(agent) {

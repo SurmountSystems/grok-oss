@@ -705,7 +705,14 @@ fn active_archived_operation_is_not_reconciled_by_another_handle() {
         .execute(
             "UPDATE consolidation_lock SET owner = ?1, expires_at = ?2, generation = ?3
              WHERE singleton = 1",
-            params![lease.owner, i64::MAX, lease.generation],
+            params![
+                lease.owner,
+                i64::MAX,
+                match super::sqlite_bind_u64(lease.generation) {
+                    Ok(generation) => generation,
+                    Err(error) => panic!("lease generation is not a sqlite integer: {error}"),
+                }
+            ],
         )
         .unwrap();
     drop(connection);
@@ -1299,7 +1306,7 @@ fn empty_shadow_plan_is_retryable_without_consuming_observations() {
             .query_row(
                 "SELECT COUNT(*) FROM memory_v2_shadow_evaluations",
                 [],
-                |row| row.get::<_, u64>(0),
+                |row| super::sqlite_u64_column(row, 0),
             )
             .unwrap(),
         0

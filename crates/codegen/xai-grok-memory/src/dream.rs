@@ -374,10 +374,13 @@ pub fn execute_dream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filetime::FileTime;
     use std::fs;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn set_mtime(path: &Path, time: SystemTime) {
+        std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
 
     // Mirrors `dream_lock::tests::write_session`; it is kept local to avoid cross-module test coupling for a trivial 5-line helper
     fn write_session(dir: &Path, name: &str, age_secs: u64) {
@@ -385,7 +388,7 @@ mod tests {
         let path = dir.join(format!("{name}.md"));
         fs::write(&path, "test").unwrap();
         let t = SystemTime::now() - Duration::from_secs(age_secs);
-        filetime::set_file_mtime(&path, FileTime::from_system_time(t)).unwrap();
+        set_mtime(&path, t);
     }
 
     fn enabled_config() -> MemoryDreamConfig {
@@ -402,7 +405,7 @@ mod tests {
         let marker = dir.join(".dream-consolidated");
         fs::write(&marker, "").unwrap();
         let t = SystemTime::now() - Duration::from_secs(age_secs);
-        filetime::set_file_mtime(&marker, FileTime::from_system_time(t)).unwrap();
+        set_mtime(&marker, t);
     }
 
     #[test]
@@ -622,7 +625,7 @@ mod tests {
         write_session_content(dir, name, content);
         let old = SystemTime::now() - Duration::from_secs(CLEANUP_RECENCY_GUARD_SECS + 60);
         let path = dir.join(format!("{name}.md"));
-        filetime::set_file_mtime(&path, FileTime::from_system_time(old)).unwrap();
+        set_mtime(&path, old);
     }
 
     #[test]
@@ -903,7 +906,7 @@ mod tests {
         let bad_path = sessions.join("bad-stem.md");
         fs::create_dir_all(&bad_path).unwrap();
         let old = SystemTime::now() - Duration::from_secs(CLEANUP_RECENCY_GUARD_SECS + 60);
-        filetime::set_file_mtime(&bad_path, FileTime::from_system_time(old)).unwrap();
+        set_mtime(&bad_path, old);
 
         // Also create a normal file that can be cleaned
         write_old_session_content(&sessions, "good-stem", "Content");

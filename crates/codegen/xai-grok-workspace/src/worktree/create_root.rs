@@ -190,16 +190,15 @@ fn physical_dest_spelling(path: &Path) -> PathBuf {
 
 /// Windows mountpoint vs cwd often differs only in case. Never `canonicalize`.
 fn dest_paths_match(a: &Path, b: &Path) -> bool {
-    if a == b || physical_dest_spelling(a) == physical_dest_spelling(b) {
-        return true;
-    }
     #[cfg(windows)]
     {
-        folded_path(a) == folded_path(b)
+        a == b
+            || physical_dest_spelling(a) == physical_dest_spelling(b)
+            || folded_path(a) == folded_path(b)
     }
     #[cfg(not(windows))]
     {
-        false
+        a == b || physical_dest_spelling(a) == physical_dest_spelling(b)
     }
 }
 
@@ -212,16 +211,15 @@ fn folded_path(path: &Path) -> Vec<String> {
 
 #[cfg(test)]
 fn dest_contains(parent: &Path, child: &Path) -> bool {
-    if dest_paths_match(parent, child) || child.starts_with(parent) {
-        return true;
-    }
     #[cfg(windows)]
     {
-        folded_path(child).starts_with(&folded_path(parent))
+        dest_paths_match(parent, child)
+            || child.starts_with(parent)
+            || folded_path(child).starts_with(&folded_path(parent))
     }
     #[cfg(not(windows))]
     {
-        false
+        dest_paths_match(parent, child) || child.starts_with(parent)
     }
 }
 

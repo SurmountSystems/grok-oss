@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use filetime::FileTime;
 use tempfile::TempDir;
 
 use super::{
@@ -11,19 +10,19 @@ use super::{
 
 const TTL_DAYS: u32 = 30;
 
-fn days_ago(days: u64) -> FileTime {
-    FileTime::from_system_time(SystemTime::now() - Duration::from_secs(days * 86_400))
+fn days_ago(days: u64) -> SystemTime {
+    SystemTime::now() - Duration::from_secs(days * 86_400)
 }
 
 /// Writes a small file (creating parents) and backdates it to `age`.
-fn write(path: &Path, age: FileTime) {
+fn write(path: &Path, age: SystemTime) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, b"x").unwrap();
-    filetime::set_file_mtime(path, age).unwrap();
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(age)).unwrap();
 }
 
 /// `sessions/<cwd>/<id>/` with `summary.json` and `updates.jsonl` at `age`.
-fn write_session(root: &Path, cwd: &str, id: &str, age: FileTime) -> PathBuf {
+fn write_session(root: &Path, cwd: &str, id: &str, age: SystemTime) -> PathBuf {
     let dir = root.join(cwd).join(id);
     write(&dir.join("summary.json"), age);
     write(&dir.join("updates.jsonl"), age);
@@ -199,7 +198,11 @@ fn stub_dir_follows_newest_file_or_dir_mtime() {
     write(&lock_only.join("summary.json.lock"), days_ago(40));
     let old_empty = cwd.join("old-empty");
     std::fs::create_dir_all(&old_empty).unwrap();
-    filetime::set_file_mtime(&old_empty, days_ago(40)).unwrap();
+    std::fs::set_times(
+        &old_empty,
+        std::fs::FileTimes::new().set_modified(days_ago(40)),
+    )
+    .unwrap();
     let fresh_empty = cwd.join("fresh-empty");
     std::fs::create_dir_all(&fresh_empty).unwrap();
 

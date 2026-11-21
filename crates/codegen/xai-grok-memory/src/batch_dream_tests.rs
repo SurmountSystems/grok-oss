@@ -33,7 +33,11 @@ impl Fixture {
         let relative = format!("{INBOX_DIR}/{name}.md");
         let path = self.workspace.join(&relative);
         std::fs::write(&path, body).unwrap();
-        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(modified, 0)).unwrap();
+        let modified_at = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                u64::try_from(modified).expect("note mtime after epoch"),
+            );
+        std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(modified_at)).unwrap();
         relative
     }
 

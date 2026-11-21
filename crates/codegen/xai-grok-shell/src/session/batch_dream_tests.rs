@@ -42,8 +42,8 @@ impl Fixture {
             .workspace
             .join(format!("observations/_inbox/note-{index}.md"));
         std::fs::write(&path, body).unwrap();
-        let modified = filetime::FileTime::from_unix_time(1_000 + index as i64, 0);
-        filetime::set_file_mtime(&path, modified).unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + index as u64);
+        std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(modified)).unwrap();
     }
 
     fn options(&self) -> BatchDreamOptions {

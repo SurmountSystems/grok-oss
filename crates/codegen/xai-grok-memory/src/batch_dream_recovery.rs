@@ -7,6 +7,7 @@ use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 
 use crate::batch_dream::{
     BatchDreamError, BatchDreamStore, BatchReport, Result, STAGE_PREFIX, TOPICS_DIR,
+    sqlite_bind_u64, sqlite_u64_column,
 };
 
 const RECOVERY_LEASE_SECS: i64 = 60;
@@ -156,16 +157,18 @@ impl BatchDreamStore {
                 )?;
                 transaction.commit()?;
             } else {
-                let generation = transaction
-                    .query_row(
-                        "SELECT generation FROM consolidation_lock WHERE singleton = 1",
-                        [],
-                        |row| row.get::<_, u64>(0),
-                    )?
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        BatchDreamError::Invalid("lease generation overflows".to_owned())
-                    })?;
+                let generation = sqlite_bind_u64(
+                    transaction
+                        .query_row(
+                            "SELECT generation FROM consolidation_lock WHERE singleton = 1",
+                            [],
+                            |row| sqlite_u64_column(row, 0),
+                        )?
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            BatchDreamError::Invalid("lease generation overflows".to_owned())
+                        })?,
+                )?;
                 let expires_at = now.saturating_add(RECOVERY_LEASE_SECS);
                 transaction.execute(
                     "UPDATE consolidation_lock SET owner = ?1, generation = ?2, expires_at = ?3

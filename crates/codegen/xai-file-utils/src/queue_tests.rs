@@ -1,6 +1,10 @@
 use super::*;
 use crate::UploadMethod;
 
+fn set_mtime(path: &std::path::Path, time: std::time::SystemTime) {
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
+}
+
 /// Mock credential resolver for tests.
 struct MockResolver;
 
@@ -1081,8 +1085,7 @@ fn cleanup_orphans_removes_stale_directories() {
     std::fs::create_dir_all(&stale_dir).unwrap();
     std::fs::write(stale_dir.join("a.txt"), b"old").unwrap();
     let three_hours_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(three_hours_ago);
-    filetime::set_file_mtime(&stale_dir, ft).unwrap();
+    set_mtime(&stale_dir, three_hours_ago);
 
     // Create a fresh subdirectory that should be preserved.
     let fresh_dir = queue_dir.join("scratch_fresh");
@@ -1092,7 +1095,7 @@ fn cleanup_orphans_removes_stale_directories() {
     // Also create a stale file to verify mixed cleanup still works.
     let stale_file = queue_dir.join("stale.gz");
     std::fs::write(&stale_file, b"old").unwrap();
-    filetime::set_file_mtime(&stale_file, ft).unwrap();
+    set_mtime(&stale_file, three_hours_ago);
 
     let queue = UploadQueue {
         tx: mpsc::channel(1).0,
@@ -1135,16 +1138,14 @@ fn cleanup_orphans_recurses_into_scratch_subdirs() {
     std::fs::create_dir_all(&stale_session).unwrap();
     std::fs::write(stale_session.join("pre_edit.txt"), b"old copy").unwrap();
     let three_hours_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(three_hours_ago);
-    filetime::set_file_mtime(&stale_session, ft).unwrap();
+    set_mtime(&stale_session, three_hours_ago);
 
     // Fresh session subdir under scratch/ — must survive.
     let fresh_session = scratch_dir.join("fresh-session-xyz");
     std::fs::create_dir_all(&fresh_session).unwrap();
     std::fs::write(fresh_session.join("hot.txt"), b"keep").unwrap();
     let now = std::time::SystemTime::now();
-    let fresh_ft = filetime::FileTime::from_system_time(now);
-    filetime::set_file_mtime(&fresh_session, fresh_ft).unwrap();
+    set_mtime(&fresh_session, now);
 
     // scratch/ has a fresh mtime (a new session just landed) so the old
     // top-level age check would have skipped it entirely.
@@ -3048,11 +3049,10 @@ fn cleanup_orphaned_uploads_stores_count_in_static() {
 
     // Create two stale files with mtime set to 3 hours ago.
     let three_hours_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(three_hours_ago);
     for name in ["stale_a.json", "stale_b.json"] {
         let path = queue_dir.join(name);
         std::fs::write(&path, b"old").unwrap();
-        filetime::set_file_mtime(&path, ft).unwrap();
+        set_mtime(&path, three_hours_ago);
     }
 
     // Create a fresh file that should survive.
@@ -4390,17 +4390,16 @@ fn cleanup_orphans_counts_lone_files_as_mismatched() {
     std::fs::create_dir_all(&queue_dir).unwrap();
 
     let stale = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(stale);
 
     // Lone temp file (no matching sidecar).
     let lone_tmp = queue_dir.join("aa_turn0_before_changes.tar.gz_1_0");
     std::fs::write(&lone_tmp, b"orphan archive").unwrap();
-    filetime::set_file_mtime(&lone_tmp, ft).unwrap();
+    set_mtime(&lone_tmp, stale);
 
     // Lone sidecar (no matching temp file).
     let lone_sidecar = queue_dir.join("bb_turn0_after_changes.tar.gz_2_0.meta.json");
     std::fs::write(&lone_sidecar, b"{}").unwrap();
-    filetime::set_file_mtime(&lone_sidecar, ft).unwrap();
+    set_mtime(&lone_sidecar, stale);
 
     let stats = Arc::new(UploadQueueStats::new());
     let queue = test_queue(
@@ -4429,14 +4428,13 @@ fn cleanup_orphans_does_not_count_matched_pair() {
     std::fs::create_dir_all(&queue_dir).unwrap();
 
     let stale = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(stale);
 
     let tmp = queue_dir.join("cc_turn1_before_changes.tar.gz_3_0");
     std::fs::write(&tmp, b"paired archive").unwrap();
-    filetime::set_file_mtime(&tmp, ft).unwrap();
+    set_mtime(&tmp, stale);
     let sidecar = sidecar_path_for(&tmp);
     std::fs::write(&sidecar, b"{}").unwrap();
-    filetime::set_file_mtime(&sidecar, ft).unwrap();
+    set_mtime(&sidecar, stale);
 
     let stats = Arc::new(UploadQueueStats::new());
     let queue = test_queue(
@@ -4483,9 +4481,8 @@ fn cleanup_orphans_uses_sidecar_age_for_pairs() {
         std::fs::write(&sc, serde_json::to_vec(&sidecar).unwrap()).unwrap();
         if old_mtime {
             let stale = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-            let ft = filetime::FileTime::from_system_time(stale);
-            filetime::set_file_mtime(&tmp, ft).unwrap();
-            filetime::set_file_mtime(&sc, ft).unwrap();
+            set_mtime(&tmp, stale);
+            set_mtime(&sc, stale);
         }
         (tmp, sc)
     };
@@ -4544,8 +4541,7 @@ fn cleanup_orphans_never_deletes_reference_source() {
     let ref_source = worktree.join("image.bin");
     std::fs::write(&ref_source, b"durable working-tree file").unwrap();
     let three_hours_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
-    let ft = filetime::FileTime::from_system_time(three_hours_ago);
-    filetime::set_file_mtime(&ref_source, ft).unwrap();
+    set_mtime(&ref_source, three_hours_ago);
 
     let cleaned = cleanup_orphaned_uploads(temp.path(), Duration::from_secs(3600));
     assert_eq!(cleaned, 0, "nothing in queue_dir to clean");

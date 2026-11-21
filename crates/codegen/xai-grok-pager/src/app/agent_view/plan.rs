@@ -59,6 +59,11 @@ impl AgentView {
     /// approve / revise / clarify can drain it on the same multimodal path as
     /// a pasted screenshot. Returns true if a chip was inserted.
     ///
+    /// The plan body also receives the stdout of the first `tesseract` on
+    /// PATH for this image path. That text is not an image description. When
+    /// that binary cannot be started, the plan body says that tesseract is
+    /// missing. The image chip stays.
+    ///
     /// No-op when plan approval is not open, the path is not a readable image,
     /// or the prompt rejects the insert (policy / capacity). Callers still
     /// keep the on-disk PNG and toast the path.
@@ -70,7 +75,14 @@ impl AgentView {
         else {
             return false;
         };
-        self.prompt.insert_image(img).is_ok()
+        if self.prompt.insert_image(img).is_err() {
+            return false;
+        }
+        let text = super::plan_image_tesseract::tesseract_stdout_for_plan_image(path);
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            super::plan_image_tesseract::append_tesseract_stdout(&mut pav.plan_content, &text);
+        }
+        true
     }
 
     /// Resolve the absolute path to the plan file for this session.
@@ -2070,6 +2082,58 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    /// File-backed Comment CTA owns printable keys. They do not type into
+    /// the main composer.
+    pub(super) fn selected_comment_cta_owns_typed_key(&self, key: &KeyEvent) -> bool {
+        if self.selected_plan_cta()
+            != Some(crate::views::file_search::line_viewer::SelectedPlanCta::Comment)
+        {
+            return false;
+        }
+        let file_backed_comment = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.source == PlanReviewSource::FileBacked
+                && pav.focus == PlanApprovalFocus::Prompt
+                && pav.prompt_intent == PlanPromptIntent::Comment
+        });
+        if !file_backed_comment {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => {
+                key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+            }
+            KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn edit_selected_plan_comment_field(&mut self, key: &KeyEvent) -> InputOutcome {
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return InputOutcome::Changed;
+        };
+        let text = &mut viewer.plan_mut().revision_prompt_text;
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => {
+                // Shift plus a letter inserts that capital. The main composer
+                // already does this. This box matches it. An already-capital
+                // letter stays that letter.
+                let ch = if key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                    && ch.is_ascii_lowercase()
+                {
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch
+                };
+                text.push(ch);
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                text.pop();
+            }
+            _ => {}
+        }
+        InputOutcome::Changed
+    }
+
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         if crate::input::key::is_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
@@ -2189,6 +2253,11 @@ impl AgentView {
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
         if crate::key!('y').matches(key) && !is_commenting && empty_prompt && preview_focused {
             return self.copy_plan_full();
+        }
+        // Comment is the selected footer button. Typed letters land in the
+        // plan comment buffer, not the main composer.
+        if self.selected_comment_cta_owns_typed_key(key) {
+            return self.edit_selected_plan_comment_field(key);
         }
         // Preview types `a`. Empty Prompt (revision notes) still Approves.
         if !is_commenting
@@ -5247,6 +5316,82 @@ mod plan_approval_optimistic_mode_tests {
             .as_ref()
             .expect("review after revise");
         assert_eq!(pav.plan_content.as_deref(), Some("# Revised plan\n"));
+    }
+
+    /// An image file given to the plan view must show up in the plan text as
+    /// `tesseract` stdout. An image description is not that text.
+    #[test]
+    fn plan_view_image_text_is_tesseract_stdout_not_an_image_description() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let record = dir.path().join("tesseract-invoked.txt");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).expect("bin dir");
+        let fake = bin_dir.join("tesseract");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{record}'\nprintf '%s\\n' 'TESSERACT-PLAN-MARKER'\n",
+            record = record.display()
+        );
+        std::fs::write(&fake, script).expect("write fake tesseract");
+        let mut perms = std::fs::metadata(&fake)
+            .expect("fake tesseract metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake, perms).expect("mark fake tesseract executable");
+
+        let image = dir.path().join("screen.png");
+        let png = {
+            let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+                image::ImageBuffer::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .expect("8x8 png");
+            buf
+        };
+        std::fs::write(&image, png).expect("write plan image");
+
+        let prev_path = std::env::var("PATH").ok();
+        struct RestorePath(Option<String>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("PATH", value) },
+                    None => unsafe { std::env::remove_var("PATH") },
+                }
+            }
+        }
+        let _restore_path = RestorePath(prev_path.clone());
+        let path_value = match &prev_path {
+            Some(prev) => format!("{}:{}", bin_dir.display(), prev),
+            None => bin_dir.display().to_string(),
+        };
+        unsafe { std::env::set_var("PATH", path_value) };
+
+        let mut agent = agent_with_post_turn_review();
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "the plan view is open before the image is prepared"
+        );
+        assert!(
+            agent.try_attach_tui_screenshot_for_plan(&image),
+            "the plan view accepts the image file"
+        );
+        let composer = agent.prompt.text();
+        let body = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|pav| pav.plan_content.clone())
+            .unwrap_or_default();
+        let plan_text = format!("{body}{composer}");
+        assert!(
+            plan_text.contains("TESSERACT-PLAN-MARKER"),
+            "plan text must contain tesseract stdout TESSERACT-PLAN-MARKER, not an image description; got {plan_text:?}"
+        );
+        let invoked = std::fs::read_to_string(&record).unwrap_or_default();
+        let image_path = image.display().to_string();
+        assert!(
+            invoked.lines().any(|line| line == image_path),
+            "fake tesseract must be invoked with the image path {image_path}; record was {invoked:?}"
+        );
     }
 }
 
