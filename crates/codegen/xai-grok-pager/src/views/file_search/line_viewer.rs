@@ -2015,8 +2015,54 @@ fn repaint_soft_plan_scrollbar(buf: &mut Buffer, viewer: &LineViewerState, conte
     );
 }
 
+/// Text rows inside the note box, not counting the border. A short note
+/// stays one line. A longer note grows up to this many lines. Past the cap
+/// the tail stays, including the caret and the end of the note.
+const PLAN_NOTE_TEXT_ROW_CAP: usize = 4;
+
+fn plan_note_body_width(box_width: u16) -> usize {
+    box_width.saturating_sub(2 + crate::glyphs::PROMPT_ARROW_WIDTH) as usize
+}
+
+fn plan_note_text_rows(draft: &str, body_width: usize) -> usize {
+    let trimmed = draft.trim();
+    if trimmed.is_empty() || body_width == 0 {
+        return 1;
+    }
+    trimmed
+        .chars()
+        .count()
+        .div_ceil(body_width.max(1))
+        .clamp(1, PLAN_NOTE_TEXT_ROW_CAP)
+}
+
+/// Character wrap. Each row is full except the last. Past the cap, keep
+/// the tail so the end of the note stays on screen.
+fn plan_note_window(note: &str, body_width: usize, text_rows: usize) -> Vec<String> {
+    let width = body_width.max(1);
+    let chars: Vec<char> = note.chars().collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let end = (index + width).min(chars.len());
+        let Some(window) = chars.get(index..end) else {
+            break;
+        };
+        lines.push(window.iter().collect());
+        index = end;
+    }
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    if text_rows > 0 && lines.len() > text_rows {
+        lines = lines.split_off(lines.len() - text_rows);
+    }
+    lines
+}
+
 /// Prompt input above the approval footer. The footer word `revise` is not
-/// this row. An empty draft paints the placeholder.
+/// this box. An empty draft paints the placeholder on one line. A longer
+/// draft grows extra lines up to `PLAN_NOTE_TEXT_ROW_CAP`.
 fn paint_plan_revision_prompt(buf: &mut Buffer, area: Rect, draft: &str, theme: &Theme) {
     if area.width < 6 || area.height < 3 {
         return;
@@ -2026,57 +2072,121 @@ fn paint_plan_revision_prompt(buf: &mut Buffer, area: Rect, draft: &str, theme: 
         .bg(theme.bg_base);
     let text_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
     let placeholder_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+    let caret_style = Style::default().fg(theme.bg_base).bg(theme.text_primary);
     let left = area.x;
     let right = area.x + area.width - 1;
     let top = area.y;
     let bottom = area.y + area.height - 1;
-    let mid = top + 1;
     let put = |buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style| {
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_symbol(symbol);
             cell.set_style(style);
         }
     };
-    for x in left..=right {
-        let top_symbol = if x == left {
-            "\u{250c}"
-        } else if x == right {
-            "\u{2510}"
-        } else {
-            "\u{2500}"
-        };
-        let bottom_symbol = if x == left {
-            "\u{2514}"
-        } else if x == right {
-            "\u{2518}"
-        } else {
-            "\u{2500}"
-        };
-        put(buf, x, top, top_symbol, border);
-        put(buf, x, bottom, bottom_symbol, border);
-    }
-    put(buf, left, mid, "\u{2502}", border);
-    put(buf, right, mid, "\u{2502}", border);
-    for x in left.saturating_add(1)..right {
-        put(buf, x, mid, " ", text_style);
+    for y in top..=bottom {
+        let edge = y == top || y == bottom;
+        for x in left..=right {
+            let symbol = if edge {
+                if x == left {
+                    if y == top { "\u{250c}" } else { "\u{2514}" }
+                } else if x == right {
+                    if y == top { "\u{2510}" } else { "\u{2518}" }
+                } else {
+                    "\u{2500}"
+                }
+            } else if x == left || x == right {
+                "\u{2502}"
+            } else {
+                " "
+            };
+            let style = if edge || x == left || x == right {
+                border
+            } else {
+                text_style
+            };
+            put(buf, x, y, symbol, style);
+        }
     }
     let arrow = crate::glyphs::prompt_arrow();
     let arrow_w = crate::glyphs::PROMPT_ARROW_WIDTH;
     let text_x = left.saturating_add(1);
-    if text_x.saturating_add(arrow_w) < right {
-        buf.set_span(text_x, mid, &Span::styled(arrow, text_style), arrow_w);
-    }
     let body_x = text_x.saturating_add(arrow_w);
-    let body_w = right.saturating_sub(body_x);
+    let body_w = plan_note_body_width(area.width);
+    let text_rows = area.height.saturating_sub(2) as usize;
     let trimmed = draft.trim();
-    let (shown, style) = if trimmed.is_empty() {
-        ("Type a revision...", placeholder_style)
+    let placeholder = trimmed.is_empty();
+    let lines = if placeholder {
+        vec!["Type a revision...".to_string()]
     } else {
-        (trimmed, text_style)
+        plan_note_window(trimmed, body_w, text_rows)
     };
-    let shown: String = shown.chars().take(body_w as usize).collect();
-    if body_w > 0 && !shown.is_empty() {
-        buf.set_string(body_x, mid, &shown, style);
+    let first_y = top.saturating_add(1);
+    if text_x.saturating_add(arrow_w) < right {
+        buf.set_span(text_x, first_y, &Span::styled(arrow, text_style), arrow_w);
+    }
+    for (index, line) in lines.iter().enumerate() {
+        let y = first_y.saturating_add(index as u16);
+        if y >= bottom || line.is_empty() || body_w == 0 {
+            continue;
+        }
+        let shown: String = line.chars().take(body_w).collect();
+        let style = if placeholder {
+            placeholder_style
+        } else {
+            text_style
+        };
+        buf.set_string(body_x, y, &shown, style);
+    }
+    let caret_line = lines.last();
+    let caret_index = lines.len().saturating_sub(1);
+    let caret_y = first_y.saturating_add(caret_index as u16);
+    if caret_y < bottom && body_w > 0 {
+        let count = caret_line.map(|line| line.chars().count()).unwrap_or(0);
+        let caret_x = if count == 0 {
+            body_x
+        } else {
+            body_x.saturating_add((count.min(body_w) - 1) as u16)
+        };
+        if caret_x < right
+            && let Some(cell) = buf.cell_mut((caret_x, caret_y))
+        {
+            if count == 0 {
+                cell.set_symbol(" ");
+            }
+            cell.set_style(caret_style);
+        }
+    }
+}
+
+const COMMENT_KEPT_NOTE: &str = "This note is kept. Approve starts the work with it. Revise rewrites the plan from it. Clarify only answers. Comment alone does not start the work.";
+
+/// Comment leaves this sentence on its own rows inside the panel. Those
+/// rows hold the sentence and spaces, so the whole sentence stays visible.
+fn paint_comment_kept_sentence(buf: &mut Buffer, popup: Rect, content: Rect, theme: &Theme) {
+    if content.height < 2 || popup.width < 8 {
+        return;
+    }
+    let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    let chars: Vec<char> = COMMENT_KEPT_NOTE.chars().collect();
+    let width = popup.width as usize;
+    let mut index = 0;
+    let mut row_i = 0u16;
+    while index < chars.len() && row_i < content.height {
+        let y = content.y.saturating_add(row_i);
+        let end = (index + width).min(chars.len());
+        let Some(window) = chars.get(index..end) else {
+            break;
+        };
+        let line: String = window.iter().collect();
+        for x in popup.x..popup.x.saturating_add(popup.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ");
+                cell.set_style(style);
+            }
+        }
+        buf.set_string(popup.x, y, &line, style);
+        index = end;
+        row_i = row_i.saturating_add(1);
     }
 }
 
@@ -2167,16 +2277,32 @@ pub fn render_line_viewer(
     // (rendered in step 8 below). The approval screen also reserves a prompt
     // input above that footer. The footer word `revise` is not the prompt.
     // A short pane keeps the footer and skips the prompt.
-    // Idle Preview (four CTAs) does not reserve this box. After Revise
-    // (`show_revision_prompt`) the in-panel input is three rows.
-    let revision_prompt_rows: u16 = if viewer.kind == LineViewerKind::PlanPreview
+    // Idle Preview (four CTAs) does not reserve this box. A short note is
+    // three rows. A longer note grows up to four text lines so the footer stays.
+    let show_revision_prompt = viewer.kind == LineViewerKind::PlanPreview
         && viewer.show_footer()
         && inner.height >= 9
         && viewer
             .plan_ref()
-            .is_some_and(|plan| plan.show_revision_prompt)
-    {
-        3
+            .is_some_and(|plan| plan.show_revision_prompt);
+    let revision_prompt_rows: u16 = if show_revision_prompt {
+        let prompt_width = if viewer.is_soft_plan_side_pane() {
+            inner.width.saturating_sub(SCROLLBAR_TOTAL_COLS)
+        } else {
+            inner.width
+        };
+        let body_width = plan_note_body_width(prompt_width);
+        let draft = viewer
+            .plan_ref()
+            .map(|plan| plan.revision_prompt_text.as_str())
+            .unwrap_or("");
+        let text_rows = plan_note_text_rows(draft, body_width);
+        let wanted = (text_rows as u16).saturating_add(2);
+        let max_box = inner
+            .height
+            .saturating_sub(3)
+            .min(2 + PLAN_NOTE_TEXT_ROW_CAP as u16);
+        wanted.min(max_box).max(3)
     } else {
         0
     };
@@ -2617,6 +2743,11 @@ pub fn render_line_viewer(
         force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
         paint_plan_header_controls(buf, popup_area, viewer, theme);
         repaint_soft_plan_scrollbar(buf, viewer, content_area);
+    }
+    if viewer.plan_ref().is_some_and(|plan| {
+        plan.show_revision_prompt && plan.selected_cta == Some(SelectedPlanCta::Comment)
+    }) {
+        paint_comment_kept_sentence(buf, popup_area, content_area, theme);
     }
 }
 

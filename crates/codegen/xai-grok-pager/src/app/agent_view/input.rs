@@ -679,6 +679,9 @@ impl AgentView {
                     .as_ref()
                     .is_some_and(|viewer| viewer.list_state.input_mode().is_none())
                 && Self::plan_prompt_key_reaches_main_composer(key)
+                // The plan note box owns Shift+Y and Y. Do not send those
+                // keys to the main composer. Preview copy is unchanged.
+                && !self.selected_comment_cta_owns_typed_key(key)
             {
                 return self.handle_prompt_key(key, registry, false);
             }

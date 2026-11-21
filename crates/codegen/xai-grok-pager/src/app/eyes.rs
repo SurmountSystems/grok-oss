@@ -2,6 +2,8 @@
 //!
 //! A session that is still starting reports the ASCII status `Starting session...`
 //! (three dots). Queued text is copied from the session. Nothing here calls the model.
+//! `grok-oss eyes` verbs call [`short_toon_look`] on the pseudoterminal session
+//! they started.
 
 use crate::app::agent::AgentState;
 use crate::app::agent_view::{ActivePane, AgentView};
@@ -18,33 +20,16 @@ pub trait SessionUiState {
     fn composer_focused(&self) -> bool;
     fn queued_prompts(&self) -> Vec<String>;
     fn transcript_lines(&self) -> Vec<String>;
-}
 
-/// Session this process spawned for `grok-oss eyes look`.
-///
-/// It is still starting. It does not attach to an open window and it does not call the model.
-#[derive(Debug, Clone, Copy)]
-pub struct SpawnedEyesSession;
-
-impl SessionUiState for SpawnedEyesSession {
-    fn status_text(&self) -> String {
-        STARTING_STATUS.to_string()
+    /// True when the focused composer has an insertion caret.
+    /// This is not a pixel test. The default follows composer focus.
+    fn composer_caret(&self) -> bool {
+        self.composer_focused()
     }
 
-    fn composer_text(&self) -> String {
-        String::new()
-    }
-
-    fn composer_focused(&self) -> bool {
-        true
-    }
-
-    fn queued_prompts(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn transcript_lines(&self) -> Vec<String> {
-        Vec::new()
+    /// One visible plan line, when this session has a plan body.
+    fn plan_line(&self) -> Option<String> {
+        None
     }
 }
 
@@ -129,6 +114,10 @@ fn one_line(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
 /// Short TOON list: status, composer text and focus, each queued prompt, and the last few transcript lines.
 /// At most ten lines. Not a cell grid.
 pub fn short_toon_look(session: &impl SessionUiState) -> String {
@@ -137,11 +126,11 @@ pub fn short_toon_look(session: &impl SessionUiState) -> String {
     lines.push(format!("composer: {}", one_line(&session.composer_text())));
     lines.push(format!(
         "composer_focused: {}",
-        if session.composer_focused() {
-            "true"
-        } else {
-            "false"
-        }
+        yes_no(session.composer_focused())
+    ));
+    lines.push(format!(
+        "composer_caret: {}",
+        yes_no(session.composer_caret())
     ));
     for text in session.queued_prompts() {
         if lines.len() >= LOOK_LINE_CAP {
@@ -161,5 +150,18 @@ pub fn short_toon_look(session: &impl SessionUiState) -> String {
             lines.push(format!("transcript: {flat}"));
         }
     }
+    if lines.len() < LOOK_LINE_CAP {
+        if let Some(text) = session.plan_line() {
+            let flat = one_line(&text);
+            if !flat.is_empty() {
+                lines.push(format!("plan: {flat}"));
+            }
+        }
+    }
     lines.join("\n")
 }
+
+#[path = "eyes/session.rs"]
+mod session;
+
+pub use session::{EyesError, run};

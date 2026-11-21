@@ -346,9 +346,42 @@ grok-oss sessions search "rate limit"
 
 `grok-oss eyes` is a short text view of one grok-oss session. It is not a screenshot, and it does not dump every terminal cell.
 
-The five verbs are look, type, key, expect, and score. `grok-oss eyes look` prints a short TOON list from the app's own UI state: status text, composer text and whether it is focused, each queued prompt, and the last few transcript lines. type writes into the composer. key sends one key the TUI already uses, including Enter. expect fails when a named string is missing. score fails when the composer has no caret, a queued row has no name, or the status line is still "Starting session..." after the session is ready and a queued prompt was not sent.
+The first verb starts a pseudoterminal and writes `eyes/session.json` in the grok home (usually `~/.grok/eyes/session.json`). Later verbs load that same file. They do not attach to a grok-oss window that is already open, and they do not call the model. SuperGrok is a paid product. A look does not spend included SuperGrok period limits.
 
-The first session is a pseudoterminal the Agent starts. It does not attach to the window the Operator already has open. Attaching can steal keys.
+The seven verbs are look, type, key, touch, scroll, expect, and score. Each one prints a short result and exits nonzero on failure.
+
+```bash
+grok-oss eyes look
+grok-oss eyes type TEXT
+grok-oss eyes type enter
+grok-oss eyes key Enter
+grok-oss eyes key Escape
+grok-oss eyes key Tab
+grok-oss eyes key a
+grok-oss eyes touch approve
+grok-oss eyes touch comment
+grok-oss eyes touch revise
+grok-oss eyes touch exit
+grok-oss eyes scroll LINES
+grok-oss eyes expect TEXT
+grok-oss eyes score
+```
+
+`grok-oss eyes look` prints at most ten lines from that session: status, composer text, whether the composer is focused, whether the focused composer has a caret, each queued prompt, the last few transcript lines, and one plan line when the plan has text. A queued prompt appears. An empty queue stays empty because it is empty.
+
+`grok-oss eyes type TEXT` inserts that text and does not press Enter. `grok-oss eyes type enter` inserts the five letters e-n-t-e-r and does not submit. type fails when the composer is not focused or the next look lacks the text. type never activates a binding.
+
+`grok-oss eyes key KEY` is one key. Enter submits the composer. Escape goes back. Tab moves focus. `grok-oss eyes key a` inserts one letter a when the composer is focused.
+
+`grok-oss eyes touch LABEL` activates the control with that visible label. approve, comment, revise, and exit are the plan targets. Two controls with the same label fail and the result names both.
+
+`grok-oss eyes scroll LINES` moves the plan body when the plan is focused, and otherwise moves the transcript. Positive moves toward the end. scroll fails when the view can scroll and the next look is unchanged.
+
+`grok-oss eyes expect TEXT` checks that the latest look contains every given string. Repeated text arguments all have to match. expect does not change the session. Failure quotes the look.
+
+`grok-oss eyes score` judges the latest look and changes nothing. It exits 0 only when the focused composer has a caret, every queued row shows its prompt text, and the session is not still "Starting session..." after a prompt was queued. It does not check pixels.
+
+The session does not attach to the window the Operator already has open. Attaching can steal keys.
 
 The steps for one open GitHub issue are in `/home/hunter/.agents/skills/enki-eyes/SKILL.md` under grok-oss eyes. This page is not a second copy of that protocol.
 

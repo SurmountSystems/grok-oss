@@ -2060,20 +2060,16 @@ fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
-/// `grok-oss eyes look` before sandbox, tokio, or the TUI.
-/// The session is spawned in this process. It does not attach to an open window and it does not call the model.
-fn dispatch_eyes_look_if_requested(args: &PagerArgs) -> bool {
-    use xai_grok_pager::app::cli::EyesCommand;
+/// `grok-oss eyes` before sandbox, tokio, or the TUI.
+/// The first verb starts a pseudoterminal session. Later verbs load that same session.
+/// This does not attach to an open window and it does not call the model.
+fn dispatch_eyes_if_requested(args: &PagerArgs) -> bool {
     let Some(Command::Eyes(eyes)) = &args.command else {
         return false;
     };
-    match &eyes.command {
-        EyesCommand::Look => {
-            let look = xai_grok_pager::app::eyes::short_toon_look(
-                &xai_grok_pager::app::eyes::SpawnedEyesSession,
-            );
-            println!("{look}");
-        }
+    if let Err(error) = xai_grok_pager::app::eyes::run(&eyes.command) {
+        eprintln!("eyes: {error}");
+        std::process::exit(1);
     }
     true
 }
@@ -2103,7 +2099,7 @@ fn main() {
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args)
         || dispatch_doctor_if_requested(&args)
-        || dispatch_eyes_look_if_requested(&args)
+        || dispatch_eyes_if_requested(&args)
     {
         return;
     }
@@ -2299,7 +2295,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 unreachable!("doctor was consumed before runtime startup")
             }
             Command::Eyes(_) => {
-                unreachable!("eyes look was consumed before runtime startup")
+                unreachable!("eyes was consumed before runtime startup")
             }
             Command::DiskUsage(du_args) => {
                 init_tracing_simple("cli");

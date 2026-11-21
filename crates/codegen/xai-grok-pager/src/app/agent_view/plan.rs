@@ -2084,7 +2084,7 @@ impl AgentView {
 
     /// File-backed Comment CTA owns printable keys. They do not type into
     /// the main composer.
-    fn selected_comment_cta_owns_typed_key(&self, key: &KeyEvent) -> bool {
+    pub(super) fn selected_comment_cta_owns_typed_key(&self, key: &KeyEvent) -> bool {
         if self.selected_plan_cta()
             != Some(crate::views::file_search::line_viewer::SelectedPlanCta::Comment)
         {
@@ -2113,7 +2113,19 @@ impl AgentView {
         };
         let text = &mut viewer.plan_mut().revision_prompt_text;
         match key.code {
-            KeyCode::Char(ch) if !ch.is_control() => text.push(ch),
+            KeyCode::Char(ch) if !ch.is_control() => {
+                // Shift plus a letter inserts that capital. The main composer
+                // already does this. This box matches it. An already-capital
+                // letter stays that letter.
+                let ch = if key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                    && ch.is_ascii_lowercase()
+                {
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch
+                };
+                text.push(ch);
+            }
             KeyCode::Backspace | KeyCode::Delete => {
                 text.pop();
             }
