@@ -1433,6 +1433,19 @@ impl SessionActor {
                         )
                         .await;
                 }
+                crate::session::goal_planner::GoalPlannerOutcome::ResearchSessionReplaced {
+                    note,
+                } => {
+                    // Nested 200k overflow is the research session. Do not pause the main goal.
+                    let mut tracker = self.goal_tracker.lock();
+                    let same_active = tracker.snapshot().is_some_and(|goal| {
+                        goal.goal_id == goal_id
+                            && goal.status == crate::session::goal_tracker::GoalStatus::Active
+                    });
+                    if same_active && let Some(goal) = tracker.snapshot_mut() {
+                        goal.research_session_replaced_note = Some(note);
+                    }
+                }
             }
             break;
         }

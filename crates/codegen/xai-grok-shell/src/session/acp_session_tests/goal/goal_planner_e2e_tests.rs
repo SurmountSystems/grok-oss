@@ -1290,6 +1290,154 @@ async fn when_only_the_research_role_stops_and_the_plan_writer_never_runs_the_go
         .await;
 }
 
+/// Research-role overflow the main transcript must not dump.
+/// `231658/200000` is the research sampling window. `221000/256000` is the main window (`221K / 256K`).
+fn research_role_sampling_window_session_error() -> String {
+    const HUMAN: &str = "Context is over this session's sampling window (231658/200000 tokens). Not retrying the same oversized model request. Compact once or start a new session.";
+    let json = r#"{
+  "message": "HUMAN_SENTENCE",
+  "promptUsage": {
+    "inputTokens": 230000,
+    "outputTokens": 1658,
+    "totalTokens": 231658,
+    "costUsdTicks": 13939020000
+  }
+}"#;
+    let json = json.replace("HUMAN_SENTENCE", HUMAN);
+    format!("Session error: Internal error: {json}")
+}
+
+/// The research role's 200000-token window is not the main session.
+/// This harness has no research-session compact call. A second
+/// `goal research specialist` spawn is the new research session.
+#[tokio::test(flavor = "current_thread")]
+async fn research_role_sampling_window_is_not_the_main_session_and_the_transcript_does_not_show_raw_json()
+ {
+    const HUMAN: &str = "Context is over this session's sampling window (231658/200000 tokens). Not retrying the same oversized model request. Compact once or start a new session.";
+    const MAIN_USED: u64 = 221_000;
+    const MAIN_WINDOW: u64 = 256_000;
+    let runtime = research_role_sampling_window_session_error();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            assert!(
+                runtime.contains(HUMAN),
+                "the research role stops with that exact sampling-window sentence"
+            );
+            assert!(
+                runtime.contains("Session error: Internal error:"),
+                "that sentence stays wrapped in the session-error JSON"
+            );
+            assert!(
+                runtime.contains("promptUsage") && runtime.contains("costUsdTicks"),
+                "the session-error object keeps promptUsage and costUsdTicks"
+            );
+
+            let (tx, _spawn_count, capture) =
+                spawn_planner_coordinator_capturing(SpawnBehaviour::Runtime {
+                    message: runtime.clone(),
+                    cancelled: false,
+                });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            actor.chat_state_handle.record_token_usage(MAIN_USED);
+            let before_used = actor.chat_state_handle.get_total_tokens().await;
+            let before_window = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("main session sampling config")
+                .context_window
+                .get();
+            assert_eq!(
+                before_used, MAIN_USED,
+                "main session used tokens start at 221K"
+            );
+            assert_eq!(
+                before_window, MAIN_WINDOW,
+                "main session sampling window starts at 256K, not the research 200000 window"
+            );
+
+            let transcript = match actor
+                .setup_goal(
+                    "now run just deploy-dry-run and fix all the errors in a complete way",
+                    None,
+                )
+                .await
+            {
+                GoalSetupOutcome::Message(msg) => msg,
+                GoalSetupOutcome::Inference { reminder } => reminder,
+            };
+
+            assert!(
+                !transcript.contains("promptUsage"),
+                "the main transcript must not contain promptUsage, got: {transcript}"
+            );
+            assert!(
+                !transcript.contains("costUsdTicks"),
+                "the main transcript must not contain costUsdTicks, got: {transcript}"
+            );
+            assert!(
+                transcript.contains("research role"),
+                "the visible sentence must name the research role, got: {transcript}"
+            );
+            assert!(
+                !transcript.contains("Compact once"),
+                "the main transcript must not tell the Operator to compact the main session. Compacting the main session does not compact the research role. got: {transcript}"
+            );
+            assert!(
+                !transcript.contains("/login"),
+                "SuperGrok is paid. The transcript must not tell the Operator to Run /login, got: {transcript}"
+            );
+
+            let after_used = actor.chat_state_handle.get_total_tokens().await;
+            let after_window = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("main session sampling config")
+                .context_window
+                .get();
+            assert_eq!(
+                after_used, MAIN_USED,
+                "the research overflow must not reduce the main session from 221K"
+            );
+            assert_eq!(
+                after_window, MAIN_WINDOW,
+                "the header stays 221K / 256K. The research overflow is 231658/200000, and the main window must not be rewritten to 200000"
+            );
+            assert_ne!(
+                after_window, 200_000,
+                "200000 is the research sampling window, not the main session"
+            );
+            assert_eq!(
+                actor.compaction.count.load(SeqOrd::Relaxed),
+                0,
+                "this failure must not compact the main session"
+            );
+
+            let descriptions = capture.descriptions.lock().unwrap().clone();
+            assert_eq!(
+                descriptions.first().map(String::as_str),
+                Some("goal research specialist"),
+                "the sampling-window stop is the research role, got {descriptions:?}"
+            );
+            let research_spawns = descriptions
+                .iter()
+                .filter(|description| description.as_str() == "goal research specialist")
+                .count();
+            assert!(
+                research_spawns >= 2,
+                "the research session must be compacted or a new research session started. This harness has no research compact API, so a new research session is a second \"goal research specialist\" spawn. got {descriptions:?}"
+            );
+            let status = actor.goal_tracker.lock().status();
+            assert!(
+                status.is_some_and(|status| !status.is_paused()),
+                "the goal must not be left paused, got {status:?}"
+            );
+        })
+        .await;
+}
+
 /// GitHub #234: nested writer repeating-sentence stop after writing `{PLAN_FILE}`
 /// must publish the plan. #228 only auto-retried the parent goal turn.
 #[tokio::test(flavor = "current_thread")]
