@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use filetime::FileTime;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -47,7 +46,7 @@ fn write_session(project: &Path, cwd: &Path, id: uuid::Uuid, modified: SystemTim
         ),
     )
     .unwrap();
-    filetime::set_file_mtime(&path, FileTime::from_system_time(modified)).unwrap();
+    std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(modified)).unwrap();
 }
 
 #[test]

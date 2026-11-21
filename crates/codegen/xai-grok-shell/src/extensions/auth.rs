@@ -139,11 +139,13 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-/// Awaits the auth URL from the oneshot channel, bounded so Connecting... cannot hang forever.
+/// Awaits the auth URL from the oneshot channel.
+/// Uses the interactive auth budget, not the 5s refresh budget. A refresh-budget
+/// timeout drops this oneshot before device-code mint publishes a URL, and the
+/// welcome screen then paints "Login did not start. Press l to try again."
 async fn handle_get_url(agent: &MvpAgent) -> ExtResult {
     let rx = agent.interactive_auth.take_url_rx();
-    let (auth_url, mode) =
-        recv_auth_url_within(rx, crate::http::STARTUP_AUTH_REFRESH_TIMEOUT).await;
+    let (auth_url, mode) = recv_auth_url_within(rx, crate::http::STARTUP_AUTH_TIMEOUT).await;
     to_raw_response(&serde_json::json!({
         "auth_url": auth_url,
         // `external_provider` kept for older clients; `mode` is authoritative.

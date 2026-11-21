@@ -3227,7 +3227,7 @@ fn after_task_complete_dispatch(
 fn connecting_splash_wakeup(app: &AppView, started: &mut Option<Instant>) -> Option<Instant> {
     if app.auth_state.is_connecting_splash() {
         let started = started.get_or_insert_with(Instant::now);
-        Some(*started + crate::app::app_view::CONNECTING_SPLASH_WAIT)
+        Some(*started + app.auth_state.connecting_splash_budget())
     } else {
         *started = None;
         None
@@ -4306,6 +4306,38 @@ mod tests {
             "after leaving Connecting..., drop the deadline"
         );
         assert!(started.is_none());
+    }
+
+    #[test]
+    fn connecting_splash_does_not_arm_login_did_not_start_while_the_starter_can_run() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let mut app = crate::app::app_view::tests::test_app();
+        app.login_method_id = Some(acp::AuthMethodId::new("grok.com"));
+        let _ = dispatch::dispatch(Action::Login, &mut app);
+        let task = rt.spawn(std::future::pending::<()>());
+        match &mut app.auth_state {
+            AuthState::Authenticating { handle, .. } => {
+                *handle = Some(task.abort_handle());
+            }
+            other => panic!("welcome Login must start Authenticating, got {other:?}"),
+        }
+        assert!(
+            app.auth_state.is_connecting_splash(),
+            "precondition: starter is on the connecting splash"
+        );
+        let mut started = None;
+        let deadline = connecting_splash_wakeup(&app, &mut started)
+            .expect("a live starter still arms a deadline");
+        let started_at = started.expect("splash start is recorded");
+        let refresh_deadline = started_at + crate::app::app_view::CONNECTING_SPLASH_WAIT;
+        assert!(
+            deadline > refresh_deadline,
+            "Login did not start. Press l to try again. must not be armed on the refresh budget while the login starter can run"
+        );
+        drop(task);
     }
 
     #[test]

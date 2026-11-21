@@ -1251,7 +1251,6 @@ impl AgentView {
     /// Render the agent into `area`.
     /// `in_dashboard_overlay` is `true` when this view is being rendered inside the dashboard's session-overlay.
     /// It appends `Ctrl+\\:dashboard` (and, when the overlay header can cycle, the `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         area: Rect,
@@ -4362,11 +4361,30 @@ impl AgentView {
             } else {
                 layout.prompt.y
             };
+            // Below 200 columns the soft plan pane is the full draw. It
+            // must start under the status row. Covering that row replaces
+            // the project path, the context figure, and a real meter
+            // (team postpaid Billing Credits) with plan body.
+            let pane_w =
+                crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+                    area.width,
+                );
+            let pane_is_full_width = self
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.is_soft_plan_side_pane() && pane_w >= area.width);
+            let mut overlay_top = area.y;
+            if pane_is_full_width && layout.status_bar.height > 0 {
+                let below_header = layout.status_bar.y.saturating_add(layout.status_bar.height);
+                if below_header < overlay_bottom {
+                    overlay_top = below_header;
+                }
+            }
             let overlay_area = Rect {
                 x: area.x,
-                y: area.y,
+                y: overlay_top,
                 width: area.width,
-                height: overlay_bottom.saturating_sub(area.y),
+                height: overlay_bottom.saturating_sub(overlay_top),
             };
             let approval_comment_count = self
                 .plan_approval_view
@@ -4388,14 +4406,28 @@ impl AgentView {
                         // box after Tab:prompt / Revise. Inline Prompt keeps
                         // the titled planning composer; a second in-panel
                         // copy of the draft would steal the letter-caret scan.
+                        // File-backed Comment (the selected footer button)
+                        // types into the in-panel comment buffer. Revise
+                        // still mirrors the main composer. Idle Preview
+                        // does not show this box.
+                        let comment_selected = viewer.plan_ref().and_then(|plan| plan.selected_cta)
+                            == Some(
+                                crate::views::file_search::line_viewer::SelectedPlanCta::Comment,
+                            );
                         let show_revision = pav.source == PlanReviewSource::FileBacked
                             && pav.focus == PlanApprovalFocus::Prompt
-                            && pav.prompt_intent
-                                == crate::views::plan_approval_view::PlanPromptIntent::Revise;
+                            && (pav.prompt_intent
+                                == crate::views::plan_approval_view::PlanPromptIntent::Revise
+                                || (pav.prompt_intent
+                                    == crate::views::plan_approval_view::PlanPromptIntent::Comment
+                                    && comment_selected));
                         viewer.plan_mut().show_revision_prompt = show_revision;
-                        if show_revision {
+                        if show_revision
+                            && pav.prompt_intent
+                                == crate::views::plan_approval_view::PlanPromptIntent::Revise
+                        {
                             viewer.plan_mut().revision_prompt_text = self.prompt.text().to_string();
-                        } else {
+                        } else if !show_revision {
                             viewer.plan_mut().revision_prompt_text.clear();
                         }
                     } else {
@@ -5741,8 +5773,11 @@ mod plan_approval_draw_contract_tests {
     }
     /// Render `agent` with the given voice state and return the buffer text.
     fn render_text(agent: &mut AgentView, listening: bool) -> String {
+        render_text_at(agent, listening, 100)
+    }
+    fn render_text_at(agent: &mut AgentView, listening: bool, width: u16) -> String {
         let reg = ActionRegistry::defaults();
-        let area = Rect::new(0, 0, 100, 40);
+        let area = Rect::new(0, 0, width, 40);
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
         agent.draw(
@@ -5818,15 +5853,24 @@ mod plan_approval_draw_contract_tests {
             agent.line_viewer.as_ref().is_some_and(|v| !v.fullscreen),
             "fixture: soft park is not the covering modal"
         );
-        let text = render_text(&mut agent, false);
+        // Below 200 columns the pane is the full draw. "Sits on the
+        // right" is the wide case: 200 columns, about half, on the right.
+        let width = 200u16;
+        let text = render_text_at(&mut agent, false, width);
         let modal = agent
             .line_viewer
             .as_ref()
             .and_then(|v| v.last_modal_area)
             .expect("draw must paint the plan pane");
+        let half = width / 2;
         assert!(
-            modal.x >= 50,
-            "plan pane must sit on the right of a 100-col draw; modal={modal:?}"
+            modal.x >= half,
+            "plan pane must sit in the right half of a {width}-col draw; modal={modal:?}"
+        );
+        let bordered = modal.width.saturating_add(2);
+        assert!(
+            bordered >= half.saturating_sub(2) && bordered <= half.saturating_add(2),
+            "plan pane width must be about half; modal={modal:?} bordered={bordered}"
         );
         assert!(
             text.contains("Plan ready. Side panel open"),
@@ -7396,6 +7440,581 @@ mod plan_approval_draw_contract_tests {
         assert!(
             !text.contains("Type a revision"),
             "idle Preview must not paint Type a revision... under or inside the panel:\n{text}"
+        );
+    }
+
+    /// Comment is the selected footer button. A typed letter must land in
+    /// the plan comment field, with the caret there. It must not land in
+    /// the main composer (idle placeholder "Type a message..."). Idle
+    /// Preview is a different case and stays on the test above.
+    #[test]
+    fn typed_character_lands_in_plan_comment_field_not_main_composer() {
+        use crate::views::file_search::line_viewer::SelectedPlanCta;
+        use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.display_name = Some("Grok Build".into());
+        agent.show_plan_preview_if_available();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|pav| pav.focus),
+            Some(PlanApprovalFocus::Preview),
+            "idle approval starts on Preview"
+        );
+
+        let _idle = draw_buf(&mut agent);
+        let comment = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.comment_button_area)
+            .expect("Comment is a painted footer button");
+        let click = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: comment.x,
+            row: comment.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let _ = agent.handle_input(&click, &ActionRegistry::defaults());
+        let selected = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.selected_cta);
+        assert_eq!(
+            selected,
+            Some(SelectedPlanCta::Comment),
+            "clicking Comment selects that button"
+        );
+
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        let (buf, _text) = draw_buf(&mut agent);
+        let main = agent.prompt.text().to_string();
+        let plan_comment = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default();
+        let comment_field = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area);
+        let plan_view = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.last_modal_area)
+            .expect("the plan view is on screen");
+        let focus = agent.plan_approval_view.as_ref().map(|pav| pav.focus);
+        let intent = agent
+            .plan_approval_view
+            .as_ref()
+            .map(|pav| pav.prompt_intent);
+        let mut z_inside_plan = false;
+        let mut z_outside_plan = false;
+        let area = *buf.area();
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                let is_z = buf.cell((x, y)).is_some_and(|cell| cell.symbol() == "z");
+                if !is_z {
+                    continue;
+                }
+                if plan_view.contains((x, y).into()) {
+                    z_inside_plan = true;
+                } else {
+                    z_outside_plan = true;
+                }
+            }
+        }
+        let caret_in_comment_field = comment_field.is_some_and(|field| {
+            field.contains((field.x.saturating_add(1), field.y.saturating_add(1)).into())
+                && (focus == Some(PlanApprovalFocus::Commenting)
+                    || (focus == Some(PlanApprovalFocus::Prompt)
+                        && intent == Some(PlanPromptIntent::Comment)
+                        && selected == Some(SelectedPlanCta::Comment)))
+        });
+        let painted_inside = z_inside_plan
+            || comment_field.is_some_and(|field| {
+                let row = (field.x..field.x.saturating_add(field.width))
+                    .filter_map(|x| buf.cell((x, field.y.saturating_add(1))))
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>();
+                field.x >= plan_view.x
+                    && field.x.saturating_add(field.width)
+                        <= plan_view.x.saturating_add(plan_view.width)
+                    && (row.contains('z') || row.contains("Type your comment"))
+            });
+        assert!(
+            plan_comment.contains('z')
+                && !main.contains('z')
+                && caret_in_comment_field
+                && painted_inside
+                && !z_outside_plan,
+            "typed z must land in the plan comment field with the caret there, not the main composer whose idle placeholder is Type a message.... plan_comment={plan_comment:?} main={main:?} focus={focus:?} intent={intent:?} comment_field={comment_field:?} z_inside_plan={z_inside_plan} z_outside_plan={z_outside_plan}"
+        );
+    }
+
+    fn open_file_backed_plan() -> AgentView {
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.display_name = Some("Grok Build".into());
+        agent.show_plan_preview_if_available();
+        agent
+    }
+
+    fn click_plan_comment(agent: &mut AgentView) -> crate::app::app_view::InputOutcome {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let _idle = draw_buf(agent);
+        let comment = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.comment_button_area)
+            .expect("Comment is a painted footer button");
+        agent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: comment.x,
+                row: comment.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        )
+    }
+
+    fn set_plan_note(agent: &mut AgentView, note: &str) {
+        agent
+            .line_viewer
+            .as_mut()
+            .expect("the plan panel is open")
+            .plan_mut()
+            .revision_prompt_text = note.to_string();
+    }
+
+    fn plan_note_body_width(box_width: u16) -> usize {
+        box_width.saturating_sub(2 + crate::glyphs::PROMPT_ARROW_WIDTH) as usize
+    }
+
+    /// Character wrap used by the note box. Each row is full except the last.
+    fn expected_note_window(note: &str, body_width: usize, text_rows: usize) -> String {
+        let width = body_width.max(1);
+        let chars: Vec<char> = note.chars().collect();
+        let mut lines: Vec<String> = Vec::new();
+        let mut index = 0;
+        while index < chars.len() {
+            let end = (index + width).min(chars.len());
+            lines.push(chars[index..end].iter().collect());
+            index = end;
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        if text_rows > 0 && lines.len() > text_rows {
+            lines = lines.split_off(lines.len() - text_rows);
+        }
+        lines.concat()
+    }
+
+    fn painted_note_matches(buf: &Buffer, area: Rect, expected: &str) -> bool {
+        let body_width = plan_note_body_width(area.width);
+        if body_width == 0 || area.height < 3 {
+            return false;
+        }
+        let body_x = area.x.saturating_add(1 + crate::glyphs::PROMPT_ARROW_WIDTH);
+        let mut rest = expected;
+        let y0 = area.y.saturating_add(1);
+        let y1 = area.y.saturating_add(area.height).saturating_sub(1);
+        for y in y0..y1 {
+            let take = body_width.min(rest.chars().count());
+            for (offset, ch) in rest.chars().take(take).enumerate() {
+                let x = body_x.saturating_add(offset as u16);
+                let symbol = buf.cell((x, y)).map(|cell| cell.symbol().to_string());
+                if symbol.as_deref() != Some(ch.encode_utf8(&mut [0; 4])) {
+                    let mut tmp = [0; 4];
+                    if symbol.as_deref() != Some(ch.encode_utf8(&mut tmp)) {
+                        return false;
+                    }
+                }
+            }
+            let byte = rest
+                .char_indices()
+                .nth(take)
+                .map(|(index, _)| index)
+                .unwrap_or(rest.len());
+            rest = &rest[byte..];
+            if rest.is_empty() {
+                return true;
+            }
+        }
+        rest.is_empty()
+    }
+
+    fn row_text_from(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+            .collect()
+    }
+
+    fn footer_row_keeps_the_four_actions(buf: &Buffer) -> bool {
+        (0..buf.area().height).any(|y| {
+            let lower = row_text_from(buf, y, buf.area().width).to_ascii_lowercase();
+            ["approve", "comment", "revise", "exit"]
+                .iter()
+                .all(|word| lower.contains(word))
+        })
+    }
+
+    fn caret_stays_with_the_end(
+        buf: &Buffer,
+        area: Rect,
+        note: &str,
+        theme: &crate::theme::Theme,
+    ) -> bool {
+        let body_width = plan_note_body_width(area.width);
+        if body_width == 0 || note.is_empty() {
+            return false;
+        }
+        let body_x = area.x.saturating_add(1 + crate::glyphs::PROMPT_ARROW_WIDTH);
+        let right = area.x.saturating_add(area.width).saturating_sub(1);
+        let y0 = area.y.saturating_add(1);
+        let y1 = area.y.saturating_add(area.height).saturating_sub(1);
+        let mut caret = None;
+        for y in y0..y1 {
+            for x in body_x..right {
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                if cell.bg == theme.text_primary && cell.fg == theme.bg_base {
+                    caret = Some((x, y, cell.symbol().to_string()));
+                }
+            }
+        }
+        let Some((cx, cy, symbol)) = caret else {
+            return false;
+        };
+        let Some(last) = note.chars().last() else {
+            return false;
+        };
+        let mut last_buf = [0; 4];
+        let last = last.encode_utf8(&mut last_buf);
+        if symbol.as_str() == &*last {
+            return true;
+        }
+        let before = if cx > body_x {
+            buf.cell((cx - 1, cy)).map(|cell| cell.symbol().to_string())
+        } else if cy > y0 {
+            buf.cell((right.saturating_sub(1), cy - 1))
+                .map(|cell| cell.symbol().to_string())
+        } else {
+            None
+        };
+        before.as_deref() == Some(last)
+    }
+
+    /// A long note stays fully visible by growing lines, up to four text
+    /// lines. A short note stays one line. Sliding sideways is not enough
+    /// when that hides the start. approve, comment, revise, and exit stay
+    /// on one footer row.
+    #[test]
+    fn long_plan_note_grows_lines_and_keeps_the_start_the_end_and_the_footer() {
+        use crate::theme::{Theme, cache};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let shot =
+            "eyes is clever, but why eyes look? are there other eyes commands? I'm curious how you";
+        let fitting = format!("START {shot} {shot} ENDNOTE");
+        let huge = format!("{}ENDNOTE", "W".repeat(800));
+
+        let mut agent = open_file_backed_plan();
+        let _click = click_plan_comment(&mut agent);
+
+        set_plan_note(&mut agent, "hi");
+        let (buf, text) = draw_buf(&mut agent);
+        let short_box = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("a short note still has the note box");
+        assert_eq!(
+            short_box.height, 3,
+            "a short note stays one line (two borders plus that line); got {short_box:?}\n{text}"
+        );
+        assert!(
+            painted_note_matches(&buf, short_box, "hi"),
+            "a short note stays fully visible in the one-line box:\n{text}"
+        );
+        assert!(
+            footer_row_keeps_the_four_actions(&buf),
+            "approve, comment, revise, and exit stay on screen with a short note:\n{text}"
+        );
+
+        set_plan_note(&mut agent, &fitting);
+        let (buf, text) = draw_buf(&mut agent);
+        let note_box = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("the long note still has the note box");
+        assert!(
+            note_box.height > 3 && note_box.height <= 6,
+            "the box grows extra lines up to four text lines; got {note_box:?}\n{text}"
+        );
+        let body_width = plan_note_body_width(note_box.width);
+        let text_rows = note_box.height.saturating_sub(2) as usize;
+        let expected = expected_note_window(&fitting, body_width, text_rows);
+        assert_eq!(
+            expected, fitting,
+            "a note that fits the cap stays whole. Sliding sideways must not drop the start. body_width={body_width} text_rows={text_rows}"
+        );
+        assert!(
+            painted_note_matches(&buf, note_box, &fitting),
+            "the whole note stays on screen, including the start and the end. A sideways slide that hides START fails this. box={note_box:?}\n{text}"
+        );
+        let first_row = row_text_from(&buf, note_box.y.saturating_add(1), buf.area().width);
+        assert!(
+            first_row.contains("START"),
+            "the first line shows the start of the note. Sliding to the end hides START; row={first_row:?}"
+        );
+        assert!(
+            caret_stays_with_the_end(&buf, note_box, &fitting, &theme),
+            "the caret stays in the box with the end of the note, not past the right edge:\n{text}"
+        );
+        assert!(
+            footer_row_keeps_the_four_actions(&buf),
+            "approve, comment, revise, and exit stay on screen while the note grows:\n{text}"
+        );
+
+        set_plan_note(&mut agent, &huge);
+        let (buf, text) = draw_buf(&mut agent);
+        let capped = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("the capped note still has the note box");
+        assert!(
+            capped.height > 3 && capped.height <= 6,
+            "extra lines stop at four text lines so the footer can stay; got {capped:?}\n{text}"
+        );
+        let capped_width = plan_note_body_width(capped.width);
+        let capped_rows = capped.height.saturating_sub(2) as usize;
+        let tail = expected_note_window(&huge, capped_width, capped_rows);
+        assert!(
+            tail.ends_with("ENDNOTE") && tail.chars().count() < huge.chars().count(),
+            "past the cap the caret and the end stay, and the box does not grow without limit"
+        );
+        assert!(
+            painted_note_matches(&buf, capped, &tail),
+            "the visible tail is the width of the box, not a sideways slice that hides the left of a line:\n{text}"
+        );
+        assert!(
+            caret_stays_with_the_end(&buf, capped, &tail, &theme),
+            "the caret stays with the end after the cap:\n{text}"
+        );
+        assert!(
+            footer_row_keeps_the_four_actions(&buf),
+            "approve, comment, revise, and exit stay on screen at the cap:\n{text}"
+        );
+    }
+
+    /// Shift+Y inserts a capital Y. Shift plus any letter inserts that
+    /// capital. The main chat already does this. The plan note box matches
+    /// it. Shift+Y that produces no Y fails.
+    #[test]
+    fn shift_y_inserts_capital_y_in_the_plan_note_box() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut agent = open_file_backed_plan();
+        let _click = click_plan_comment(&mut agent);
+        let keys = [
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE),
+        ];
+        for key in keys {
+            let _ = agent.handle_input(&Event::Key(key), &ActionRegistry::defaults());
+        }
+        let plan_comment = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default();
+        let main = agent.prompt.text().to_string();
+        assert_eq!(
+            plan_comment, "YQYY",
+            "Shift+Y must insert Y in the plan note box, and Shift+Q must insert Q. Shift+Y that produces no Y fails. plan_comment={plan_comment:?} main={main:?}"
+        );
+        assert!(
+            plan_comment.contains('Y') && !main.contains('Y'),
+            "the plan note box contains Y and the main composer does not; plan_comment={plan_comment:?} main={main:?}"
+        );
+        let (buf, text) = draw_buf(&mut agent);
+        let note_box = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("Shift+Y is painted in the note box");
+        assert!(
+            painted_note_matches(&buf, note_box, "YQYY"),
+            "the note box shows Y on screen:\n{text}"
+        );
+    }
+
+    /// Comment focuses the note box and shows the kept-note sentence.
+    /// Comment alone does not start the work.
+    #[test]
+    fn comment_focuses_the_note_box_shows_the_kept_sentence_and_does_not_start_work() {
+        use crate::app::app_view::InputOutcome;
+        use crate::theme::{Theme, cache};
+        use crate::views::file_search::line_viewer::SelectedPlanCta;
+        use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+
+        let sentence = "This note is kept. Approve starts the work with it. Revise rewrites the plan from it. Clarify only answers. Comment alone does not start the work.";
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+
+        let mut agent = open_file_backed_plan();
+        let outcome = click_plan_comment(&mut agent);
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(_)
+                    | InputOutcome::ActionThenForward(_)
+                    | InputOutcome::ActionPair(_, _)
+            ),
+            "Comment alone does not start the work; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some()
+                && !agent.plan_decision_resolved
+                && !agent.plan_approved_implement,
+            "Comment alone leaves the plan parked. It does not Approve and it does not start implement."
+        );
+        let focus = agent.plan_approval_view.as_ref().map(|pav| pav.focus);
+        let intent = agent
+            .plan_approval_view
+            .as_ref()
+            .map(|pav| pav.prompt_intent);
+        let selected = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.selected_cta);
+        assert_eq!(
+            (focus, intent, selected),
+            (
+                Some(PlanApprovalFocus::Prompt),
+                Some(PlanPromptIntent::Comment),
+                Some(SelectedPlanCta::Comment)
+            ),
+            "Comment focuses the note box"
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let note_box = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.revision_prompt_area)
+            .expect("Comment focuses the note box");
+        assert!(
+            note_box.width > 4 && note_box.height >= 3,
+            "Comment focuses a painted note box; got {note_box:?}"
+        );
+        let owed: String = sentence.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut shown = false;
+        let rows: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        for start in 0..rows.len() {
+            let mut acc = String::new();
+            for row in rows.iter().skip(start) {
+                let piece: String = row.chars().filter(|ch| !ch.is_whitespace()).collect();
+                if piece.is_empty() {
+                    if acc.is_empty() {
+                        continue;
+                    }
+                    break;
+                }
+                acc.push_str(&piece);
+                if acc == owed {
+                    shown = true;
+                    break;
+                }
+                if !owed.starts_with(&acc) {
+                    break;
+                }
+            }
+            if shown {
+                break;
+            }
+        }
+        assert!(shown, "the panel shows this sentence: {sentence}\n{text}");
+        assert!(
+            text.contains("This note is kept."),
+            "the panel shows the start of the kept-note sentence:\n{text}"
+        );
+        let body_x = note_box
+            .x
+            .saturating_add(1 + crate::glyphs::PROMPT_ARROW_WIDTH);
+        let right = note_box.x.saturating_add(note_box.width).saturating_sub(1);
+        let y0 = note_box.y.saturating_add(1);
+        let y1 = note_box.y.saturating_add(note_box.height).saturating_sub(1);
+        let caret_in_box = (y0..y1).any(|y| {
+            (body_x..right).any(|x| {
+                buf.cell((x, y))
+                    .is_some_and(|cell| cell.bg == theme.text_primary && cell.fg == theme.bg_base)
+            })
+        });
+        assert!(
+            caret_in_box,
+            "Comment focuses the note box and the caret is inside it:\n{text}"
+        );
+        assert!(
+            footer_row_keeps_the_four_actions(&buf),
+            "approve, comment, revise, and exit stay on screen after Comment:\n{text}"
         );
     }
 
@@ -11560,12 +12179,12 @@ mod plan_turn_row_revising_copy_tests {
             .push_block(crate::scrollback::RenderBlock::agent_message(session));
         let revise = "Revise sentence QueEmpTh stays once.";
         agent.prompt.set_text(revise);
-        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let area = ratatui::layout::Rect::new(0, 0, 200, 40);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         draw_agent_like_draw_screen(&mut agent, area, &mut buf);
         let pane_w =
-            crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(120);
-        let pane_x = 120u16.saturating_sub(pane_w);
+            crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(200);
+        let pane_x = 200u16.saturating_sub(pane_w);
         assert!(pane_w > 0 && pane_x > 0, "soft plan pane should be open");
         let mut token_in_pane = false;
         let mut revise_in_pane = false;

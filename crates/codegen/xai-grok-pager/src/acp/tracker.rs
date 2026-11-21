@@ -2219,6 +2219,10 @@ fn trailing_matching_user_prompt(scrollback: &ScrollbackState, visible: &str) ->
 /// `skip_next_user_echo` / send-now pending, not this helper.
 /// A real UserPrompt (`PromptOrigin::User` or missing prompt_id, no
 /// model-facing wrap) must still paint even when the visible text matches.
+/// A stalled interject is the exception: its live echo often has no
+/// `<user_query>` wrap, and status, thinking, or tool chrome sits after
+/// the painted line. That echo must reuse the interject instead of pushing
+/// a second block.
 fn reuse_painted_user_prompt(
     scrollback: &mut ScrollbackState,
     visible: &str,
@@ -2226,12 +2230,18 @@ fn reuse_painted_user_prompt(
     replay_ts: Option<i64>,
     incoming_is_wrap_echo: bool,
 ) -> bool {
-    if !incoming_is_wrap_echo {
-        return false;
-    }
     let Some(idx) = trailing_matching_user_prompt(scrollback, visible) else {
         return false;
     };
+    let matched_interjection = scrollback.get(idx).is_some_and(|entry| {
+        matches!(
+            &entry.block,
+            RenderBlock::UserPrompt(block) if block.is_interjection
+        )
+    });
+    if !incoming_is_wrap_echo && !matched_interjection {
+        return false;
+    }
     if let Some(entry) = scrollback.get_mut(idx)
         && let RenderBlock::UserPrompt(ref mut block) = entry.block
         && !block.is_interjection

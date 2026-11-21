@@ -47,7 +47,8 @@ pub(crate) enum GrepSource {
 pub(crate) enum ResolvedSource {
     /// `rg` answers, and is cut off with a timeout card at `deadline`.
     Rg {
-        rg: RgRunner,
+        /// Heap-allocated so this variant stays near the size of the others.
+        rg: Box<RgRunner>,
         deadline: tokio::time::Instant,
     },
     Answered(OfferAnswer),
@@ -76,7 +77,7 @@ impl GrepSource {
             GrepSource::Rg(rg) => {
                 span.record("answered_by", "rg");
                 return ResolvedSource::Rg {
-                    rg,
+                    rg: Box::new(rg),
                     deadline: tokio::time::Instant::now() + grep_timeout(),
                 };
             }
@@ -109,7 +110,7 @@ impl GrepSource {
                 span.record("served_failure", label);
                 match RgRunner::spawn(rg_command) {
                     Ok(rg) => ResolvedSource::Rg {
-                        rg,
+                        rg: Box::new(rg),
                         deadline: request.deadline,
                     },
                     Err(error) => ResolvedSource::SpawnFailed(spawn_failure_output(&error)),

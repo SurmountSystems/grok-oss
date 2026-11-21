@@ -6,8 +6,10 @@ edition.workspace = true
 description = "Filesystem-aware SQLite journal-mode selection: WAL on local disks, rollback journal on network mounts where WAL's mmap'd -shm is unsafe"
 
 [dependencies]
-# Matches the pinned rusqlite of every consumer (bundled = self-contained SQLite).
-rusqlite = { version = "0.37", features = ["bundled"] }
+# Matches rusqlite 0.43 of every consumer. Bundled SQLite is libsqlite3-sys `bundled`.
+# Required libsqlite3-sys is 0.40.0.
+rusqlite = { version = "0.43" }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 strum = { workspace = true }
 tracing = { workspace = true }
 

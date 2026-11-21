@@ -81,7 +81,8 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
             | Command::Completions { .. }
             | Command::Worktree(_)
             | Command::DiskUsage(_)
-            | Command::Workspace(_),
+            | Command::Workspace(_)
+            | Command::Eyes(_),
         ) => (Entrypoint::Cli, Interactivity::Unattended),
         None if is_interactive => return None,
         None => (Entrypoint::Headless, Interactivity::Unattended),
@@ -124,7 +125,8 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
             | Command::Version { .. }
             | Command::Completions { .. }
             | Command::DiskUsage(_)
-            | Command::Workspace(_),
+            | Command::Workspace(_)
+            | Command::Eyes(_),
         ) => false,
     }
 }
@@ -2058,6 +2060,19 @@ fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+/// `grok-oss eyes` before sandbox, tokio, or the TUI.
+/// The first verb starts a pseudoterminal session. Later verbs load that same session.
+/// This does not attach to an open window and it does not call the model.
+fn dispatch_eyes_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Eyes(eyes)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = xai_grok_pager::app::eyes::run(&eyes.command) {
+        eprintln!("eyes: {error}");
+        std::process::exit(1);
+    }
+    true
+}
 /// `grok-oss doctor` before sandbox, tokio, or the TUI.
 fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     let Some(Command::Doctor(doctor_args)) = &args.command else {
@@ -2082,7 +2097,10 @@ fn main() {
         xai_grok_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+    if dispatch_version_if_requested(&args)
+        || dispatch_doctor_if_requested(&args)
+        || dispatch_eyes_if_requested(&args)
+    {
         return;
     }
     xai_grok_pager_minimal::install();
@@ -2275,6 +2293,9 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
             }
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
+            }
+            Command::Eyes(_) => {
+                unreachable!("eyes was consumed before runtime startup")
             }
             Command::DiskUsage(du_args) => {
                 init_tracing_simple("cli");

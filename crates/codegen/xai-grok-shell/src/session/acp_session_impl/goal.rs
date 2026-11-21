@@ -963,9 +963,16 @@ impl SessionActor {
         let Some(body) = body else {
             return GoalSetupOutcome::Message(GOAL_CLEARED_DURING_PLANNING.to_string());
         };
-        GoalSetupOutcome::Inference {
-            reminder: format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n"),
+        let research_note = self
+            .goal_tracker
+            .lock()
+            .snapshot_mut()
+            .and_then(|goal| goal.research_session_replaced_note.take());
+        let mut reminder = format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n");
+        if let Some(note) = research_note {
+            reminder = format!("{note}\n\n{reminder}");
         }
+        GoalSetupOutcome::Inference { reminder }
     }
 
     pub(super) async fn resume_goal(&self) -> GoalResumeOutcome {

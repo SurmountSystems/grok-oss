@@ -441,13 +441,13 @@ pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Resul
 pub async fn is_version_cache_fresh() -> bool {
     let version_path = grok_home().join("version.json");
     let now = time::OffsetDateTime::now_utc();
-    if let Ok(version_str) = fs::read_to_string(&version_path).await
-        && let Ok(version) = serde_json::from_str::<GrokVersion>(&version_str)
-        && version.is_fresh(now, TTL_SECONDS_BEFORE_AUTO_UPDATE)
-    {
-        return true;
-    }
-    false
+    let Ok(version_str) = fs::read_to_string(&version_path).await else {
+        return false;
+    };
+    let Ok(version) = serde_json::from_str::<GrokVersion>(&version_str) else {
+        return false;
+    };
+    version.is_fresh(now, TTL_SECONDS_BEFORE_AUTO_UPDATE)
 }
 
 pub use xai_grok_version::installed as get_installed_grok_version;

@@ -11,7 +11,7 @@ use crate::batch_dream::{
     BatchCommit, BatchDreamError, BatchDreamStore, BatchLease, BatchReport,
     CAPACITY_DEFERRAL_REASON, FileChange, MAX_CHANGES, MAX_COMMIT_TEXT_BYTES, MAX_DEPENDENCIES,
     MAX_NOTE_BYTES, MAX_NOTE_DEFERRALS, MAX_REASON_BYTES, MAX_SPLICES_PER_FILE, NoteDisposition,
-    Result, STAGE_PREFIX, TOPICS_DIR,
+    Result, STAGE_PREFIX, TOPICS_DIR, sqlite_bind_u64, sqlite_u64_column,
 };
 use crate::batch_dream_io::{hash_file, publish_copy, read_bounded, sync_directory, write_spliced};
 
@@ -222,17 +222,18 @@ impl BatchDreamStore {
     pub(crate) fn apply_planned(&self, operation_id: &str, now: i64) -> Result<BatchReport> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (owner, generation): (String, u64) = transaction
+        let (owner, generation) = transaction
             .query_row(
                 "SELECT b.owner, b.generation FROM batch_dream_batches b
                  JOIN consolidation_lock l ON l.singleton = 1
                  WHERE b.operation_id = ?1 AND b.status = 'planned'
                    AND l.owner = b.owner AND l.generation = b.generation AND l.expires_at > ?2",
                 params![operation_id, now],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, sqlite_u64_column(row, 1)?)),
             )
             .optional()?
             .ok_or(BatchDreamError::StaleLease)?;
+        let generation = sqlite_bind_u64(generation)?;
         let changes = read_changes(&transaction, operation_id)?;
         let posts: BTreeMap<&str, &str> = changes
             .iter()

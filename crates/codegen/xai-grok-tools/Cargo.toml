@@ -43,7 +43,8 @@ grep = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 kamadak-exif = { workspace = true, optional = true }
 hayro = { workspace = true }
-# 0.1.15 is the first office_oxide that depends on zip 9.
+# Workspace pin is registry 0.1.17 (Operator 2026-11-15). 0.1.15 was the
+# first release that depends on zip 9.
 office_oxide = { workspace = true }
 # PPTX text extraction (implementations/read_file/pptx.rs). Deliberately NOT
 # `workspace = true`: the workspace `zip` pin has default features on, which
@@ -103,7 +104,10 @@ tar = { workspace = true }
 toon-format = { version = "0.5.0", default-features = false }
 which = { workspace = true }
 # session_reader Codex/Cursor SQLite discovery + read (readonly, fail closed).
-rusqlite = { version = "0.37", features = ["bundled"] }
+# rusqlite 0.43. libsqlite3-sys `bundled` keeps SQLite self-contained.
+# Required libsqlite3-sys is 0.40.0.
+rusqlite = { version = "0.43" }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 md5 = { workspace = true }
 
 chrono = { workspace = true }
@@ -136,10 +140,7 @@ xai-grok-test-support = { workspace = true }
 xai-test-utils = { workspace = true }
 
 [build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
-flate2 = { workspace = true }
 sha2 = { workspace = true }
-tar = { workspace = true }
 zstd = { workspace = true }
 
 [lints]

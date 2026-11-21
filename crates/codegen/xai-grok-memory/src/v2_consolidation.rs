@@ -279,7 +279,7 @@ impl V2ConsolidationStore {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, u64>(2)?,
+                        sqlite_u64_column(row, 2)?,
                     ))
                 },
             )
@@ -312,10 +312,11 @@ impl V2ConsolidationStore {
                     last_error = 'lease expired before commit'
                  WHERE generation = ?1
                    AND status IN ('claimed','planned','topics_written')",
-                params![lock.2],
+                params![sqlite_bind_u64(lock.2)?],
             )?;
         }
         let generation = lock.2.saturating_add(1);
+        let generation_sql = sqlite_bind_u64(generation)?;
 
         // Re-lease durable plans whose topic writes outlived a failed archive.
         // Their operation ids cannot be reconstructed after new captures arrive.
@@ -367,12 +368,15 @@ impl V2ConsolidationStore {
                  ORDER BY f.path LIMIT ?1",
             )?;
             statement
-                .query_map(params![MAX_CLAIMED_OBSERVATIONS, include_hidden], |row| {
-                    Ok(ClaimedObservation {
-                        relative_path: PathBuf::from(row.get::<_, String>(0)?),
-                        content_hash: row.get(1)?,
-                    })
-                })?
+                .query_map(
+                    params![sqlite_bind_usize(MAX_CLAIMED_OBSERVATIONS)?, include_hidden],
+                    |row| {
+                        Ok(ClaimedObservation {
+                            relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                            content_hash: row.get(1)?,
+                        })
+                    },
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         } else {
             Vec::new()
@@ -406,7 +410,7 @@ impl V2ConsolidationStore {
                  VALUES (1, NULL, NULL, ?1)
                  ON CONFLICT(singleton) DO UPDATE SET owner = NULL, expires_at = NULL,
                     generation = excluded.generation",
-                params![generation],
+                params![generation_sql],
             )?;
             transaction.commit()?;
             return Ok(None);
@@ -417,7 +421,7 @@ impl V2ConsolidationStore {
              VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(singleton) DO UPDATE SET owner = excluded.owner,
                 expires_at = excluded.expires_at, generation = excluded.generation",
-            params![request.owner, expires_at, generation],
+            params![request.owner, expires_at, generation_sql],
         )?;
         transaction.execute(
             "INSERT INTO meta(key, value) VALUES ('v2_dream_trigger_pending', '0')
@@ -430,7 +434,7 @@ impl V2ConsolidationStore {
              ) VALUES (?1, 'claimed', ?2, ?3, ?4, NULL)
              ON CONFLICT(operation_id) DO UPDATE SET status = 'claimed',
                 owner = excluded.owner, generation = excluded.generation",
-            params![operation_id, request.owner, generation, request.now],
+            params![operation_id, request.owner, generation_sql, request.now],
         )?;
         transaction.execute(
             "DELETE FROM consolidation_claim_items WHERE operation_id = ?1",
@@ -473,6 +477,7 @@ impl V2ConsolidationStore {
         generation: u64,
         expires_at: i64,
     ) -> Result<Option<ConsolidationLease>> {
+        let generation_sql = sqlite_bind_u64(generation)?;
         for _ in 0..MAX_DURABLE_PLAN_PROBES {
             let Some(operation_id) = transaction
                 .query_row(
@@ -493,12 +498,15 @@ impl V2ConsolidationStore {
                      WHERE operation_id = ?1 ORDER BY source_path LIMIT ?2",
                 )?;
                 statement
-                    .query_map(params![operation_id, MAX_CLAIMED_OBSERVATIONS], |row| {
-                        Ok(ClaimedObservation {
-                            relative_path: PathBuf::from(row.get::<_, String>(0)?),
-                            content_hash: row.get(1)?,
-                        })
-                    })?
+                    .query_map(
+                        params![operation_id, sqlite_bind_usize(MAX_CLAIMED_OBSERVATIONS)?],
+                        |row| {
+                            Ok(ClaimedObservation {
+                                relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                                content_hash: row.get(1)?,
+                            })
+                        },
+                    )?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
             let tombstoned_destination = transaction
@@ -567,7 +575,7 @@ impl V2ConsolidationStore {
                  VALUES (1, ?1, ?2, ?3)
                  ON CONFLICT(singleton) DO UPDATE SET owner = excluded.owner,
                     expires_at = excluded.expires_at, generation = excluded.generation",
-                params![request.owner, expires_at, generation],
+                params![request.owner, expires_at, generation_sql],
             )?;
             transaction.execute(
                 "INSERT INTO meta(key, value) VALUES ('v2_dream_trigger_pending', '0')
@@ -578,7 +586,7 @@ impl V2ConsolidationStore {
                 "UPDATE consolidation_operations
                  SET status = 'planned', owner = ?2, generation = ?3
                  WHERE operation_id = ?1",
-                params![operation_id, request.owner, generation],
+                params![operation_id, request.owner, generation_sql],
             )?;
             return Ok(Some(ConsolidationLease {
                 operation_id,
@@ -656,7 +664,7 @@ impl V2ConsolidationStore {
                    OR (?1 AND h.relative_path IS NOT NULL AND se.source_path IS NULL)
                )",
                 params![include_hidden],
-                |row| Ok((row.get::<_, usize>(0)?, row.get::<_, Option<i64>>(1)?)),
+                |row| Ok((sqlite_usize_column(row, 0)?, row.get::<_, Option<i64>>(1)?)),
             )?
         } else {
             (0, None)
@@ -1645,7 +1653,12 @@ fn validate_lease_tx(
            ON o.operation_id = ?1 AND o.generation = l.generation
          WHERE l.singleton = 1 AND l.owner = ?2 AND l.generation = ?3
            AND l.expires_at > ?4 AND o.status != 'failed'",
-        params![lease.operation_id, lease.owner, lease.generation, now],
+        params![
+            lease.operation_id,
+            lease.owner,
+            sqlite_bind_u64(lease.generation)?,
+            now
+        ],
         |row| row.get::<_, u32>(0),
     )?;
     if matches == 1 {
@@ -1659,7 +1672,7 @@ fn release_lock(transaction: &rusqlite::Transaction<'_>, lease: &ConsolidationLe
     let changed = transaction.execute(
         "UPDATE consolidation_lock SET owner = NULL, expires_at = NULL
          WHERE singleton = 1 AND owner = ?1 AND generation = ?2",
-        params![lease.owner, lease.generation],
+        params![lease.owner, sqlite_bind_u64(lease.generation)?],
     )?;
     if changed == 1 {
         Ok(())
@@ -1897,6 +1910,24 @@ fn path_text(path: &Path) -> Result<String> {
 
 fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
+}
+
+fn sqlite_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn sqlite_usize_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize> {
+    let value: i64 = row.get(index)?;
+    usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn sqlite_bind_u64(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+}
+
+fn sqlite_bind_usize(value: usize) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 fn io_error(path: impl AsRef<Path>, source: std::io::Error) -> V2ConsolidationError {

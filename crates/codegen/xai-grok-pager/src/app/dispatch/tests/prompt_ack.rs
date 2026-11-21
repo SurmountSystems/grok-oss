@@ -23,6 +23,27 @@ fn past_hard_deadline() -> Instant {
     Instant::now() + DEADLINES.hard + Duration::from_secs(1)
 }
 
+const DEADLINES_120: PromptAckDeadlines = PromptAckDeadlines {
+    soft: Duration::from_secs(10),
+    hard: Duration::from_secs(120),
+};
+
+fn past_120s() -> Instant {
+    Instant::now() + DEADLINES_120.hard + Duration::from_secs(1)
+}
+
+fn scrollback_says_prompt_was_not_accepted(agent: &AgentView) -> bool {
+    (0..agent.scrollback.len()).any(|idx| {
+        let Some(entry) = agent.scrollback.get(idx) else {
+            return false;
+        };
+        match &entry.block {
+            RenderBlock::System(block) => block.text.contains("did not accept your prompt"),
+            _ => false,
+        }
+    })
+}
+
 /// Drive a live `session/prompt` through the local drain; the watch must name the live turn.
 fn send_and_arm(app: &mut AppView, text: &str) -> String {
     let effects = dispatch(Action::SendPrompt(text.into()), app);
@@ -85,7 +106,22 @@ fn expired_watch_restores_the_prompt_and_sends_a_rewind_cancel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let pid = send_and_arm(&mut app, "restore me");
-    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline())
+    // The drain stores this prompt id on the session. Clearing it leaves the watch armed for a prompt the session does not hold.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.current_prompt_id = None;
+        assert!(
+            agent
+                .prompt_ack
+                .as_ref()
+                .is_some_and(|watch| watch.prompt_id() == pid.as_str())
+                && agent.session.current_prompt_id.is_none()
+                && agent.session.state.is_turn_running()
+                && agent.session.in_flight_prompt.is_some(),
+            "the watch is armed and the session does not hold that prompt id"
+        );
+    }
+    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES_120, past_120s())
         .expect("the expired watch fires");
     expect_rewind_cancel(&effects, &pid);
     let agent = agent_ref(&app, id);
@@ -94,7 +130,7 @@ fn expired_watch_restores_the_prompt_and_sends_a_rewind_cancel() {
         .filter(|entry| matches!(entry.block, RenderBlock::UserPrompt(_)))
         .count();
     assert_eq!(
-        (true, None, "restore me", 0, true, true),
+        (true, None, "restore me", 0, true, true, true),
         (
             agent.session.state.is_idle(),
             agent.session.current_prompt_id.as_deref(),
@@ -102,8 +138,9 @@ fn expired_watch_restores_the_prompt_and_sends_a_rewind_cancel() {
             bubbles,
             agent.is_rewound_prompt(&pid),
             agent.prompt_ack.is_none(),
+            scrollback_says_prompt_was_not_accepted(agent),
         ),
-        "pane idle, text back, bubble removed, prompt recorded as rewound"
+        "pane idle, text back, bubble removed, prompt recorded as rewound, notice still sent"
     );
 }
 
@@ -131,6 +168,18 @@ fn expired_watch_on_an_overlay_child_restores_the_child_prompt() {
         .expect("watch armed on the child")
         .prompt_id()
         .to_owned();
+    // The drain stores this prompt id on the child. Clearing it leaves the watch armed for a prompt the child session does not hold.
+    child.session.current_prompt_id = None;
+    assert!(
+        child
+            .prompt_ack
+            .as_ref()
+            .is_some_and(|watch| watch.prompt_id() == pid.as_str())
+            && child.session.current_prompt_id.is_none()
+            && child.session.state.is_turn_running()
+            && child.session.in_flight_prompt.is_some(),
+        "the watch is armed and the child session does not hold that prompt id"
+    );
     {
         let parent = app.agents.get_mut(&parent_id).unwrap();
         parent
@@ -139,7 +188,7 @@ fn expired_watch_on_an_overlay_child_restores_the_child_prompt() {
         parent.active_subagent = Some(child_sid.to_string());
     }
 
-    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline())
+    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES_120, past_120s())
         .expect("the child's expired watch fires");
     expect_rewind_cancel(&effects, &pid);
     assert!(
@@ -153,14 +202,15 @@ fn expired_watch_on_an_overlay_child_restores_the_child_prompt() {
         panic!("expected overlay child {child_sid}");
     };
     assert_eq!(
-        (true, "child text", true, true),
+        (true, "child text", true, true, true),
         (
             child.session.state.is_idle(),
             child.prompt.text(),
             child.is_rewound_prompt(&pid),
             child.prompt_ack.is_none(),
+            scrollback_says_prompt_was_not_accepted(child),
         ),
-        "the overlay child ends idle with its text back"
+        "the overlay child ends idle with its text back and the accept notice"
     );
 }
 
@@ -250,6 +300,21 @@ fn late_prompt_response_after_the_fail_safe_leaves_the_pane_idle() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let pid = send_and_arm(&mut app, "restore me");
+    // The drain stores this prompt id on the session. Clearing it leaves the watch armed for a prompt the session does not hold.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.current_prompt_id = None;
+        assert!(
+            agent
+                .prompt_ack
+                .as_ref()
+                .is_some_and(|watch| watch.prompt_id() == pid.as_str())
+                && agent.session.current_prompt_id.is_none()
+                && agent.session.state.is_turn_running()
+                && agent.session.in_flight_prompt.is_some(),
+            "the watch is armed and the session does not hold that prompt id"
+        );
+    }
     reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES, past_hard_deadline())
         .expect("the expired watch fires");
     let stale = dispatch(
@@ -272,5 +337,114 @@ fn late_prompt_response_after_the_fail_safe_leaves_the_pane_idle() {
             agent.scrollback.len()
         ),
         "the discarded response paints no marker and touches no state"
+    );
+}
+
+/// A `x.ai/queue/changed` that names the prompt id disarms the watch with no `session/update`.
+/// Past the 120s hard deadline the composer stays empty and the turn keeps running.
+#[test]
+fn queued_prompt_acks_before_the_120s_restore_even_when_session_update_is_still_waiting() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let prompt_text = "hold this";
+    let pid = send_and_arm(&mut app, prompt_text);
+    {
+        let agent = agent_ref(&app, id);
+        assert_eq!(
+            ("", true, true),
+            (
+                agent.prompt.text(),
+                agent.session.state.is_turn_running(),
+                agent.prompt_ack.is_some(),
+            ),
+            "the local drain arms the watch and leaves the composer empty"
+        );
+    }
+
+    let params = serde_json::json!({
+        "sessionId": "test-session",
+        "entries": [],
+        "runningPromptId": pid,
+    });
+    let (response_tx, _rx) = tokio::sync::oneshot::channel();
+    crate::app::acp_handler::handle(
+        xai_acp_lib::AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+            request: acp::ExtNotification::new(
+                "x.ai/queue/changed",
+                std::sync::Arc::from(
+                    serde_json::value::to_raw_value(&params).expect("queue payload serializes"),
+                ),
+            ),
+            response_tx,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        agent_ref(&app, id).prompt_ack.is_none(),
+        "the queue payload names the prompt id, so the watch is disarmed before the deadline"
+    );
+
+    let deadlines = PromptAckDeadlines {
+        soft: Duration::from_secs(10),
+        hard: Duration::from_secs(120),
+    };
+    let past_120s = Instant::now() + deadlines.hard + Duration::from_secs(1);
+    let effects = reconcile_overdue_prompt_acks_at(&mut app, &deadlines, past_120s);
+    assert!(
+        effects.is_none(),
+        "no session/update arrived; the fail-safe must not fire, got {effects:?}"
+    );
+    let agent = agent_ref(&app, id);
+    let timeout_notice = (0..agent.scrollback.len()).any(|idx| {
+        let Some(entry) = agent.scrollback.get(idx) else {
+            return false;
+        };
+        match &entry.block {
+            RenderBlock::System(block) => block.text.contains("did not accept your prompt"),
+            _ => false,
+        }
+    });
+    assert_eq!(
+        (true, "", Some(pid.as_str()), false, true, false),
+        (
+            agent.prompt_ack.is_none(),
+            agent.prompt.text(),
+            agent.session.current_prompt_id.as_deref(),
+            agent.is_rewound_prompt(&pid),
+            agent.session.state.is_turn_running(),
+            timeout_notice,
+        ),
+        "watch stays disarmed, the composer is not restored, and the turn is not aborted"
+    );
+    assert_ne!(
+        agent.prompt.text(),
+        prompt_text,
+        "restoring the composer would put the sent text back"
+    );
+}
+
+/// A running turn that already holds the prompt id is not restored at 120 seconds.
+/// No queue event and no session update. The watch is disarmed and the turn keeps running.
+#[test]
+fn running_turn_that_holds_the_prompt_id_does_not_restore_the_composer_at_120s_without_a_queue_event()
+ {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let pid = send_and_arm(&mut app, "keep running");
+    let effects = reconcile_overdue_prompt_acks_at(&mut app, &DEADLINES_120, past_120s());
+    let agent = agent_ref(&app, id);
+    assert_eq!(
+        (true, true, "", Some(pid.as_str()), true, false, false),
+        (
+            effects.is_none(),
+            agent.prompt_ack.is_none(),
+            agent.prompt.text(),
+            agent.session.current_prompt_id.as_deref(),
+            agent.session.state.is_turn_running(),
+            agent.is_rewound_prompt(&pid),
+            scrollback_says_prompt_was_not_accepted(agent),
+        ),
+        "a taken prompt is not restored, the turn is not aborted, and the watch is disarmed"
     );
 }

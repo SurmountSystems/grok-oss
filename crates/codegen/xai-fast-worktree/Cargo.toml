@@ -28,7 +28,7 @@ lifecycle-bench = [
     "dep:uuid",
 ]
 # SQLite metadata DB for worktree tracking.
-metadata = ["dep:rusqlite", "dep:xai-sqlite-journal"]
+metadata = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:xai-sqlite-journal"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -47,7 +47,10 @@ num_cpus = { workspace = true }
 
 reflink-copy = { workspace = true }
 rapidhash = "4.2.0"
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+# rusqlite 0.43. libsqlite3-sys `bundled` keeps SQLite self-contained.
+# Required libsqlite3-sys is 0.40.0.
+rusqlite = { version = "0.43", optional = true }
+libsqlite3-sys = { version = "0.40", features = ["bundled"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true }
@@ -68,7 +71,8 @@ serde_json = { workspace = true }
 xai-test-utils = { workspace = true }
 # Unconditional because cargo doesn't support feature-gated dev-deps cleanly.
 # Only used by tests behind #[cfg(feature = "metadata")] in db/tests.rs.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.43" }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use filetime::FileTime;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -10,7 +9,7 @@ use super::*;
 use crate::MAX_SESSION_AGE;
 
 fn set_mtime(path: &Path, time: SystemTime) {
-    filetime::set_file_mtime(path, FileTime::from_system_time(time)).unwrap();
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(time)).unwrap();
 }
 
 fn write_session(

@@ -1995,14 +1995,22 @@
     }
 
     fn draw_plan_present_frame(agent: &mut crate::app::agent_view::AgentView) {
+        draw_plan_present_frame_sized(agent, 120, 40);
+    }
+
+    fn draw_plan_present_frame_sized(
+        agent: &mut crate::app::agent_view::AgentView,
+        width: u16,
+        height: u16,
+    ) {
         use crate::scrollback::render::ScratchBuffer;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
-        let area = Rect::new(0, 0, 120, 40);
+        let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
-        agent.last_terminal_size = (120, 40);
+        agent.last_terminal_size = (width, height);
         let _ = agent.draw(
             area,
             &mut buf,
@@ -2178,7 +2186,9 @@
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert!(agent.line_viewer.is_some(), "fixture: live present docks");
-        draw_plan_present_frame(agent);
+        // Below 200 columns the pane is the full draw, so a left-column
+        // drag lands inside it. At 200 the pane is the right half.
+        draw_plan_present_frame_sized(agent, 200, 40);
 
         let sb = agent.pane_areas.scrollback;
         let prompt = agent.pane_areas.prompt;

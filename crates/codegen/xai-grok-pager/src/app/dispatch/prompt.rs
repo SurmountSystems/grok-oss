@@ -2242,10 +2242,7 @@ fn plan_present_running_turn_freeform_interjects(agent: &AgentView, text: &str) 
     let Some(pav) = agent.plan_approval_view.as_ref() else {
         return false;
     };
-    if pav.focus == crate::views::plan_approval_view::PlanApprovalFocus::Commenting {
-        return false;
-    }
-    true
+    pav.focus != crate::views::plan_approval_view::PlanApprovalFocus::Commenting
 }
 
 /// Whether consume-input dispatch already asked the model (or compact/bash).

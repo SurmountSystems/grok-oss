@@ -835,21 +835,22 @@ mod tests {
         // Literal name (not the consts) so renaming the scheme can't silently strand orphans created by already-shipped binaries
         let dir = tempfile::tempdir().unwrap();
         let max_age = Duration::from_secs(7 * 24 * 60 * 60);
-        // `filetime` ages the link itself; std's `set_modified` follows it (and a dangling link can't even be opened)
-        let old = filetime::FileTime::from_system_time(
-            SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60),
-        );
+        // `set_times_nofollow` ages the symlink itself. `File::set_modified` follows the link, and a dangling link cannot be opened.
+        let old = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        let old_times = std::fs::FileTimes::new()
+            .set_accessed(old)
+            .set_modified(old);
 
         let tmp = dir.path().join(".latest.gone-session.txt.tmp");
         std::os::unix::fs::symlink("gone-session.txt", &tmp).unwrap();
-        filetime::set_symlink_file_times(&tmp, old, old).unwrap();
+        std::fs::set_times_nofollow(&tmp, old_times).unwrap();
         // A just-created (mid-swap) temp must be spared by age.
         let fresh_tmp = dir.path().join(".latest.live-session.txt.tmp");
         std::os::unix::fs::symlink("live-session.txt", &fresh_tmp).unwrap();
         // `latest.txt` must stay spared by name even as an old dangling symlink.
         let latest = dir.path().join("latest.txt");
         std::os::unix::fs::symlink("gone-session.txt", &latest).unwrap();
-        filetime::set_symlink_file_times(&latest, old, old).unwrap();
+        std::fs::set_times_nofollow(&latest, old_times).unwrap();
 
         prune_old_logs(dir.path(), max_age);
 

@@ -364,7 +364,7 @@ impl xai_tool_runtime::Tool for GrepTool {
         );
         tracing::Span::current().record("effective_head_limit", config.effective_head_limit as u64);
         let (mut rg, deadline) = match source.resolve(&config, &tracing::Span::current()).await {
-            ResolvedSource::Rg { rg, deadline } => (rg, deadline),
+            ResolvedSource::Rg { rg, deadline } => (*rg, deadline),
             ResolvedSource::Answered(answer) => {
                 let (_, output) = answer.into_card(CappedOutput::new(&config), &config);
                 let wall_ms = started.elapsed().as_millis() as u64;
@@ -487,7 +487,7 @@ fn grep_progress_stream(
 
         span.record("effective_head_limit", config.effective_head_limit as u64);
         let (mut rg, deadline_at) = match source.resolve(&config, &span).await {
-            ResolvedSource::Rg { rg, deadline } => (rg, deadline),
+            ResolvedSource::Rg { rg, deadline } => (*rg, deadline),
             ResolvedSource::Answered(answer) => {
                 let (deltas, output) =
                     answer.into_card(CappedOutput::streaming(spec, &config), &config);

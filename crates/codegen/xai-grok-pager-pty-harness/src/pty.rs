@@ -425,13 +425,43 @@ impl PtyController {
         }
     }
 
-    /// Send SIGTERM to the child's whole process group. Returns whether the
-    /// signal was delivered (so Drop only spends its grace period when a
-    /// graceful exit is actually possible).
+    /// Send SIGTERM to the child's process group when this child leads it.
+    /// A positive-pid SIGTERM leaves foreground `sleep` running, and the
+    /// shell defers its TERM trap until that command finishes, so the grace
+    /// expires and SIGKILL wins. Returns whether a signal was delivered (so
+    /// Drop only spends its grace period when a graceful exit is possible).
     fn terminate_tree_best_effort(&self) -> bool {
+        #[cfg(unix)]
+        if self.signal_leader_group(libc::SIGTERM) {
+            // Group delivery is the catchable signal. Do not also call
+            // tree.terminate() here; the hard kill stays after the grace.
+            return true;
+        }
         self.process_tree
             .as_ref()
             .is_some_and(|tree| tree.terminate().is_ok())
+    }
+
+    /// SIGTERM or another signal to the direct child's process group.
+    /// No-op unless that child is the group leader (`pgid == pid`), so this
+    /// cannot target the caller's group.
+    #[cfg(unix)]
+    fn signal_leader_group(&self, signal: i32) -> bool {
+        let Some(pid) = self.child_pid() else {
+            return false;
+        };
+        let pid = pid as libc::pid_t;
+        if pid <= 1 {
+            return false;
+        }
+        // SAFETY: getpgid does not signal. pid is the live direct child, not 0 or -1.
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pgid <= 1 || pgid != pid {
+            return false;
+        }
+        // SAFETY: pgid is this child's own group and is greater than 1, so
+        // this is not kill(0), kill(-1), or the caller's group.
+        unsafe { libc::kill(-pgid, signal) == 0 }
     }
 
     fn release_process_tree(&mut self) {

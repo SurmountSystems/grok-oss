@@ -140,10 +140,7 @@ pub fn is_xai_api_url(url: &str) -> bool {
 /// Like [`is_xai_api_url`], but requires `https` on every arm, so a session bearer is never attached to a cleartext endpoint, including loopback.
 /// A co-located process could otherwise read a token sent to `http://localhost`.
 pub fn is_xai_api_bearer_url(url: &str) -> bool {
-    if is_trusted_xai_https_url(url) {
-        return true;
-    }
-    false
+    is_trusted_xai_https_url(url)
 }
 /// True for trusted first-party xAI HTTPS routes, excluding arbitrary loopback URLs.
 pub fn is_trusted_xai_https_url(url: &str) -> bool {

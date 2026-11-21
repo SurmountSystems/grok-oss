@@ -416,6 +416,11 @@ fn caps_new_file_contents_before_filesystem_access() {
     assert!(!oversized_path.exists());
 }
 
+fn sqlite_u64_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
 #[test]
 fn ordinary_topic_reads_are_counted_per_scope() {
     let fixture = Fixture::new();
@@ -445,7 +450,7 @@ fn ordinary_topic_reads_are_counted_per_scope() {
             .unwrap();
         statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                Ok((row.get::<_, String>(0)?, sqlite_u64_column(row, 1)?))
             })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()

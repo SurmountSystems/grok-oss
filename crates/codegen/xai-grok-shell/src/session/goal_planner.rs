@@ -190,7 +190,8 @@ pub(crate) fn goal_creation_artifact(plan_file: &Path, role_stem: &str) -> PathB
 // Outcome and spawner abstraction
 
 /// `Planned` carries the path the planner wrote (always the input `plan_file`).
-/// `FailClosed` carries the reason; every variant pauses the goal at the call site.
+/// `FailClosed` pauses the goal at the call site.
+/// `ResearchSessionReplaced` does not pause and does not compact the main session.
 #[derive(Debug, Clone)]
 #[expect(dead_code, reason = "`latency_ms` is consumed by future telemetry")]
 pub(crate) enum GoalPlannerOutcome {
@@ -205,6 +206,16 @@ pub(crate) enum GoalPlannerOutcome {
     FailClosed {
         reason: GoalPlannerFailClosedReason,
         latency_ms: u64,
+        /// Session-error text from the research role when that role stopped and the plan file is missing or empty.
+        /// `None` keeps the generic planner pause: a bare runtime string, a cancelled stop, or a plan-writer runtime stop.
+        research_runtime_message: Option<String>,
+    },
+    /// Research role filled its own sampling window. A new research session was started.
+    /// The main session is not compacted, and the goal stays active.
+    ResearchSessionReplaced {
+        /// Host sentence for the main transcript. Names the research role.
+        /// No session JSON and no request to compact the main session.
+        note: String,
     },
 }
 
@@ -407,7 +418,8 @@ pub(crate) struct GoalPlannerInputs<'a> {
     pub inherit_tool_names: &'a RoleToolNames,
 }
 
-/// Fail-CLOSED: any failure path returns `FailClosed { reason }` and the caller pauses the goal.
+/// Fail-CLOSED: a failure returns `FailClosed { reason }` and the caller pauses the goal.
+/// A research-role sampling-window overflow returns `ResearchSessionReplaced` instead.
 pub(crate) async fn run_goal_planner(
     spawner: Arc<dyn GoalPlannerSpawner>,
     inputs: GoalPlannerInputs<'_>,
@@ -454,8 +466,83 @@ pub(crate) async fn run_goal_planner(
         inputs.objective,
         inputs.context,
     );
-    let research_result =
+    let mut research_result =
         spawn_goal_creation_role(&spawner, GoalCreationRole::Research, research_prompt).await;
+    // A research session error with no plan names that role. A bare runtime string stays on the generic pause.
+    // A nested sampling-window overflow is the research session, not the main session.
+    // Start a new research session. Do not pause, and do not compact the main session.
+    let first_session_error = match &research_result {
+        Err(SpawnError::Runtime {
+            message,
+            cancelled: false,
+        }) if spawn_error_is_session_error(message)
+            && !spawn_error_is_repeating_sentence_stop(message) =>
+        {
+            Some(message.clone())
+        }
+        _ => None,
+    };
+    if let Some(message) = first_session_error
+        && !non_empty_plan_file(inputs.plan_file).await
+    {
+        if research_role_sampling_window_overflow(&message) {
+            tracing::info!(
+                "goal planner: research role sampling window overflow; starting a new research session"
+            );
+            let replacement_prompt = goal_creation_prompt(
+                GOAL_RESEARCH_PROMPT_TEMPLATE,
+                &[("{RESEARCH_FILE}", research_file_str.as_ref())],
+                inputs.tool_names,
+                inputs.inherit_tool_names,
+                inputs.objective,
+                inputs.context,
+            );
+            research_result =
+                spawn_goal_creation_role(&spawner, GoalCreationRole::Research, replacement_prompt)
+                    .await;
+            if let Err(SpawnError::Runtime {
+                message,
+                cancelled: false,
+            }) = &research_result
+                && spawn_error_is_session_error(message)
+                && !spawn_error_is_repeating_sentence_stop(message)
+                && !non_empty_plan_file(inputs.plan_file).await
+            {
+                if research_role_sampling_window_overflow(message)
+                    && !non_empty_plan_file(&research_file).await
+                {
+                    return GoalPlannerOutcome::ResearchSessionReplaced {
+                        note: RESEARCH_ROLE_SAMPLING_WINDOW_HOST_NOTE.to_string(),
+                    };
+                }
+                if !research_role_sampling_window_overflow(message) {
+                    tracing::warn!(
+                        error = %message,
+                        "goal planner: research role runtime error and the plan file is missing or empty",
+                    );
+                    return record_fail_closed_with_research_runtime(
+                        GoalPlannerFailClosedReason::Runtime,
+                        Some(message.clone()),
+                        inputs.attempt,
+                        started,
+                        emit_event,
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                error = %message,
+                "goal planner: research role runtime error and the plan file is missing or empty",
+            );
+            return record_fail_closed_with_research_runtime(
+                GoalPlannerFailClosedReason::Runtime,
+                Some(message),
+                inputs.attempt,
+                started,
+                emit_event,
+            );
+        }
+    }
     if let Some(stop) = outcome_if_spawn_stopped(
         research_result,
         inputs.plan_file,
@@ -738,6 +825,25 @@ async fn non_empty_plan_file(path: &Path) -> bool {
     }
 }
 
+/// Nested once-run turn errors are `Session error: {detail}`. A runtime string without that prefix is not one.
+fn spawn_error_is_session_error(message: &str) -> bool {
+    message.contains("Session error:")
+}
+
+/// Research-session overflow (`used/200000`). That window is not the main session.
+fn research_role_sampling_window_overflow(message: &str) -> bool {
+    let window = format!(
+        "/{} tokens)",
+        crate::util::config::NESTED_SESSION_CONTEXT_CAP
+    );
+    message.contains("Context is over this session's sampling window") && message.contains(&window)
+}
+
+/// Main-transcript sentence after that overflow. Names the research role.
+/// Does not include session JSON or `Compact once`.
+const RESEARCH_ROLE_SAMPLING_WINDOW_HOST_NOTE: &str =
+    "The research role filled its sampling window. A new research session was started.";
+
 /// Nested once-run writer turn errors are `Session error: {detail}`. Match the
 /// sampler line and the pager chrome headline (`Stopped: repeating sentence`).
 fn spawn_error_is_repeating_sentence_stop(message: &str) -> bool {
@@ -809,13 +915,27 @@ fn record_fail_closed(
     started: std::time::Instant,
     emit_event: &dyn Fn(Event),
 ) -> GoalPlannerOutcome {
+    record_fail_closed_with_research_runtime(reason, None, attempt, started, emit_event)
+}
+
+fn record_fail_closed_with_research_runtime(
+    reason: GoalPlannerFailClosedReason,
+    research_runtime_message: Option<String>,
+    attempt: u32,
+    started: std::time::Instant,
+    emit_event: &dyn Fn(Event),
+) -> GoalPlannerOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
     emit_event(Event::GoalPlannerFailClosed {
         reason: reason.as_const_str(),
         attempt,
         latency_ms,
     });
-    GoalPlannerOutcome::FailClosed { reason, latency_ms }
+    GoalPlannerOutcome::FailClosed {
+        reason,
+        latency_ms,
+        research_runtime_message,
+    }
 }
 
 // Tests

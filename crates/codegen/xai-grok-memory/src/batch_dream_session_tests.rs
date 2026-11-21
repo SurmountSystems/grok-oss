@@ -28,8 +28,8 @@ impl Fixture {
         for (index, body) in notes.iter().enumerate() {
             let path = workspace.join(format!("observations/_inbox/note-{index}.md"));
             std::fs::write(&path, body).unwrap();
-            let modified = filetime::FileTime::from_unix_time(index as i64 + 1, 0);
-            filetime::set_file_mtime(&path, modified).unwrap();
+            let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(index as u64 + 1);
+            std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(modified)).unwrap();
         }
         let store = Arc::new(
             BatchDreamStore::open(&workspace, V2MemoryScope::Workspace, &global, &workspace)

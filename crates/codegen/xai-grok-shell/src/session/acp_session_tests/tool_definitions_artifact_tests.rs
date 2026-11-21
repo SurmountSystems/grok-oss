@@ -47,14 +47,12 @@ async fn unchanged_toolset_skips_rewrite_and_failed_write_is_retried() {
             assert_eq!(vec!["read_file".to_owned()], artifact_names(&session_dir));
 
             // Backdated, so an unwanted rewrite shows even on a coarse-mtime filesystem
-            let backdated = filetime::FileTime::from_unix_time(1_000_000, 0);
-            filetime::set_file_mtime(&path, backdated).expect("backdate artifact");
+            let backdated = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+            std::fs::set_times(&path, std::fs::FileTimes::new().set_modified(backdated))
+                .expect("backdate artifact");
             actor.persist_tool_definitions_artifact(&first).await;
             let metadata = std::fs::metadata(&path).expect("artifact metadata");
-            assert_eq!(
-                backdated,
-                filetime::FileTime::from_last_modification_time(&metadata)
-            );
+            assert_eq!(backdated, metadata.modified().expect("artifact mtime"));
 
             // A directory at the target fails the rename; the retry only writes if that failure recorded no hash
             std::fs::remove_file(&path).expect("remove artifact");

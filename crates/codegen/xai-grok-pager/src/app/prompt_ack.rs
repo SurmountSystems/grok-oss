@@ -4,8 +4,10 @@
 //! `x.ai/queue/changed`, `session/update`, or turn end that names the prompt id. Shared by the TUI reconcile
 //! (`dispatch::reconcile_overdue_prompt_acks`) and the headless runner.
 //!
-//! Invariant: a [`PromptAckWatch`] exists on an agent only while `current_prompt_id == watch.prompt_id`
-//! and the pane is `TurnRunning` or `TurnCancelling`; every turn-end path clears it.
+//! A [`PromptAckWatch`] stays armed while the pane is `TurnRunning` or `TurnCancelling` and
+//! `current_prompt_id` is that prompt, and while `TurnRunning` still has no `current_prompt_id`
+//! (the session never took the prompt). Any other current id, and an idle pane, drops it.
+//! The hard deadline disarms a running owned turn instead of aborting. Turn-end paths clear it.
 
 use std::time::{Duration, Instant};
 

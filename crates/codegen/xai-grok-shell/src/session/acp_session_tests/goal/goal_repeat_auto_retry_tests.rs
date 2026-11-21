@@ -147,6 +147,42 @@ async fn other_turn_errors_still_pause_and_advertise_goal_resume() {
         .await;
 }
 
+/// Nested Unauthorized 401 with `reason=no auth context` is not an infra pause.
+/// The goal must not become `InfraPaused`, and that sentence must not be stored
+/// as the pause message. A rate-limit infra pause stays as it is.
+#[tokio::test(flavor = "current_thread")]
+async fn goal_does_not_infra_pause_on_nested_401_no_auth_context() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp, _event_rx) = make_goal_actor_with_events().await;
+            start_test_goal(&actor);
+
+            const TURN_ERR: &str = "Turn failed: Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)";
+
+            actor
+                .apply_infra_pause_after_turn_err(TURN_ERR.to_owned())
+                .await;
+
+            assert_ne!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::InfraPaused),
+                "a goal turn that fails with Unauthorized 401 and reason=no auth context must not leave the goal infra-paused"
+            );
+            let pause_message = actor
+                .goal_tracker
+                .lock()
+                .snapshot()
+                .and_then(|goal| goal.pause_message.clone());
+            assert_ne!(
+                pause_message.as_deref(),
+                Some(TURN_ERR),
+                "that Unauthorized 401 sentence must not be stored as the pause message, got {pause_message:?}"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn repeating_sentence_stop_pauses_after_auto_retry_cap() {
     let local = tokio::task::LocalSet::new();

@@ -100,3 +100,20 @@ AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_BACKGROUND_THREADS = "0"
+
+# Temporary, this repo only. ~/.cargo/config.toml stays on the 7-day index.
+# Menhera hides a version while it is newer than 7 days old (0d is the
+# unfiltered menhera pass-through). Cargo.lock needs libsqlite3-sys 0.40.0
+# (published 2026-11-11T06:46:44Z, on the 7-day index at 2026-11-18T06:46:45Z)
+# and rusqlite 0.43.0 (published 2026-11-15T09:44:41Z). parquet 60.1.0
+# (published 2026-10-28T08:51:14Z) is already old enough.
+# Delete this block after 2026-11-22T09:44:42Z (02:44:42 AM Mountain, UTC-7).
+# That is the first second rusqlite 0.43.0 is 7 days old. Do not copy the
+# 0-day URL into ~/.cargo/config.toml.
+# https://www.menhera.org/crates-io-cooldown-proxy-mitigating-supply-chain-attacks/
+# accessed: 2026-11-15. crates.io created_at accessed: 2026-11-15.
+[registries.menhera-cooldown]
+index = "sparse+https://index.crates.menhera.org/0d/"
+
+[source.menhera-cooldown]
+registry = "sparse+https://index.crates.menhera.org/0d/"

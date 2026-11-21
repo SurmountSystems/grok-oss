@@ -28,7 +28,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # Mozilla CA DERs. reqwest 0.13 `rustls` uses rustls-platform-verifier, which
 # fails Client::build when the OS trust store is empty.
-webpki-root-certs = "1.0.9"
+webpki-root-certs = "1.0.10"
 
 # Deps for credentials.rs + oauth.rs.
 async-trait = { workspace = true }
