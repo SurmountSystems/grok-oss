@@ -36,6 +36,10 @@ SuperGrok is a paid product. Never call SuperGrok free. Name which meter you mea
 
 Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` on `$GROK_HOME/authorize_ask.sock`. That document never carries tokens. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT. Named tests and detail: [`FORK.md`](FORK.md) same heading.
 
+### Revise was returned as Approve (pinned 2026-11-23)
+
+The Operator clicked Revise. `exit_plan_mode` returned `The user approved the plan. Implement the plan in plan.md.` That sentence was not the click. Do not spawn implementers on that sentence when the Operator says the click was Revise. The product must return the CTA that was clicked. The planning prompt must use the same input as the L1 composer. The L1 composer works. A second planning text input is the bug. Issue 260. The 12:07 screenshots are old and are not the spec. Dual-pin: host `~/.grok/AGENTS.md` same heading.
+
 ### Nested L2 inherit and Authentication required nag (pinned 2026-10-15)
 
 Nested 401 `reason=no auth context` while the parent session still talks does not paint Authentication required / Run /login. SuperGrok is a paid product. Never tell the Operator to /login. Operator live proof 2026-10-24: rebuilt grok-oss retry logic and IPC auth are working well. Named tests and detail: [`FORK.md`](FORK.md) same heading.

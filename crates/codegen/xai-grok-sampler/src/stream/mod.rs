@@ -325,8 +325,9 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     }
     // A 3- or 4-line cycle smears inside one line. Compare trimmed text
     // with collapsed whitespace, drop a leading "L3." or "N." marker, and
-    // split on " N. ". The same step matches on its first 24 characters.
-    // A shorter smear matches when it is still a prefix of that step.
+    // split on " N. ". The same step is equal text, or a shorter smear that
+    // is still a prefix of that step. A shared opening whose tails diverge
+    // is a different sentence, not a repeat.
     let step_pieces = |unit: &str| -> Vec<String> {
         let mut collapsed = String::new();
         let mut prev_space = false;
@@ -388,22 +389,26 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
         pieces
     };
     let same_step = |left: &str, right: &str| -> bool {
+        if left == right {
+            return true;
+        }
         let left_n = left.chars().count();
         let right_n = right.chars().count();
-        if left_n >= 24 && right_n >= 24 {
-            let left_head: String = left.chars().take(24).collect();
-            let right_head: String = right.chars().take(24).collect();
-            return left_head == right_head;
-        }
-        if left_n < 24 && right_n < 24 {
-            return left == right;
-        }
-        let (short, long) = if left_n < right_n {
-            (left, right)
+        let (short, long, short_n, long_n) = if left_n <= right_n {
+            (left, right, left_n, right_n)
         } else {
-            (right, left)
+            (right, left, right_n, left_n)
         };
-        short.chars().count() >= 20 && long.starts_with(short)
+        // Both sides are long enough to be a step. Keep a truncated smear
+        // (one side is a prefix of the other). Do not treat a shared
+        // opening as the same sentence when the tails diverge.
+        if short_n >= 24 {
+            return long.starts_with(short);
+        }
+        if long_n < 24 {
+            return false;
+        }
+        short_n >= 20 && long.starts_with(short)
     };
     let same_unit = |left: &str, right: &str| -> bool {
         let left_pieces = step_pieces(left);
@@ -1101,3 +1106,7 @@ mod dest_encoder_skip_repetition_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "distinct_advisory_urls.rs"]
+mod distinct_advisory_urls;

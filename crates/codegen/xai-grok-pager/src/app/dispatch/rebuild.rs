@@ -149,7 +149,7 @@ fn persist_session_work_for_rebuild(app: &AppView) {
         let plan_notes = agent
             .plan_approval_view
             .as_ref()
-            .and_then(|view| view.feedback_draft.clone())
+            .map(|view| view.feedback_draft.text().to_string())
             .filter(|notes| !notes.trim().is_empty());
         if let Some(notes) = plan_notes.as_deref() {
             let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
@@ -2756,7 +2756,7 @@ mod tests {
             agent.session.cwd = cwd.clone();
             agent.plan_mode_active = true;
             let mut pav = PlanApprovalViewState::for_idle_decision(Some(plan_body.into()));
-            pav.feedback_draft = Some(notes.into());
+            pav.feedback_draft.set_text(notes);
             agent.plan_approval_view = Some(pav);
             agent.prompt.set_text("/view-plan");
         }
@@ -2823,7 +2823,8 @@ mod tests {
                 agent
                     .plan_approval_view
                     .as_ref()
-                    .and_then(|p| p.feedback_draft.as_deref()),
+                    .map(|p| p.feedback_draft.text())
+                    .filter(|text| !text.trim().is_empty()),
                 Some(notes),
                 "session load after /rebuild must restore feedback_draft"
             );

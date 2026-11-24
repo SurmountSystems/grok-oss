@@ -841,8 +841,8 @@ impl AgentView {
                         HintItem::new(key!(Esc), "back"),
                     ]
                 } else {
+                    // Empty planning composer: `a` is the letter a, not Approve.
                     vec![
-                        HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]

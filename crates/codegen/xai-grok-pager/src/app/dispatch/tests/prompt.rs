@@ -7945,7 +7945,8 @@ fn comment_intent_send_prompt_does_not_start_model_wait() {
         agent
             .plan_approval_view
             .as_ref()
-            .and_then(|p| p.feedback_draft.as_deref()),
+            .map(|p| p.feedback_draft.text())
+            .filter(|text| !text.trim().is_empty()),
         Some(PLAN_COMMENT_CRITIQUE)
     );
 }
@@ -8104,7 +8105,7 @@ fn operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_
             || app.agents[&id]
                 .plan_approval_view
                 .as_ref()
-                .is_some_and(|pav| pav.feedback_draft.as_deref() == Some(HELLO_ARE_YOU_STUCK)),
+                .is_some_and(|pav| pav.feedback_draft.text() == HELLO_ARE_YOU_STUCK),
         "Hello? during plan present must interject or hold as comment; effects={effects:?}"
     );
     assert!(
@@ -8129,7 +8130,7 @@ fn operator_hello_are_you_stuck_during_plan_present_is_comment_or_interject_not_
                 || agent
                     .plan_approval_view
                     .as_ref()
-                    .is_some_and(|pav| pav.feedback_draft.as_deref() == Some(HELLO_ARE_YOU_STUCK))
+                    .is_some_and(|pav| pav.feedback_draft.text() == HELLO_ARE_YOU_STUCK)
                 || agent.prompt.text().contains(HELLO_ARE_YOU_STUCK),
             "transcript must contain the operator line, or the text stays as a present-time comment"
         );
@@ -8339,14 +8340,15 @@ fn after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_
                 || agent
                     .plan_approval_view
                     .as_ref()
-                    .and_then(|p| p.feedback_draft.as_deref())
+                    .map(|p| p.feedback_draft.text())
+                    .filter(|text| !text.trim().is_empty())
                     == Some(FOLLOW_UP),
             "follow-up must stay as a parked comment, composer={:?} draft={:?}",
             agent.prompt.text(),
             agent
                 .plan_approval_view
                 .as_ref()
-                .and_then(|p| p.feedback_draft.clone())
+                .map(|p| p.feedback_draft.text().to_string())
         );
     }
 
