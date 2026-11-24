@@ -405,12 +405,7 @@ fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
     {
         let pav = agent.plan_approval_view.as_ref().unwrap();
         assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
-        assert_eq!(
-            pav.stashed_feedback_prompt
-                .as_ref()
-                .map(|s| s.text.as_str()),
-            Some("keep my freeform notes")
-        );
+        assert_eq!(pav.stashed_feedback_prompt.text(), "keep my freeform notes");
     }
     agent.prompt.set_text("unsaved comment draft");
 
@@ -431,10 +426,8 @@ fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
         let pav = agent.plan_approval_view.as_ref().unwrap();
         assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
         assert_eq!(
-            pav.stashed_feedback_prompt
-                .as_ref()
-                .map(|s| s.text.as_str()),
-            Some("keep my freeform notes"),
+            pav.stashed_feedback_prompt.text(),
+            "keep my freeform notes",
             "second gutter drag must not replace freeform with comment draft"
         );
     }
@@ -1106,7 +1099,8 @@ fn deleting_the_approval_comment_being_edited_cancels_the_edit_and_restores_the_
         pav.editing_comment_id = Some(7);
         pav.commenting_range = Some(2..3);
         pav.focus = PlanApprovalFocus::Commenting;
-        pav.stashed_feedback_prompt = Some(agent.prompt.stash());
+        let stashed = agent.prompt.stash();
+        pav.store_stashed_feedback(stashed);
     }
     agent.prompt.set_text("edited draft");
 
@@ -2182,13 +2176,13 @@ fn isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment()
         let pav = agent.plan_approval_view.as_mut().unwrap();
         pav.focus = PlanApprovalFocus::Preview;
         pav.prompt_intent = PlanPromptIntent::Revise;
-        pav.feedback_draft = None;
+        pav.feedback_draft.set_text("");
     }
     agent.prompt.set_text("/");
     agent.prompt.refresh_slash(&agent.session.models);
     agent.prompt.set_text(NOTES);
     if let Some(pav) = agent.plan_approval_view.as_mut() {
-        pav.feedback_draft = None;
+        pav.feedback_draft.set_text("");
     }
     {
         let viewer = agent.line_viewer.as_mut().expect("plan pane");
@@ -2488,7 +2482,8 @@ fn isolated_preview_keep_draft_from_before_present_enter_sends_prompt() {
         agent
             .plan_approval_view
             .as_ref()
-            .and_then(|p| p.feedback_draft.as_deref()),
+            .map(|p| p.feedback_draft.text())
+            .filter(|text| !text.trim().is_empty()),
         Some(DRAFT),
         "keep-draft Enter must not stash the pre-present composer as review comments"
     );

@@ -242,7 +242,13 @@ pub fn active_phase_label(goal: &GoalDisplayState) -> String {
         return "Planning".into();
     }
     match goal.phase {
-        GoalDisplayPhase::Idle => "Idle".into(),
+        GoalDisplayPhase::Idle => {
+            if goal.current_subagent_role.as_deref() == Some("goal research specialist") {
+                "Research".into()
+            } else {
+                "Idle".into()
+            }
+        }
         GoalDisplayPhase::Planning => "Planning".into(),
         GoalDisplayPhase::Executing => "Executing".into(),
     }

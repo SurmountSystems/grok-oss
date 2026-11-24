@@ -1097,12 +1097,9 @@ impl crate::app::agent_view::AgentView {
             && self.plan_mode_active
             && let Some(view) = self.plan_approval_view.as_mut()
         {
-            let feedback_empty = view
-                .feedback_draft
-                .as_ref()
-                .is_none_or(|draft| draft.trim().is_empty());
+            let feedback_empty = view.feedback_draft.text().trim().is_empty();
             if feedback_empty {
-                view.feedback_draft = Some(restored);
+                view.feedback_draft.set_text(&restored);
             }
         }
     }
@@ -2222,7 +2219,7 @@ fn hold_parked_plan_follow_up(agent: &mut AgentView, text: &str) -> bool {
         return false;
     }
     if let Some(pav) = agent.plan_approval_view.as_mut() {
-        pav.feedback_draft = Some(text.to_string());
+        pav.feedback_draft.set_text(text);
         pav.comment_held_from_enter = true;
     }
     agent.prompt.set_text(text);

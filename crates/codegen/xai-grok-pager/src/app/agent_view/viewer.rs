@@ -291,10 +291,10 @@ impl AgentView {
             return false;
         }
         if self.isolated_preview_typed_open_enter_is_human_turn() {
-            let typed_snapshot = pav
-                .feedback_draft
-                .as_deref()
-                .is_some_and(|draft| draft.trim() == self.prompt.text().trim());
+            let typed_snapshot = {
+                let draft = pav.feedback_draft.text().trim();
+                !draft.is_empty() && draft == self.prompt.text().trim()
+            };
             if typed_snapshot {
                 return false;
             }
@@ -466,7 +466,14 @@ impl AgentView {
         }
         self.mark_selected_plan_cta(choice);
         match choice {
-            SelectedPlanCta::Approve => self.approve_plan(),
+            SelectedPlanCta::Approve => {
+                // Approve is not the Revise box. `finish_approve_plan` skips
+                // `send_approved` while intent is still Revise with notes.
+                if let Some(pav) = self.plan_approval_view.as_mut() {
+                    pav.prompt_intent = PlanPromptIntent::ApproveNotes;
+                }
+                self.approve_plan()
+            }
             SelectedPlanCta::Comment => {
                 // Isolated Preview Comment CTA still arms a line range.
                 // Empty-prompt `c` types in the Human box; it is not this path.
@@ -474,7 +481,7 @@ impl AgentView {
                 // Prompt + Comment intent, not a wiped line-note overlay.
                 let _ = self.enter_plan_commenting();
                 if let Some(pav) = self.plan_approval_view.as_mut() {
-                    if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+                    if let Some(stashed) = pav.take_stashed_feedback() {
                         self.prompt.restore(stashed);
                     }
                 }
@@ -567,11 +574,10 @@ impl AgentView {
         if self.composer_is_keep_draft_from_before_present() {
             return false;
         }
-        let already_stashed = pav.comment_held_from_enter
-            && pav
-                .feedback_draft
-                .as_deref()
-                .is_some_and(|draft| draft.trim() == trimmed);
+        let already_stashed = pav.comment_held_from_enter && {
+            let draft = pav.feedback_draft.text().trim();
+            !draft.is_empty() && draft == trimmed
+        };
         // Isolated Preview Preview is a Human send. Comment CTA stashes
         // once. A matching ride-Approve draft must not recapture Enter.
         // Keystroke snapshots of `feedback_draft` are not that Enter.
@@ -585,7 +591,7 @@ impl AgentView {
             return false;
         }
         if let Some(pav) = self.plan_approval_view.as_mut() {
-            pav.feedback_draft = Some(text);
+            pav.feedback_draft.set_text(&text);
             pav.comment_held_from_enter = true;
         }
         self.persist_unsent_composer_draft_now();
@@ -706,7 +712,7 @@ impl AgentView {
             // Esc closes ride-Approve capture. It does not Approve, and it
             // does not wipe a mid-compose Human draft.
             if let Some(pav) = self.plan_approval_view.as_mut() {
-                pav.feedback_draft = None;
+                pav.feedback_draft.set_text("");
                 pav.comment_held_from_enter = false;
             }
             self.cancel_line_viewer();
@@ -739,8 +745,8 @@ impl AgentView {
             return self.send_casual_plan_comments();
         }
 
-        // Bare `a` types. Approve is the button. Do not switch to Prompt
-        // first: empty Prompt `a` still Approves revision notes.
+        // Bare `a` types into the planning composer, including an empty
+        // Prompt. Approve is the button. Do not treat `a` as Approve.
         if in_plan_approval && key!('a').matches(key) && plan_preview_key_is_composer_text(key) {
             return self.handle_plan_feedback_key(key);
         }
@@ -1302,7 +1308,7 @@ impl AgentView {
                     let stashed = self
                         .plan_approval_view
                         .as_mut()
-                        .and_then(|pav| pav.stashed_feedback_prompt.take());
+                        .and_then(|pav| pav.take_stashed_feedback());
                     if let Some(stashed) = stashed {
                         self.prompt.restore(stashed);
                     } else {
@@ -1465,8 +1471,9 @@ impl AgentView {
                         if let Some(ref mut pav) = self.plan_approval_view {
                             // Stash only on the first entry into commenting, same as enter_plan_commenting
                             // A second gutter drag while Commenting must not replace the stashed prompt text
-                            if pav.stashed_feedback_prompt.is_none() {
-                                pav.stashed_feedback_prompt = Some(self.prompt.stash());
+                            if pav.stashed_feedback_is_absent() {
+                                let stashed = self.prompt.stash();
+                                pav.store_stashed_feedback(stashed);
                             }
                             pav.commenting_range = Some(range);
                             pav.editing_comment_id = None;

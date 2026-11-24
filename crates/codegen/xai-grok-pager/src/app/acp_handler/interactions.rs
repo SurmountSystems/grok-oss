@@ -293,7 +293,7 @@ pub(super) fn handle_exit_plan_mode(
     let pane_already_open = agent.line_viewer.is_some();
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0u64;
-    let mut carried_feedback_draft: Option<String> = None;
+    let mut carried_feedback_draft = crate::views::prompt_widget::PromptWidget::new();
     // `unmount_plan_review` restores the previous session stash and would
     // wipe Revise-box text typed after that park. A resume replace keeps it.
     let composer_before_replace = (resume_park || is_restore)
@@ -314,7 +314,7 @@ pub(super) fn handle_exit_plan_mode(
             carried_next_comment_id = old.next_comment_id;
         }
         if is_restore || resume_park {
-            carried_feedback_draft = old.feedback_draft.take();
+            carried_feedback_draft = std::mem::take(&mut old.feedback_draft);
         }
         old.send_stale_cancel();
     }
@@ -401,10 +401,11 @@ pub(super) fn handle_exit_plan_mode(
         agent.clear_plan_loop_flags_for_new_present();
     }
     agent.plan_approval_view = Some(state);
-    if let Some(draft) = carried_feedback_draft.clone() {
+    if !carried_feedback_draft.text().trim().is_empty() {
+        let same_as_composer = agent.prompt.text().trim() == carried_feedback_draft.text().trim();
         if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.feedback_draft = Some(draft.clone());
-            if agent.prompt.text().trim() == draft.trim() && !draft.trim().is_empty() {
+            pav.feedback_draft = carried_feedback_draft;
+            if same_as_composer {
                 // Carried Revise-box text is the next Operator turn. Approve
                 // must not wrap it as review comments.
                 pav.keep_draft_is_next_operator_turn = true;

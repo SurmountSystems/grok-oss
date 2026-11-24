@@ -226,12 +226,17 @@ impl ImageDescribeCache {
         current_query: &str,
         source: ImageDescribeSource,
         path_key: &str,
-    ) -> Result<String, DescribeError> {
+        image_path: &Path,
+    ) -> Result<DescribeWithOcr, DescribeError> {
         let content_fp = content_fingerprint(raw_bytes);
         let prompt_fp = describe_prompt_fingerprint(outline, current_query);
         let cache_key = (source, path_key.to_owned(), content_fp, prompt_fp);
-        if let Some(d) = self.inner.lock().get(&cache_key).cloned() {
-            return Ok(d);
+        if let Some(description) = self.inner.lock().get(&cache_key).cloned() {
+            let shown = crate::session::plan_image_tesseract::show_image_with_tesseract(image_path);
+            return Ok(DescribeWithOcr {
+                description,
+                ocr_text: shown.ocr_text,
+            });
         }
         let (bytes, mime) =
             crate::session::image_normalize::reencode_for_describe(raw_bytes, mime_type)
@@ -241,10 +246,18 @@ impl ImageDescribeCache {
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
         let prompt_text = build_describe_prompt(outline, current_query);
-        let description =
-            describe_user_images(client, model, prompt_text, std::slice::from_ref(&url)).await?;
-        self.inner.lock().insert(cache_key, description.clone());
-        Ok(description)
+        let described = describe_user_images(
+            client,
+            model,
+            prompt_text,
+            std::slice::from_ref(&url),
+            std::slice::from_ref(&image_path),
+        )
+        .await?;
+        self.inner
+            .lock()
+            .insert(cache_key, described.description.clone());
+        Ok(described)
     }
 }
 /// Result of persisting one user-supplied image to the session's `assets/` directory.
@@ -329,18 +342,42 @@ pub(crate) fn describe_error_aborts_human_turn(err: &DescribeError) -> bool {
 pub(crate) fn fail_open_image_description(err: &DescribeError) -> String {
     format!("[image transcription unavailable: {err}]")
 }
+/// Vision description plus the tesseract stdout for the same image.
+/// The image bytes stay on the describe request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DescribeWithOcr {
+    pub description: String,
+    pub ocr_text: String,
+}
+
 /// Call the vision model and return its description text.
 /// `image_urls` should be the cached URLs from [`persist_user_images`].
+/// Each `image_paths` entry is read by tesseract. That stdout is part of the
+/// request text. The image URL is still attached. A missing binary does not
+/// invent picture text.
 /// The caller is responsible for outline and prompt assembly so this stays a pure transport helper.
 pub(crate) async fn describe_user_images(
     client: OaiCompatClient,
     model: &str,
     prompt_text: String,
     image_urls: &[String],
-) -> Result<String, DescribeError> {
+    image_paths: &[&Path],
+) -> Result<DescribeWithOcr, DescribeError> {
+    let mut ocr_parts = Vec::with_capacity(image_paths.len());
+    for path in image_paths {
+        let shown = crate::session::plan_image_tesseract::show_image_with_tesseract(path);
+        ocr_parts.push(shown.ocr_text);
+    }
+    let ocr_text = ocr_parts.join("\n");
+    let picture = crate::session::plan_image_tesseract::render_picture_text_block(&ocr_text, None);
+    let text = if picture.is_empty() {
+        prompt_text
+    } else {
+        format!("{picture}\n{prompt_text}")
+    };
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
-            text: std::sync::Arc::<str>::from(prompt_text),
+            text: std::sync::Arc::<str>::from(text),
         }],
         synthetic_reason: SyntheticReason::Human,
         ..Default::default()
@@ -374,7 +411,10 @@ pub(crate) async fn describe_user_images(
     if trimmed.is_empty() {
         return Err(DescribeError::EmptyResponse);
     }
-    Ok(trimmed.to_owned())
+    Ok(DescribeWithOcr {
+        description: trimmed.to_owned(),
+        ocr_text,
+    })
 }
 /// Compose the final user-message text shown to the coding model when a turn includes images.
 /// The order matches the compat-harness wire format: `<image>` block(s), `<image_files>` block, then the original `<user_query>`-wrapped user text.
@@ -403,10 +443,14 @@ pub(crate) fn persist_and_prepend_image_files(
         .iter()
         .map(|p| p.path.to_string_lossy().into_owned())
         .collect();
-    Ok(match render_image_files_block(&image_paths) {
+    let mut text = match render_image_files_block(&image_paths) {
         Some(files_block) => format!("{files_block}\n\n{original_user_message}"),
         None => original_user_message.to_owned(),
-    })
+    };
+    for persisted in &persisted {
+        crate::session::plan_image_tesseract::append_ocr_picture_text(&mut text, &persisted.path);
+    }
+    Ok(text)
 }
 #[cfg(test)]
 mod tests {

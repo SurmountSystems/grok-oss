@@ -23,7 +23,7 @@ pub use cancel_cause::CancelledBy;
 pub use context_info::ContextInfoBlock;
 pub use credit_limit::{CreditLimitBlock, CreditLimitCardAction};
 pub use session_event::{MemoryCaptureBlock, MemoryCommandKind, SessionEvent, SessionEventBlock};
-pub use subagent::{SubagentBlock, SubagentBlockKind};
+pub use subagent::{SubagentBlock, SubagentBlockKind, research_role_window_visible_reason};
 pub use system::SystemMessageBlock;
 pub(crate) use thinking::INSTANT_THOUGHT_MS;
 pub use thinking::ThinkingBlock;

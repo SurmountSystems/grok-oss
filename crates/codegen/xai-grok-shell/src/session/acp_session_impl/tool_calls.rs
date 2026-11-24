@@ -3546,9 +3546,15 @@ impl SessionActor {
                     ));
                 } else {
                     let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                    let mut image_msg = ConversationItem::system_reminder(
-                        "[Image extracted from tool result above]",
+                    let ocr = super::tool_layer_images::ocr_text_for_unsaved_image(
+                        &norm.mime_type,
+                        &norm.data,
                     );
+                    let mut text = "[Image extracted from tool result above]".to_owned();
+                    crate::session::plan_image_tesseract::append_rendered_picture_text(
+                        &mut text, &ocr,
+                    );
+                    let mut image_msg = ConversationItem::system_reminder(text);
                     image_msg.add_image(url);
                     deferred_followups.push(image_msg);
                 }
@@ -3631,6 +3637,10 @@ impl SessionActor {
                         Some(saved) => {
                             prompt_text =
                                 format!("Read image file: {path}. Saved to {}", saved.display());
+                            crate::session::plan_image_tesseract::append_ocr_picture_text(
+                                &mut prompt_text,
+                                &saved,
+                            );
                             if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
                                 inline_images.push(part);
                             }
@@ -3649,6 +3659,14 @@ impl SessionActor {
                                 url: std::sync::Arc::<str>::from(url),
                             });
                             prompt_text = format!("Read image file: {path}");
+                            let ocr = super::tool_layer_images::ocr_text_for_unsaved_image(
+                                &image_content.mime_type,
+                                &image_content.data,
+                            );
+                            crate::session::plan_image_tesseract::append_rendered_picture_text(
+                                &mut prompt_text,
+                                &ocr,
+                            );
                         }
                     }
                 }
@@ -3658,12 +3676,17 @@ impl SessionActor {
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = *output
         {
             let mut saved_paths = Vec::new();
+            let mut ocr_body = String::new();
             for page in &pdf.pages {
                 match persist_extracted_tool_image(&page.mime_type, &page.data, &images_dir) {
                     Some(saved) => {
                         if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
                             inline_images.push(part);
                         }
+                        crate::session::plan_image_tesseract::append_ocr_picture_text(
+                            &mut ocr_body,
+                            &saved,
+                        );
                         saved_paths.push(saved.display().to_string());
                     }
                     None if parent => {}
@@ -3672,6 +3695,14 @@ impl SessionActor {
                         inline_images.push(ContentPart::Image {
                             url: std::sync::Arc::<str>::from(url),
                         });
+                        let ocr = super::tool_layer_images::ocr_text_for_unsaved_image(
+                            &page.mime_type,
+                            &page.data,
+                        );
+                        crate::session::plan_image_tesseract::append_rendered_picture_text(
+                            &mut ocr_body,
+                            &ocr,
+                        );
                     }
                 }
             }
@@ -3694,6 +3725,13 @@ impl SessionActor {
                     saved_paths.join(", "),
                 )
             };
+            if !ocr_body.is_empty() {
+                if !prompt_text.ends_with('\n') {
+                    prompt_text.push('\n');
+                }
+                prompt_text.push('\n');
+                prompt_text.push_str(&ocr_body);
+            }
         }
         (prompt_text, inline_images, extracted_images)
     }

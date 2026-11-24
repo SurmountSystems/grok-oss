@@ -841,8 +841,8 @@ impl AgentView {
                         HintItem::new(key!(Esc), "back"),
                     ]
                 } else {
+                    // Empty planning composer: `a` is the letter a, not Approve.
                     vec![
-                        HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -8081,6 +8081,75 @@ mod plan_approval_draw_contract_tests {
                 .and_then(|viewer| viewer.plan_ref())
                 .is_some_and(|plan| plan.revision_prompt_area.is_some()),
             "Tab:prompt focuses the in-panel plan prompt hit target"
+        );
+    }
+
+    /// The focused plan revision box inserts each typed character once, in
+    /// order. The letter `a` is text. It does not approve the plan. The
+    /// placeholder `Type a revision...` stays paint-only.
+    #[test]
+    fn focused_plan_revision_box_inserts_the_sentence_and_a_does_not_approve() {
+        use crate::app::app_view::InputOutcome;
+        use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let sentence = "the text prompt is garbage and we can type properly";
+        let mut agent = open_file_backed_plan();
+        let focused = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(focused, InputOutcome::Changed),
+            "Tab focuses the plan revision box; got {focused:?}"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("focusing the revision box must not approve the plan");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+        assert!(
+            !agent.plan_decision_resolved && !agent.plan_approved_implement,
+            "the plan is not approved before typing"
+        );
+
+        for ch in sentence.chars() {
+            let outcome = agent.handle_input(
+                &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &ActionRegistry::defaults(),
+            );
+            assert!(
+                matches!(outcome, InputOutcome::Changed),
+                "the letter {ch:?} must insert once, not approve; got {outcome:?}"
+            );
+            assert!(
+                agent.plan_approval_view.is_some()
+                    && !agent.plan_decision_resolved
+                    && !agent.plan_approved_implement,
+                "the letter {ch:?} must not approve the plan"
+            );
+        }
+
+        let box_text = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            box_text, sentence,
+            "the revision box text must equal the typed sentence, with each character once and in order, and must not mix in Type a revision..."
+        );
+        assert!(
+            !box_text.contains("Type a revision"),
+            "the placeholder Type a revision... must not be mixed into the typed text; got {box_text:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some()
+                && !agent.plan_decision_resolved
+                && !agent.plan_approved_implement,
+            "typing the sentence, including the letter a, must not approve the plan"
         );
     }
 

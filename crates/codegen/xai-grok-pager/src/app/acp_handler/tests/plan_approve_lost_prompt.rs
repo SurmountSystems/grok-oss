@@ -650,7 +650,7 @@ fn isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with
         // `feedback_draft`, so click Approve consumed nothing.
         agent.prompt.set_text(HUMAN_BOX_PROMPT);
         if let Some(pav) = agent.plan_approval_view.as_mut() {
-            pav.feedback_draft = None;
+            pav.feedback_draft.set_text("");
             pav.focus = PlanApprovalFocus::Preview;
             pav.prompt_intent = PlanPromptIntent::Revise;
         }
@@ -716,7 +716,7 @@ fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
         agent.prompt.set_text("");
         if let Some(pav) = agent.plan_approval_view.as_mut() {
             pav.focus = PlanApprovalFocus::Preview;
-            pav.feedback_draft = None;
+            pav.feedback_draft.set_text("");
         }
     }
     let empty = app.handle_input(&Event::Key(KeyEvent::new(
@@ -758,7 +758,7 @@ fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
         if let Some(pav) = agent.plan_approval_view.as_mut() {
             pav.focus = PlanApprovalFocus::Preview;
             pav.prompt_intent = PlanPromptIntent::Revise;
-            pav.feedback_draft = None;
+            pav.feedback_draft.set_text("");
         }
         agent.prompt.set_text(HUMAN_BOX_PROMPT);
     }

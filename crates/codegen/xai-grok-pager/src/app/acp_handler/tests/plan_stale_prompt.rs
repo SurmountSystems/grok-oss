@@ -769,7 +769,7 @@ fn revise_re_present_does_not_resurrect_prompt_already_in_chat_history() {
             .insert(0, HUMAN_TURN.to_string());
         agent.prompt.set_text("");
         if let Some(pav) = agent.plan_approval_view.as_mut() {
-            pav.feedback_draft = Some(HUMAN_TURN.to_string());
+            pav.feedback_draft.set_text(HUMAN_TURN);
         }
     }
     write_session_chat_history(

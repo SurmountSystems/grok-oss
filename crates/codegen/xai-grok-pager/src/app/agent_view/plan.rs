@@ -59,10 +59,11 @@ impl AgentView {
     /// approve / revise / clarify can drain it on the same multimodal path as
     /// a pasted screenshot. Returns true if a chip was inserted.
     ///
-    /// The plan body also receives the stdout of the first `tesseract` on
-    /// PATH for this image path. That text is not an image description. When
-    /// that binary cannot be started, the plan body says that tesseract is
-    /// missing. The image chip stays.
+    /// The plan body also receives tesseract stdout for this image path.
+    /// `GROK_TESSERACT_BIN` is that binary when set. Otherwise the first
+    /// `tesseract` on PATH is used. That text is not an image description.
+    /// When that binary cannot be started, the plan body says that tesseract
+    /// is missing. The image chip stays.
     ///
     /// No-op when plan approval is not open, the path is not a readable image,
     /// or the prompt rejects the insert (policy / capacity). Callers still
@@ -675,10 +676,10 @@ impl AgentView {
             return;
         }
         if text.trim().is_empty() {
-            pav.feedback_draft = None;
+            pav.feedback_draft.set_text("");
             return;
         }
-        pav.feedback_draft = Some(text.to_string());
+        pav.feedback_draft.set_text(text);
     }
 
     /// Put the Revise / Comment snapshot back when `/view-plan` or pane
@@ -687,7 +688,7 @@ impl AgentView {
         let Some(draft) = self
             .plan_approval_view
             .as_ref()
-            .and_then(|pav| pav.feedback_draft.clone())
+            .map(|pav| pav.feedback_draft.text().to_string())
             .filter(|d| !d.trim().is_empty())
         else {
             return;
@@ -704,9 +705,9 @@ impl AgentView {
             return;
         }
         if let Some(pav) = self.plan_approval_view.as_mut() {
-            let leftover = pav.feedback_draft.as_deref().map(str::trim).unwrap_or("");
-            if leftover == sent {
-                pav.feedback_draft = None;
+            let leftover = pav.feedback_draft.text().trim();
+            if !leftover.is_empty() && leftover == sent {
+                pav.feedback_draft.set_text("");
             }
         }
         self.persist_unsent_composer_draft_now();
@@ -1361,6 +1362,19 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
+        // Click Approve is not the Revise box. A present parks with
+        // `prompt_intent` still Revise, the default, and `feedback_draft`
+        // is always a `PromptWidget` (blank text is not `Option::None`).
+        // Leaving Revise in place on a click never calls `send_approved`,
+        // so the live `exit_plan_mode` oneshot stays empty. The click sets
+        // ApproveNotes. Empty Enter still returns Changed below and does
+        // not call `send_approved`. Non-empty Enter already chose Approve.
+        if !from_enter
+            && let Some(pav) = self.plan_approval_view.as_mut()
+            && pav.prompt_intent == PlanPromptIntent::Revise
+        {
+            pav.prompt_intent = PlanPromptIntent::ApproveNotes;
+        }
         let post_turn = self
             .plan_approval_view
             .as_ref()
@@ -1386,9 +1400,8 @@ impl AgentView {
         // notes typed on this present still wraps them.
         let carried_revise = pav.keep_draft_is_next_operator_turn
             && typed.as_deref().is_some_and(|text| {
-                pav.feedback_draft
-                    .as_deref()
-                    .is_some_and(|draft| draft.trim() == text.trim())
+                let draft = pav.feedback_draft.text().trim();
+                !draft.is_empty() && draft == text.trim()
             });
         let already_submitted = typed
             .as_deref()
@@ -1412,7 +1425,6 @@ impl AgentView {
         };
         let prompt_focus = pav.focus == PlanApprovalFocus::Prompt;
         let prompt_intent = pav.prompt_intent;
-        let held_comment = pav.comment_held_from_enter;
         // Reopen freeform is not the Revise-box snapshot `carried_revise`
         // already dropped. That snapshot must not become review notes.
         let reopen_freeform = pav.keep_draft_is_next_operator_turn && freeform.is_some();
@@ -1423,6 +1435,23 @@ impl AgentView {
             .iter()
             .any(|element| element.kind == crate::views::prompt_widget::KIND_PASTE);
         let pane_open = self.is_plan_viewer();
+        // Empty Revise returns Changed and does not call `send_approved`.
+        // Non-empty Enter already chose Approve (`approve_plan_from_enter`).
+        // That Enter must not call `send_plan_feedback` and must not return
+        // Changed here, or the notes never reach the approval below. Click
+        // Approve already set ApproveNotes, so this block is the Enter path.
+        // `send_approved` is what the shell turns into
+        // "The user approved the plan. Implement the plan in plan.md."
+        if prompt_intent == PlanPromptIntent::Revise {
+            let notes = freeform.clone().filter(|text| !text.trim().is_empty());
+            let enter_approve_with_notes = from_enter && notes.is_some();
+            if !enter_approve_with_notes {
+                if notes.is_some() || review_comments.is_some() {
+                    return self.send_plan_feedback(notes);
+                }
+                return InputOutcome::Changed;
+            }
+        }
         // Local idle decision is not a post-turn ExecutePlan. It has no
         // waiter, so Approve starts the implement turn (SendPromptNow when
         // the composer holds a chip).
@@ -1463,27 +1492,38 @@ impl AgentView {
         let Some(mut pav) = self.unmount_plan_review() else {
             return InputOutcome::Changed;
         };
-        // A live waiter takes the verdict here. Idle has no waiter, so the
-        // implement turn starts below.
-        // Click Approve of typed notes stays Changed. Those notes ride the
-        // approval (ACP feedback plus a UserPrompt row) and must not
-        // Interject. A paste chip Approves with comment as Interject and
-        // must not emit SendInterject. Enter on an open Isolated Preview
-        // with notes is that Interject. Enter on a vanished pane stays
-        // Changed. Letter `a` on the Revise box with comments or freeform
-        // Interjects. Reopen freeform that is not a carried Revise snapshot
-        // Interjects. Comment-intent click stays Changed. Empty Enter does
-        // not reach this function.
+        // Empty Revise returned above and did not call `send_approved`.
+        // Non-empty Enter falls through and does. A live waiter takes the
+        // verdict here. Idle has no waiter, so the implement turn starts
+        // below when `send_approved` returns false.
+        // Click Approve on an already-open pane stays Changed. Those notes
+        // still ride the approval as a UserPrompt row. Reopen freeform is
+        // notes typed while the pane was shut. `reopen_plan_approval` docks
+        // the preview again, and that Approve still Interjects. A paste chip
+        // on a click still Interjects and must not emit SendInterject. Enter
+        // on an open pane with notes Interjects. Enter on a vanished pane
+        // stays Changed and still pushes the UserPrompt row. Approve of the
+        // revision box when the pane is shut still Interjects those notes.
+        // Empty Enter does not reach this function. A typed letter does not
+        // reach this function.
         let enter_lands_notes = from_enter && review_comments.is_some();
         let click_lands_notes = !from_enter && review_comments.is_some();
+        let prompt_box_click_notes = !from_enter
+            && prompt_focus
+            && freeform.is_some()
+            && prompt_intent == PlanPromptIntent::ApproveNotes;
+        // The painted Approve control on an already-open pane is not an
+        // Interject. Reopen freeform is the exception, because the preview
+        // docks again before Approve. A paste chip is the other exception.
+        // Enter with notes on an open pane still is. The revision box with
+        // the pane shut still is.
+        let open_pane_click = !from_enter && pane_open && !paste_chip && !reopen_freeform;
         let returns_interject = review_comments.is_some()
+            && !open_pane_click
             && (paste_chip
                 || (from_enter && pane_open)
-                || (!from_enter
-                    && prompt_focus
-                    && prompt_intent == PlanPromptIntent::Revise
-                    && !held_comment)
-                || (!from_enter && reopen_freeform));
+                || (!from_enter && reopen_freeform)
+                || prompt_box_click_notes);
         let sent = pav.send_approved(review_comments.clone());
         self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
         self.plan_decision_resolved = true;
@@ -1491,9 +1531,11 @@ impl AgentView {
         self.persist_plan_decision_resolved_flag(true);
         if sent {
             // Notes ride the approval as a UserPrompt row. Interject is a
-            // separate gesture (paste chip, Enter on an open pane, Revise-box
-            // letter `a`, reopen freeform). Click Approve of newly typed
-            // notes stays Changed and must not Interject. A restored draft
+            // paste chip, Enter on an open pane, reopen freeform after the
+            // preview docks again, or the revision box with the pane shut.
+            // A click on Approve while the pane was already open, and the
+            // notes are not that reopen freeform, stays Changed and must
+            // not Interject. A restored draft
             // that was already submitted is not those notes: bare side-panel
             // Approve sends the implement sentence. A bare Approve of the
             // secondary soft plan with an empty composer does too. A bare
@@ -1828,7 +1870,7 @@ impl AgentView {
         }
         if post_turn && to_send.as_deref().is_none_or(|text| text.trim().is_empty()) {
             self.plan_approval_view = Some(pav);
-            self.show_toast("Type revision notes, or press a to approve.");
+            self.show_toast("Type revision notes. Approve is the button.");
             return InputOutcome::Changed;
         }
         // The view was taken above, so is_post_turn_build_starting() is false
@@ -2014,7 +2056,7 @@ impl AgentView {
         let stashed = if let Some(ref mut pav) = self.plan_approval_view {
             pav.commenting_range = None;
             pav.editing_comment_id = None;
-            pav.stashed_feedback_prompt.take()
+            pav.take_stashed_feedback()
         } else {
             None
         };
@@ -2131,6 +2173,66 @@ impl AgentView {
             }
             _ => {}
         }
+        InputOutcome::Changed
+    }
+
+    /// File-backed Revise prompt with the in-panel box open. Idle Preview
+    /// is not this. A typed `a` in the planning composer is the letter a.
+    fn file_backed_revision_box_is_focused(&self) -> bool {
+        self.line_viewer.is_some()
+            && self.plan_approval_view.as_ref().is_some_and(|pav| {
+                pav.source == PlanReviewSource::FileBacked
+                    && pav.focus == PlanApprovalFocus::Prompt
+                    && pav.prompt_intent == PlanPromptIntent::Revise
+            })
+    }
+
+    /// Printable keys and Backspace while that box is focused. Enter, Esc,
+    /// and Tab stay on the plan prompt path.
+    fn revision_box_owns_typed_key(&self, key: &KeyEvent) -> bool {
+        if !self.file_backed_revision_box_is_focused() {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => {
+                key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+            }
+            KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Insert one character, in order, into the revision box. `a` is the
+    /// letter a. The paint-only placeholder is not part of the draft.
+    fn edit_focused_plan_revision_box(&mut self, key: &KeyEvent) -> InputOutcome {
+        let synced = {
+            let Some(viewer) = self.line_viewer.as_mut() else {
+                return InputOutcome::Changed;
+            };
+            let text = &mut viewer.plan_mut().revision_prompt_text;
+            if text == "Type a revision..." {
+                text.clear();
+            }
+            match key.code {
+                KeyCode::Char(ch) if !ch.is_control() => {
+                    let ch = if key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                        && ch.is_ascii_lowercase()
+                    {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    };
+                    text.push(ch);
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    text.pop();
+                }
+                _ => {}
+            }
+            text.clone()
+        };
+        self.prompt.set_text(&synced);
+        self.prompt.set_cursor(synced.len());
         InputOutcome::Changed
     }
 
@@ -2259,16 +2361,15 @@ impl AgentView {
         if self.selected_comment_cta_owns_typed_key(key) {
             return self.edit_selected_plan_comment_field(key);
         }
-        // Preview types `a`. Empty Prompt (revision notes) still Approves.
-        if !is_commenting
-            && !preview_focused
-            && key.code == KeyCode::Char('a')
-            && key.modifiers.is_empty()
-            && self.prompt.text_without_image_chips().trim().is_empty()
-            && !self.prompt.file_search_visible()
-        {
-            return self.approve_plan();
+        // The in-panel revision box is focused. Each typed character,
+        // including `a`, is inserted once. It does not Approve.
+        if self.revision_box_owns_typed_key(key) {
+            return self.edit_focused_plan_revision_box(key);
         }
+        // The planning composer is the same PromptWidget as the L1 box.
+        // A typed `a` is the letter a, once, including when the prompt is
+        // empty. It is not an approve hotkey and does not call
+        // `approve_plan` / `send_approved`.
         let allow_newlines = crate::appearance::cache::load_composer_multiline();
         // Isolated Preview idle plus a non-empty Operator paste plus Enter
         // Approves with those notes. That submit wins over Session Multiline
@@ -2370,7 +2471,7 @@ impl AgentView {
                         return InputOutcome::Action(Action::SendPrompt(text));
                     }
                     if freeform_text.trim().is_empty() && !has_comments {
-                        self.show_toast("Type revision notes, or press a to approve.");
+                        self.show_toast("Type revision notes. Approve is the button.");
                         return InputOutcome::Changed;
                     }
                     // A shut panel with text in the composer sends the prompt.
@@ -2461,8 +2562,9 @@ impl AgentView {
             {
                 let comment_text = comment.text.clone();
                 let comment_range = comment.line_range.clone();
-                if pav.stashed_feedback_prompt.is_none() {
-                    pav.stashed_feedback_prompt = Some(self.prompt.stash());
+                if pav.stashed_feedback_is_absent() {
+                    let stashed = self.prompt.stash();
+                    pav.store_stashed_feedback(stashed);
                 }
                 pav.editing_comment_id = Some(comment_id);
                 pav.commenting_range = Some(comment_range);
@@ -2489,8 +2591,9 @@ impl AgentView {
             }
         }
         if let Some(ref mut pav) = self.plan_approval_view {
-            if pav.stashed_feedback_prompt.is_none() {
-                pav.stashed_feedback_prompt = Some(self.prompt.stash());
+            if pav.stashed_feedback_is_absent() {
+                let stashed = self.prompt.stash();
+                pav.store_stashed_feedback(stashed);
             }
             pav.commenting_range = Some(range);
             pav.editing_comment_id = None;
@@ -2534,7 +2637,7 @@ impl AgentView {
         // Keep chips attached during the comment draft. Restore / set_text
         // would drop them otherwise.
         let kept_images = self.prompt.drain_images();
-        if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+        if let Some(stashed) = pav.take_stashed_feedback() {
             self.prompt.restore(stashed);
         } else {
             self.prompt.set_text("");
@@ -3004,7 +3107,7 @@ mod plan_approval_enter_tests {
         );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Type revision notes, or press a to approve.")
+            Some("Type revision notes. Approve is the button.")
         );
     }
     #[test]
@@ -3153,19 +3256,25 @@ mod plan_approval_enter_tests {
         );
     }
     #[test]
-    fn a_on_empty_revise_prompt_approves() {
+    fn a_on_empty_revise_prompt_types_the_letter() {
         let mut agent = agent_with_revise_prompt();
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.plan_approval_view.is_none(), "`a` must approve");
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty-prompt `a` on the planning composer must type, not Approve"
+        );
+        assert!(!agent.plan_approved_implement);
+        assert!(!agent.plan_decision_resolved);
+        assert_eq!(agent.prompt.text(), "a");
         assert_ne!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
         );
     }
     #[test]
-    fn a_with_pending_comments_and_empty_freeform_approves() {
+    fn a_with_pending_comments_and_empty_freeform_types_the_letter() {
         let mut agent = agent_with_revise_prompt();
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.comments.push(PlanComment {
@@ -3177,13 +3286,11 @@ mod plan_approval_enter_tests {
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
         assert!(
-            agent.plan_approval_view.is_none(),
-            "empty freeform + comments: `a` must approve with comments"
+            agent.plan_approval_view.is_some() && !agent.plan_approved_implement,
+            "empty freeform + comments: `a` must stay the letter a"
         );
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::Interject { .. })
-        ));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), "a");
     }
     #[test]
     fn a_with_nonempty_freeform_types_letter() {
@@ -3203,7 +3310,8 @@ mod plan_approval_enter_tests {
         let mut agent = agent_with_revise_prompt();
         agent.prompt.set_text("keep my freeform notes");
         if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.stashed_feedback_prompt = Some(agent.prompt.stash());
+            let stashed = agent.prompt.stash();
+            pav.store_stashed_feedback(stashed);
             pav.commenting_range = Some(0..1);
             pav.focus = PlanApprovalFocus::Commenting;
         }
@@ -3226,7 +3334,8 @@ mod plan_approval_enter_tests {
                 line_range: 0..1,
                 text: "keep me".into(),
             });
-            pav.stashed_feedback_prompt = Some(agent.prompt.stash());
+            let stashed = agent.prompt.stash();
+            pav.store_stashed_feedback(stashed);
             pav.editing_comment_id = Some(7);
             pav.commenting_range = Some(0..1);
             pav.focus = PlanApprovalFocus::Commenting;
@@ -3558,13 +3667,18 @@ mod plan_approval_enter_tests {
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
         assert!(
-            agent.plan_approval_view.is_none(),
-            "image-only freeform: `a` must approve (not type the letter)"
+            agent.plan_approval_view.is_some() && !agent.plan_approved_implement,
+            "image-only freeform: `a` must type the letter, not Approve"
         );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
+            agent.prompt.text().contains('a'),
+            "the letter a must be inserted once, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
             agent.prompt.text().contains("[Image #1]"),
-            "freeform image folds into restored session draft"
+            "the image chip stays in the planning composer"
         );
     }
     #[test]
@@ -3594,7 +3708,7 @@ mod plan_approval_enter_tests {
         );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Type revision notes, or press a to approve.")
+            Some("Type revision notes. Approve is the button.")
         );
     }
     #[test]
@@ -3705,7 +3819,7 @@ mod plan_approval_enter_tests {
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.focus = PlanApprovalFocus::Commenting;
             pav.commenting_range = Some(0..1);
-            pav.stashed_feedback_prompt = Some(stashed_text("notes"));
+            pav.store_stashed_feedback(stashed_text("notes"));
         }
         agent.prompt.set_text("/feedback x");
         let outcome = agent.approve_plan();
@@ -4635,7 +4749,7 @@ mod plan_approval_optimistic_mode_tests {
         );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Type revision notes, or press a to approve.")
+            Some("Type revision notes. Approve is the button.")
         );
         assert!(agent.kept_plan.is_kept());
     }

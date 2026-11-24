@@ -5,7 +5,7 @@ pub use xai_grok_tools::implementations::grok_build::exit_plan_mode::{
     ExitPlanModeExtRequest, ExitPlanModeExtResponse,
 };
 
-use crate::views::prompt_widget::StashedPrompt;
+use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 
 /// Placeholder body for the plan-approval preview when `exit_plan_mode` parks with no plan content.
 /// No content means a missing/empty `plan.md`, or a whitespace-only body. Must be non-empty after
@@ -225,10 +225,17 @@ pub struct PlanApprovalViewState {
     pub editing_comment_id: Option<u64>,
     pub commenting_range: Option<std::ops::Range<usize>>,
 
-    pub stashed_feedback_prompt: Option<StashedPrompt>,
-    /// Last non-slash Revise / Comment box text. Survives `/view-plan`,
-    /// pane close, and resume replace. Not the pre-panel agent-prompt stash.
-    pub feedback_draft: Option<String>,
+    /// Composer saved while a line comment is open. Same widget as
+    /// `AgentView.prompt`. Empty text is not "no stash": `stashed_feedback_held`
+    /// is that flag, so a blank composer is not replaced by a later comment.
+    pub stashed_feedback_prompt: PromptWidget,
+    /// Set when `stashed_feedback_prompt` holds the composer, including
+    /// a blank one. Not a second character buffer.
+    pub stashed_feedback_held: bool,
+    /// Last non-slash Revise / Comment box. Same `PromptWidget` as the L1
+    /// composer. Text is inserted with `PromptWidget::set_text`, not a
+    /// side `String`. Survives `/view-plan`, pane close, and resume replace.
+    pub feedback_draft: PromptWidget,
     /// Comment CTA Enter already stashed this compose for ride-Approve.
     /// Keystroke snapshots also write `feedback_draft`; they must not count
     /// as that Enter. A later matching Enter still SendPrompt.
@@ -278,8 +285,9 @@ impl PlanApprovalViewState {
             next_comment_id: 0,
             editing_comment_id: None,
             commenting_range: None,
-            stashed_feedback_prompt: None,
-            feedback_draft: None,
+            stashed_feedback_prompt: PromptWidget::new(),
+            stashed_feedback_held: false,
+            feedback_draft: PromptWidget::new(),
             comment_held_from_enter: false,
             keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: false,
@@ -307,8 +315,9 @@ impl PlanApprovalViewState {
             next_comment_id: 0,
             editing_comment_id: None,
             commenting_range: None,
-            stashed_feedback_prompt: None,
-            feedback_draft: None,
+            stashed_feedback_prompt: PromptWidget::new(),
+            stashed_feedback_held: false,
+            feedback_draft: PromptWidget::new(),
             comment_held_from_enter: false,
             keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: false,
@@ -335,12 +344,55 @@ impl PlanApprovalViewState {
             next_comment_id: 0,
             editing_comment_id: None,
             commenting_range: None,
-            stashed_feedback_prompt: None,
-            feedback_draft: None,
+            stashed_feedback_prompt: PromptWidget::new(),
+            stashed_feedback_held: false,
+            feedback_draft: PromptWidget::new(),
             comment_held_from_enter: false,
             keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: true,
         }
+    }
+
+    /// Install planning notes with the L1 composer method (`set_text`).
+    /// One write. The letter a stays the letter a. Empty clears the widget.
+    pub fn set_feedback_draft_text(&mut self, text: &str) {
+        self.feedback_draft.set_text(text);
+    }
+
+    /// Non-empty draft text, or `None` when the widget is blank.
+    /// Blank matches the old `Option::None` snapshot.
+    pub fn feedback_draft_nonempty(&self) -> Option<&str> {
+        let text = self.feedback_draft.text();
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Move `stashed` into the planning widget. Marks the stash held even
+    /// when the composer text is empty.
+    pub fn store_stashed_feedback(&mut self, stashed: StashedPrompt) {
+        self.stashed_feedback_prompt.restore(stashed);
+        self.stashed_feedback_held = true;
+    }
+
+    /// True when commenting has not yet saved the composer here.
+    pub fn stashed_feedback_is_absent(&self) -> bool {
+        !self.stashed_feedback_held
+    }
+
+    /// Take the held composer back. `None` when nothing was stored.
+    /// The widget is cleared with `set_text` after `stash`, so the text
+    /// lives in the returned snapshot, not in a side buffer.
+    pub fn take_stashed_feedback(&mut self) -> Option<StashedPrompt> {
+        if !self.stashed_feedback_held {
+            return None;
+        }
+        self.stashed_feedback_held = false;
+        let taken = self.stashed_feedback_prompt.stash();
+        self.stashed_feedback_prompt.set_text("");
+        Some(taken)
     }
 
     pub fn format_feedback(&self, freeform: Option<&str>) -> String {
@@ -685,8 +737,9 @@ mod tests {
         assert_eq!(state.next_comment_id, 0);
         assert!(state.editing_comment_id.is_none());
         assert!(state.commenting_range.is_none());
-        assert!(state.stashed_feedback_prompt.is_none());
-        assert!(state.feedback_draft.is_none());
+        assert!(!state.stashed_feedback_held);
+        assert!(state.stashed_feedback_prompt.text().is_empty());
+        assert!(state.feedback_draft.text().is_empty());
     }
 
     fn make_empty_plan_state() -> (

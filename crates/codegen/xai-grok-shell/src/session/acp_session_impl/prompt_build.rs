@@ -933,11 +933,18 @@ impl SessionActor {
                 let stub = crate::session::image_describe::fail_open_image_description(
                     &crate::session::image_describe::DescribeError::Sampling(format!("{e}")),
                 );
-                return Ok(crate::session::image_describe::render_image_user_message(
+                let mut rendered = crate::session::image_describe::render_image_user_message(
                     &stub,
                     &image_paths,
                     &original_user_message,
-                ));
+                );
+                for persisted in &persisted {
+                    crate::session::plan_image_tesseract::append_ocr_picture_text(
+                        &mut rendered,
+                        &persisted.path,
+                    );
+                }
+                return Ok(rendered);
             }
         };
         let model = &describe_model;
@@ -954,8 +961,13 @@ impl SessionActor {
         }
         let mut description_parts = Vec::with_capacity(persisted.len());
         for (i, p) in persisted.iter().enumerate() {
-            let part = if i < skip_count {
-                crate::session::image_describe::SKIPPED_IMAGE_MARKER.to_owned()
+            let (vision, ocr_text) = if i < skip_count {
+                let shown =
+                    crate::session::plan_image_tesseract::show_image_with_tesseract(&p.path);
+                (
+                    crate::session::image_describe::SKIPPED_IMAGE_MARKER.to_owned(),
+                    shown.ocr_text,
+                )
             } else {
                 match self
                     .image_describe_cache
@@ -968,10 +980,11 @@ impl SessionActor {
                         &current_query,
                         crate::session::image_describe::ImageDescribeSource::UserAttachment,
                         "",
+                        &p.path,
                     )
                     .await
                 {
-                    Ok(part) => part,
+                    Ok(got) => (got.description, got.ocr_text),
                     Err(e) => {
                         if crate::session::image_describe::describe_error_aborts_human_turn(&e) {
                             return Err(acp::Error::internal_error()
@@ -981,9 +994,22 @@ impl SessionActor {
                             error = %e,
                             "image describe failed; fail-open so the Human turn continues"
                         );
-                        crate::session::image_describe::fail_open_image_description(&e)
+                        let shown = crate::session::plan_image_tesseract::show_image_with_tesseract(
+                            &p.path,
+                        );
+                        (
+                            crate::session::image_describe::fail_open_image_description(&e),
+                            shown.ocr_text,
+                        )
                     }
                 }
+            };
+            let quoted =
+                crate::session::plan_image_tesseract::picture_text_quoting_ocr(&ocr_text, &vision);
+            let part = if quoted.is_empty() {
+                vision
+            } else {
+                format!("{quoted}\n\n{vision}")
             };
             if persisted.len() > 1 {
                 description_parts.push(format!("Image {}: {}", i + 1, part));

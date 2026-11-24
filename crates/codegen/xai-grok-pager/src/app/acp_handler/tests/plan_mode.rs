@@ -589,8 +589,8 @@
                 .expect("restore must park the live waiter");
             assert_eq!(pav.focus, PlanApprovalFocus::Preview);
             assert_eq!(
-                pav.feedback_draft.as_deref(),
-                Some("please add auth middleware")
+                pav.feedback_draft.text(),
+                "please add auth middleware"
             );
             let outcome = agent.approve_plan();
             assert_eq!(
@@ -1555,7 +1555,7 @@
     }
 
     /// Empty composer after present: printable letters still go to the
-    /// composer (non-capturing side panel). Empty-prompt `a` still Approves.
+    /// composer (non-capturing side panel). Empty-prompt `a` types the letter a.
     #[test]
     fn exit_plan_mode_empty_present_printable_goes_to_composer() {
         use crate::actions::ActionRegistry;
