@@ -1407,6 +1407,16 @@ impl SessionActor {
                     research_runtime_message,
                     ..
                 } => {
+                    let progress_len = self.goal_plan.lock().progress_items().len();
+                    let pauses_for_this_miss = match &research_runtime_message {
+                        Some(message) => {
+                            crate::session::goal_planner::research_window_miss_pauses_goal(
+                                message,
+                                progress_len,
+                            )
+                        }
+                        None => true,
+                    };
                     // History reads "Planning failed" + "Paused: planner", not a bare pause.
                     {
                         let mut tracker = self.goal_tracker.lock();
@@ -1419,19 +1429,21 @@ impl SessionActor {
                             );
                         }
                     }
-                    let pause_message = match research_runtime_message {
-                        Some(runtime_message) => {
-                            research_role_runtime_pause_message(&runtime_message)
-                        }
-                        None => planner_failure_pause_message(),
-                    };
-                    let _ = self
-                        .auto_pause_goal_if_matches_with_message(
-                            &goal_id,
-                            crate::session::goal_tracker::GoalPauseReason::Planner,
-                            pause_message,
-                        )
-                        .await;
+                    if pauses_for_this_miss {
+                        let pause_message = match research_runtime_message {
+                            Some(runtime_message) => {
+                                research_role_runtime_pause_message(&runtime_message)
+                            }
+                            None => planner_failure_pause_message(),
+                        };
+                        let _ = self
+                            .auto_pause_goal_if_matches_with_message(
+                                &goal_id,
+                                crate::session::goal_tracker::GoalPauseReason::Planner,
+                                pause_message,
+                            )
+                            .await;
+                    }
                 }
                 crate::session::goal_planner::GoalPlannerOutcome::ResearchSessionReplaced {
                     note,
@@ -1597,6 +1609,17 @@ impl SessionActor {
             });
 
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        {
+            let mut tracker = self.goal_tracker.lock();
+            tracker.set_current_subagent(
+                None,
+                Some(
+                    crate::session::goal_planner::GoalCreationRole::Research
+                        .description()
+                        .to_string(),
+                ),
+            );
+        }
         self.emit_goal_planning(current_tokens);
 
         let outcome = crate::session::goal_planner::run_goal_planner(
@@ -1613,6 +1636,8 @@ impl SessionActor {
             &|e| self.events.emit(e),
         )
         .await;
+
+        self.goal_tracker.lock().set_current_subagent(None, None);
 
         // Seal the planner's synthetic `task` pair into its own harness trace turn so it uploads as a sibling `turn_{N}` artifact
         // The planner is represented by its own turn. No-op when the spawn recorded nothing.

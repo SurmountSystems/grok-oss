@@ -74,15 +74,34 @@ pub(super) fn parent_or_nested_tool_image_part(saved: &Path, parent: bool) -> Op
     }
 }
 
+/// OCR for image bytes the model still receives when the session images dir cannot be written.
+/// Writes a scratch file, reads it with the shared tesseract helper, then deletes the scratch file.
+/// A binary that cannot start yields `tesseract is missing`. This does not invent picture text.
+pub(super) fn ocr_text_for_unsaved_image(mime: &str, data: &str) -> String {
+    let scratch = std::env::temp_dir().join(format!(
+        "grok-ocr-scratch-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let Some(saved) = persist_extracted_tool_image(mime, data, &scratch) else {
+        return crate::session::plan_image_tesseract::TESSERACT_MISSING.to_owned();
+    };
+    let shown = crate::session::plan_image_tesseract::show_image_with_tesseract(&saved);
+    let _ = std::fs::remove_dir_all(&scratch);
+    shown.ocr_text
+}
+
 /// User reminder naming the saved file. Parent items carry no image part and no data URL.
+/// Tesseract stdout is included. A nested turn still attaches the image.
 pub(super) fn extracted_image_followup(
     saved: &Path,
     parent: bool,
 ) -> xai_grok_sampling_types::ConversationItem {
-    let text = format!(
+    let mut text = format!(
         "[Image extracted from tool result above]\nSaved to {}",
         saved.display()
     );
+    crate::session::plan_image_tesseract::append_ocr_picture_text(&mut text, saved);
     let mut item = xai_grok_sampling_types::ConversationItem::user(text);
     if let Some(ContentPart::Image { url }) = parent_or_nested_tool_image_part(saved, parent) {
         item.add_image(url.to_string());

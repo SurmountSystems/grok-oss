@@ -489,7 +489,7 @@ pub(crate) async fn run_goal_planner(
             tracing::info!(
                 "goal planner: research role sampling window overflow; starting a new research session"
             );
-            let replacement_prompt = goal_creation_prompt(
+            let replacement_rendered = goal_creation_prompt(
                 GOAL_RESEARCH_PROMPT_TEMPLATE,
                 &[("{RESEARCH_FILE}", research_file_str.as_ref())],
                 inputs.tool_names,
@@ -497,6 +497,19 @@ pub(crate) async fn run_goal_planner(
                 inputs.objective,
                 inputs.context,
             );
+            let Some(replacement_prompt) =
+                fit_role_rendered_research_prompt(replacement_rendered, inputs.objective)
+            else {
+                tracing::info!(
+                    "goal planner: replacement research request is not under the research role's 200000-token window; not sending"
+                );
+                return GoalPlannerOutcome::ResearchSessionReplaced {
+                    note: format!(
+                        "The research role filled its sampling window ({} tokens). The replacement request was not sent.",
+                        crate::util::config::NESTED_SESSION_CONTEXT_CAP
+                    ),
+                };
+            };
             research_result =
                 spawn_goal_creation_role(&spawner, GoalCreationRole::Research, replacement_prompt)
                     .await;
@@ -844,6 +857,92 @@ fn research_role_sampling_window_overflow(message: &str) -> bool {
 const RESEARCH_ROLE_SAMPLING_WINDOW_HOST_NOTE: &str =
     "The research role filled its sampling window. A new research session was started.";
 
+/// Operator sentence a reduced research request must still carry.
+const RESEARCH_REQUEST_OPERATOR_SENTENCE: &str =
+    "now run just deploy-dry-run and fix all the errors in a complete way";
+
+/// Bytes/4 estimate shared with the sampling window. Does not read or write the main session.
+pub(crate) fn estimate_tokens(text: &str) -> u64 {
+    xai_token_estimation::estimate_tokens(text)
+}
+
+fn research_request_under_nested_cap(text: &str) -> bool {
+    estimate_tokens(text) < crate::util::config::NESTED_SESSION_CONTEXT_CAP
+}
+
+/// Drop the CONTEXT section. The objective, including the operator sentence, stays above it.
+fn research_prompt_without_context(prompt: &str) -> String {
+    match prompt.rfind("\n\nCONTEXT:\n") {
+        Some(idx) => prompt[..idx].to_string(),
+        None => prompt.to_string(),
+    }
+}
+
+fn minimum_research_request(objective: &str) -> Option<String> {
+    if !objective.contains(RESEARCH_REQUEST_OPERATOR_SENTENCE) {
+        return None;
+    }
+    Some(format!(
+        "OBJECTIVE:\n{RESEARCH_REQUEST_OPERATOR_SENTENCE}\n"
+    ))
+}
+
+/// Fit one rendered research prompt under the research role's 200000-token window.
+/// Context is dropped before the operator sentence. If that sentence plus the
+/// minimum wrapper still cannot fit, the request is not sent.
+fn fit_rendered_research_prompt(prompt: &str, objective: &str) -> Option<String> {
+    if research_request_under_nested_cap(prompt) {
+        return Some(prompt.to_string());
+    }
+    let dropped = research_prompt_without_context(prompt);
+    if research_request_under_nested_cap(&dropped)
+        && dropped.contains(RESEARCH_REQUEST_OPERATOR_SENTENCE)
+    {
+        return Some(dropped);
+    }
+    let minimum = minimum_research_request(objective)?;
+    if research_request_under_nested_cap(&minimum) {
+        Some(minimum)
+    } else {
+        None
+    }
+}
+
+fn fit_role_rendered_research_prompt(
+    prompt: RoleRenderedPrompt,
+    objective: &str,
+) -> Option<RoleRenderedPrompt> {
+    let primary = fit_rendered_research_prompt(&prompt.primary, objective)?;
+    let fallback = fit_rendered_research_prompt(&prompt.fallback, objective)?;
+    Some(RoleRenderedPrompt { primary, fallback })
+}
+
+/// Replacement research prompt. `None` means it is not under 200000 tokens and must not be sent.
+/// This does not compact the main session and does not change the main session's used-token count.
+pub(crate) fn replacement_research_request(
+    template: &str,
+    research_file: &str,
+    tool_names: &RoleToolNames,
+    inherit_tool_names: &RoleToolNames,
+    objective: &str,
+    context: &str,
+) -> Option<String> {
+    let rendered = goal_creation_prompt(
+        template,
+        &[("{RESEARCH_FILE}", research_file)],
+        tool_names,
+        inherit_tool_names,
+        objective,
+        context,
+    );
+    fit_role_rendered_research_prompt(rendered, objective).map(|prompt| prompt.primary)
+}
+
+/// A research-window miss does not pause a goal that already has progress items.
+pub(crate) fn research_window_miss_pauses_goal(message: &str, progress_len: usize) -> bool {
+    !(research_role_sampling_window_overflow(message) && progress_len > 0)
+}
+
 /// Nested once-run writer turn errors are `Session error: {detail}`. Match the
 /// sampler line and the pager chrome headline (`Stopped: repeating sentence`).
 fn spawn_error_is_repeating_sentence_stop(message: &str) -> bool {
@@ -939,6 +1038,10 @@ fn record_fail_closed_with_research_runtime(
 }
 
 // Tests
+
+#[cfg(test)]
+#[path = "goal_planner_research_request_tests.rs"]
+mod goal_planner_research_request_tests;
 
 #[cfg(test)]
 mod tests {

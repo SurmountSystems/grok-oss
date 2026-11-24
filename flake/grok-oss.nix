@@ -70,6 +70,11 @@ let
       darwin.apple_sdk.frameworks.SystemConfiguration
     ];
 
+  # Distro tesseract plus English traineddata. The wrapper sets
+  # TESSDATA_PREFIX and refuses to build without eng.traineddata.
+  # grok-oss runs this store path via GROK_TESSERACT_BIN. No runtime download.
+  tesseractEng = pkgs.tesseract5.override { enableLanguages = [ "eng" ]; };
+
   # Linux: prefer mold for links inside pure crane builds.
   moldRustflags = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "-C link-arg=-fuse-ld=mold";
 
@@ -105,8 +110,14 @@ let
       inherit cargoArtifacts;
       cargoExtraArgs = "-p xai-grok-pager-bin";
       postInstall = ''
+        if [ ! -f ${tesseractEng}/share/tessdata/eng.traineddata ]; then
+          echo "grok-oss: eng.traineddata missing from the bundled tesseract" >&2
+          exit 1
+        fi
         wrapProgram $out/bin/grok-oss \
-          --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath buildInputs}
+          --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath buildInputs} \
+          --set GROK_TESSERACT_BIN ${tesseractEng}/bin/tesseract \
+          --set TESSDATA_PREFIX ${tesseractEng}/share/tessdata
       '';
       meta = {
         description = "Unofficial open-source Grok Build coding agent (Surmount fork)";

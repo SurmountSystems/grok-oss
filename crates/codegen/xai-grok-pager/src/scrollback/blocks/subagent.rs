@@ -151,6 +151,30 @@ impl SubagentBlock {
     }
 }
 
+/// Research-role sampling-window text for the goal card and the subagent failure row.
+/// Names the research role and its 200000-token window. Drops raw session JSON.
+/// Does not tell the operator to compact the main session.
+pub fn research_role_window_visible_reason(raw: &str) -> Option<String> {
+    let names_window =
+        raw.contains("Context is over this session's sampling window") && raw.contains("200000");
+    let raw_session = raw.contains("promptUsage")
+        || raw.contains("costUsdTicks")
+        || raw.contains("Session error:")
+        || raw.contains("Compact once");
+    if names_window && raw_session {
+        Some(
+            "The research role filled its sampling window (200000 tokens). Context is over this session's sampling window (200000 tokens). Not retrying the same oversized model request."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn research_role_window_failure_detail(error: &str) -> String {
+    research_role_window_visible_reason(error).unwrap_or_else(|| error.to_string())
+}
+
 /// Truncate description and wrap in quotes for display.
 fn quoted_desc(desc: &str, max_width: usize) -> String {
     // Reserve 2 chars for quotes
@@ -220,6 +244,7 @@ impl BlockContent for SubagentBlock {
                 let time_str = format_duration(*elapsed);
                 let detail = error
                     .as_deref()
+                    .map(research_role_window_failure_detail)
                     .map(|e| format!(" ({e})"))
                     .unwrap_or_default();
                 let prefix_len = 21 + time_str.len() + detail.len();

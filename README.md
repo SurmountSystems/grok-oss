@@ -82,7 +82,7 @@ Locally, the same quality gate:
 just check     # or: just ci  — full Nix local gate; run before push
 just check-local   # host cargo only (fmt, clippy, nextest, doctest) when the VPS is down
 just check-remote  # same full gate as just check, on this host's remote builder (rsync source only; incremental cargo stays at /home/nixbuilder/grok-oss-target; does not upload target)
-just test-remote -p <crate> --lib -- <filter>  # named cargo test on that same remote builder (not rustc on this laptop)
+just test-remote -p <crate> --lib -- <filter>  # named nextest filter on that same remote builder (not rustc on this laptop, not a local helper binary)
 just test      # fmt / clippy / tests without redoing full flake prep
 ```
 

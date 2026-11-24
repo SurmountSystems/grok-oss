@@ -760,22 +760,222 @@ cargo-remote *args: require_system
 
 [positional-arguments]
 test-remote *args: require_system
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export GROK_NIX_FORCE_REMOTE=1
-    # Empty filter and --no-run are local rejects. Do not locate grok-nix-helper first.
-    if [[ "$#" -eq 0 ]]; then
-      echo "just test-remote: missing test filter. Pass a filter (for example -p xai-grok-pager --lib -- actions::defaults)." >&2
-      echo "Refusing to run the whole workspace on the builder from an empty filter. Full gate: just check-remote." >&2
-      exit 2
-    fi
-    for a in "$@"; do
-      if [[ "${a}" == "--no-run" ]]; then
-        echo "just test-remote / just cargo-remote test runs the tests on the remote builder. Do not pass --no-run (that is compile-only)." >&2
-        exit 2
-      fi
-    done
-    just grok_helper remote-named-cargo -- test "$@"
+	#!/usr/bin/env bash
+	set -euo pipefail
+	export GROK_NIX_FORCE_REMOTE=1
+	# Empty filter and --no-run are local rejects. Do not locate grok-nix-helper first.
+	if [[ "$#" -eq 0 ]]; then
+	  echo "just test-remote: missing test filter. Pass a filter (for example -p xai-grok-pager --lib -- actions::defaults)." >&2
+	  echo "Refusing to run the whole workspace on the builder from an empty filter. Full gate: just check-remote." >&2
+	  exit 2
+	fi
+	for a in "$@"; do
+	  if [[ "${a}" == "--no-run" ]]; then
+	    echo "just test-remote / just cargo-remote test runs the tests on the remote builder. Do not pass --no-run (that is compile-only)." >&2
+	    exit 2
+	  fi
+	done
+	# Named filter: same builder cargo nextest as check-remote, with the filter appended.
+	# Not fmt, clippy, doctests, or the unfiltered quality suite. No local helper binary.
+	filter_b64="$(printf '%s\0' "$@" | base64 -w 0)"
+	if [[ -z "${filter_b64}" || ! "${filter_b64}" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+	  echo "just test-remote: could not encode the filter." >&2
+	  exit 2
+	fi
+	just require_remote_builder
+	export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+	known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+	extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+	if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+	  export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+	else
+	  export NIX_SSHOPTS="${extra_ssh}"
+	fi
+	snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
+	trap 'rm -rf "$snapshot"' EXIT
+	git ls-files -z --cached --others --exclude-standard \
+	  | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+	if find "$snapshot" -type d -name target -print -quit | grep -q .; then
+	  echo "just test-remote: snapshot still contains a target directory" >&2
+	  exit 2
+	fi
+	builder_field="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${GROK_NIX_BUILDERS_FILE}")"
+	builder_field="${builder_field%%\?*}"
+	ssh_spec="${builder_field#ssh-ng://}"
+	if [[ -z "${ssh_spec}" || "${ssh_spec}" == "${builder_field}" ]]; then
+	  echo "just test-remote: builders file has no ssh-ng destination" >&2
+	  exit 2
+	fi
+	remote_src="/home/nixbuilder/grok-oss-src"
+	echo "==> just test-remote: rsync filtered source to the builder."
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "mkdir -p ${remote_src}"
+	rsync -a --delete --exclude target -e "ssh -o BatchMode=yes ${NIX_SSHOPTS}" "${snapshot}/" "${ssh_spec}:${remote_src}/"
+	echo "==> just test-remote: flake metadata on the builder"
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "nix flake metadata 'path:${remote_src}'"
+	echo "==> just test-remote: cargo nextest on the builder for the named filter."
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "GROK_TEST_REMOTE_FILTER_B64=${filter_b64} bash -s" <<-'GROK_TEST_REMOTE_SCRIPT'
+	set -euo pipefail
+	mkdir -p /home/nixbuilder/grok-oss-target
+	if [[ -z "${GROK_TEST_REMOTE_FILTER_B64:-}" ]]; then
+	  echo "just test-remote: the filter did not reach the builder." >&2
+	  exit 2
+	fi
+	printf '%s\n' "${GROK_TEST_REMOTE_FILTER_B64}" > /home/nixbuilder/grok-oss-target/test-remote-filter.b64
+	cat > /home/nixbuilder/grok-oss-target/run-test-remote.sh <<-'GROK_TEST_REMOTE_RUN'
+	set -euo pipefail
+	cd /home/nixbuilder/grok-oss-src
+	if [[ -z "${GROK_TEST_REMOTE_SANDBOX:-}" ]]; then
+	  if ! command -v bwrap >/dev/null 2>&1; then
+	    echo "just test-remote: bubblewrap is not on the dev-shell PATH" >&2
+	    exit 2
+	  fi
+	  etc_copy=/home/nixbuilder/grok-oss-target/etc-overlay
+	  rm -rf "${etc_copy}"
+	  mkdir -p "${etc_copy}"
+	  while IFS= read -r -d '' src; do
+	    rel="${src#/etc/}"
+	    dest="${etc_copy}/${rel}"
+	    if [[ ! -r "${src}" ]]; then
+	      continue
+	    fi
+	    if [[ -L "${src}" ]]; then
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    elif [[ -d "${src}" ]]; then
+	      mkdir -p "${dest}"
+	    else
+	      mkdir -p "$(dirname "${dest}")"
+	      cp -a --no-preserve=ownership "${src}" "${dest}"
+	    fi
+	  done < <(find /etc -mindepth 1 -print0 2>/dev/null || true)
+	  rm -f "${etc_copy}/hosts"
+	  cp -L /etc/hosts "${etc_copy}/hosts"
+	  if [[ -L "${etc_copy}/hosts" || ! -f "${etc_copy}/hosts" ]]; then
+	    echo "just test-remote: could not make a regular /etc/hosts for the test sandbox" >&2
+	    exit 2
+	  fi
+	  export GROK_TEST_REMOTE_SANDBOX=1
+	  exec bwrap --dev-bind / / --tmpfs /tmp --bind "${etc_copy}" /etc --ro-bind /etc/passwd /etc/passwd --die-with-parent bash /home/nixbuilder/grok-oss-target/run-test-remote.sh
+	fi
+	export TMPDIR=/tmp
+	export TEMP=/tmp
+	export TMP=/tmp
+	unset no_proxy NO_PROXY http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy || true
+	unset SSH_CONNECTION SSH_TTY SSH_CLIENT ET_VERSION || true
+	clean_path=""
+	IFS=':' read -ra path_parts <<< "${PATH}"
+	for part in "${path_parts[@]}"; do
+	  case "${part}" in
+	    /nix/store/*) clean_path="${clean_path:+${clean_path}:}${part}" ;;
+	  esac
+	done
+	if [[ -z "${clean_path}" ]]; then
+	  echo "just test-remote: dev-shell PATH has no /nix/store entries" >&2
+	  exit 2
+	fi
+	export PATH="${clean_path}"
+	while IFS= read -r -d '' assignment; do
+	  name="${assignment%%=*}"
+	  value="${assignment#*=}"
+	  case "${value}" in
+	    *per-user*)
+	      if [[ -n "${name}" && "${name}" != "PATH" ]]; then
+	        unset "${name}" || true
+	      fi
+	      ;;
+	  esac
+	done < <(env -0)
+	export CARGO_TARGET_DIR=/home/nixbuilder/grok-oss-target
+	export CARGO_INCREMENTAL=1
+	export NIX_ENFORCE_PURITY=0
+	if ! command -v mold >/dev/null 2>&1; then
+	  echo "just test-remote: mold is not on the dev-shell PATH" >&2
+	  exit 2
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+	  echo "just test-remote: python3 is not on the dev-shell PATH" >&2
+	  exit 2
+	fi
+	unset CARGO_ENCODED_RUSTFLAGS
+	export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+	lib_path=""
+	if command -v pkg-config >/dev/null 2>&1; then
+	  for pc in libssl libcrypto dbus-1; do
+	    libdir="$(pkg-config --variable=libdir "${pc}" 2>/dev/null || true)"
+	    if [[ -n "${libdir}" && "${lib_path}" != *"${libdir}"* ]]; then
+	      lib_path="${lib_path:+${lib_path}:}${libdir}"
+	    fi
+	  done
+	fi
+	if [[ -n "${DUCKDB_LIB_DIR:-}" ]]; then
+	  lib_path="${lib_path:+${lib_path}:}${DUCKDB_LIB_DIR}"
+	fi
+	if [[ -n "${lib_path}" ]]; then
+	  export LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+	fi
+	export RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
+	export GROK_DISABLE_SHARED_HARNESS_SECRETS="${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+	export GROK_CREDENTIALS_FORCE_FILE="${GROK_CREDENTIALS_FORCE_FILE:-1}"
+	export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
+	unset NO_COLOR
+	unset CARGO_TERM_COLOR
+	unset OPENROUTER_API_KEY
+	mkdir -p frontend/apps/grok-desktop/scripts
+	cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
+	cargoJobs="${NIX_BUILD_CORES:-64}"
+	case "${cargoJobs}" in
+	  "" | *[!0-9]*) cargoJobs=64 ;;
+	esac
+	if [ "${cargoJobs}" -gt 64 ]; then
+	  cargoJobs=64
+	fi
+	if [ "${cargoJobs}" -le 64 ]; then
+	  cargoJobs=64
+	fi
+	export CARGO_BUILD_JOBS="${cargoJobs}"
+	linkJobs="${CARGO_BUILD_JOBS}"
+	if [ "${linkJobs}" -gt 32 ]; then
+	  linkJobs=32
+	fi
+	export CARGO_LINK_JOBS="${linkJobs}"
+	export CARGO_PROFILE=dev
+	unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+	filter_file=/home/nixbuilder/grok-oss-target/test-remote-filter.b64
+	if [[ ! -f "${filter_file}" ]]; then
+	  echo "just test-remote: filter file missing on the builder." >&2
+	  exit 2
+	fi
+	args_b64="$(<"${filter_file}")"
+	if [[ -z "${args_b64}" ]]; then
+	  echo "just test-remote: filter file on the builder is empty." >&2
+	  exit 2
+	fi
+	mapfile -d '' -t remote_args < <(printf '%s' "${args_b64}" | base64 -d)
+	if [[ "${#remote_args[@]}" -lt 1 ]]; then
+	  echo "just test-remote: filter argv is empty." >&2
+	  exit 2
+	fi
+	if ! command -v rg >/dev/null 2>&1; then
+	  echo "just test-remote: rg not on PATH" >&2
+	  exit 2
+	fi
+	nextest_log="${CARGO_TARGET_DIR}/test-remote-nextest.log"
+	CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" nice -n 19 cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" "${remote_args[@]}" 2>&1 | tee "${nextest_log}"
+	summary="$(rg -a -F -n 'Summary [' "${nextest_log}" | tail -n 1 || true)"
+	if [[ -z "${summary}" ]]; then
+	  echo "just test-remote: nextest Summary line missing" >&2
+	  exit 2
+	fi
+	{
+	  echo "test-remote nextest receipt"
+	  echo "${summary}"
+	} > /home/nixbuilder/grok-oss-target/test-remote-summary.txt
+	GROK_TEST_REMOTE_RUN
+	cd /home/nixbuilder/grok-oss-src
+	nix develop 'path:/home/nixbuilder/grok-oss-src' -c bash /home/nixbuilder/grok-oss-target/run-test-remote.sh
+	GROK_TEST_REMOTE_SCRIPT
+	echo "==> just test-remote: nextest receipt"
+	ssh -o BatchMode=yes ${NIX_SSHOPTS} "${ssh_spec}" "cat /home/nixbuilder/grok-oss-target/test-remote-summary.txt"
 
 [private]
 [positional-arguments]
@@ -861,7 +1061,7 @@ dev-ci:
 test: test-fmt test-clippy test-unit test-doc
     @echo "just test passed"
 
-test-extra: test-clippy-targets test-clippy-all-targets test-ensure-working-nix-path test-nix-retry-smoke test-nix-retry-does-not-require-helper-binary test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-linker-sigkill-retries test-nix-retry-locked-lockfile-fail-fast test-nix-retry-fixed-output-hash-mismatch-fail-fast test-nix-retry-nextest-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-clippy-uses-many-workers test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features test-test-remote-workspace-rustc-not-local-eligible test-test-remote-requires-filter
+test-extra: test-clippy-targets test-clippy-all-targets test-ensure-working-nix-path test-nix-retry-smoke test-nix-retry-does-not-require-helper-binary test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-linker-sigkill-retries test-nix-retry-locked-lockfile-fail-fast test-nix-retry-fixed-output-hash-mismatch-fail-fast test-nix-retry-nextest-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-clippy-uses-many-workers test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features test-test-remote-workspace-rustc-not-local-eligible test-test-remote-requires-filter test-test-remote-filter-skips-helper
     @echo "just test-extra passed"
 
 test-fmt:
@@ -1725,6 +1925,72 @@ test-test-remote-requires-filter:
       exit 1
     fi
     echo "test-test-remote-requires-filter: ok (empty filter and --no-run exit 2 before nix)"
+
+test-test-remote-filter-skips-helper:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Structural check only. Do not run test-remote with a filter (that would ssh).
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    body="$(awk '
+      /^test-remote[[:space:]]/ { taking=1; print; next }
+      taking {
+        if ($0 ~ /^[[:space:]]/ || length($0) == 0) { print; next }
+        exit
+      }
+    ' "${justfile}")"
+    if [[ -z "${body}" ]]; then
+      echo "test-test-remote-filter-skips-helper: could not read the test-remote recipe" >&2
+      exit 1
+    fi
+    if grep -q -E 'grok_helper|grok_nix_helper_bin|remote-named-cargo' <<<"${body}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote still reaches the helper binary lookup:" >&2
+      exit 1
+    fi
+    if grep -q -F 'grok-nix-helper is not on PATH' <<<"${body}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote still contains the helper PATH miss" >&2
+      exit 1
+    fi
+    code="$(printf '%s\n' "${body}" | sed -E '/^[[:space:]]*#/d')"
+    if ! grep -q -F 'cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" "${remote_args[@]}"' <<<"${code}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote must pass the filter to the check-remote nextest command" >&2
+      exit 1
+    fi
+    if ! grep -q -F "nix develop 'path:/home/nixbuilder/grok-oss-src'" <<<"${code}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote must use the builder dev shell" >&2
+      exit 1
+    fi
+    if ! grep -q -F 'rsync -a --delete --exclude target' <<<"${code}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote must rsync source the same way as check-remote" >&2
+      exit 1
+    fi
+    if grep -q -F 'cargo fmt' <<<"${code}" || grep -q -F 'cargo test --workspace --doc' <<<"${code}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote must not run the unfiltered quality suite" >&2
+      exit 1
+    fi
+    if grep -q -E '^[[:space:]]*just check-remote([[:space:]]|$)' <<<"${code}"; then
+      echo "test-test-remote-filter-skips-helper: filtered test-remote must not call check-remote" >&2
+      exit 1
+    fi
+    missing_line="$(grep -n 'missing test filter' <<<"${code}" | head -1 | cut -d: -f1 || true)"
+    norun_line="$(grep -n -- '--no-run' <<<"${code}" | head -1 | cut -d: -f1 || true)"
+    ssh_line="$(grep -n 'ssh -o BatchMode' <<<"${code}" | head -1 | cut -d: -f1 || true)"
+    empty_argv_line="$(grep -n 'filter argv is empty' <<<"${code}" | head -1 | cut -d: -f1 || true)"
+    nextest_line="$(grep -n 'cargo nextest run --workspace --locked' <<<"${code}" | head -1 | cut -d: -f1 || true)"
+    if [[ -z "${missing_line}" || -z "${norun_line}" || -z "${ssh_line}" || -z "${empty_argv_line}" || -z "${nextest_line}" ]]; then
+      echo "test-test-remote-filter-skips-helper: missing a local reject, the filter guard, or the nextest line" >&2
+      exit 1
+    fi
+    if [[ "${missing_line}" -ge "${ssh_line}" || "${norun_line}" -ge "${ssh_line}" ]]; then
+      echo "test-test-remote-filter-skips-helper: empty filter and --no-run must exit before ssh" >&2
+      exit 1
+    fi
+    if [[ "${empty_argv_line}" -ge "${nextest_line}" ]]; then
+      echo "test-test-remote-filter-skips-helper: an empty filter must exit before nextest" >&2
+      exit 1
+    fi
+    echo "test-test-remote-filter-skips-helper: ok (named filter uses builder nextest and does not locate the helper binary)"
+
 test-ensure-working-nix-path:
     #!/usr/bin/env bash
     set -euo pipefail

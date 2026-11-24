@@ -544,6 +544,8 @@ pub(crate) mod image_describe;
 pub(crate) mod image_normalize;
 pub(crate) mod inference_metrics;
 pub(crate) mod long_reasoning_reminder;
+#[path = "../../../xai-grok-pager/src/app/agent_view/plan_image_tesseract.rs"]
+mod plan_image_tesseract;
 pub use xai_grok_shared::session::info;
 pub mod interrupted_turn;
 pub mod managed_mcp;

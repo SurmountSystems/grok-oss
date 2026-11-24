@@ -59,10 +59,11 @@ impl AgentView {
     /// approve / revise / clarify can drain it on the same multimodal path as
     /// a pasted screenshot. Returns true if a chip was inserted.
     ///
-    /// The plan body also receives the stdout of the first `tesseract` on
-    /// PATH for this image path. That text is not an image description. When
-    /// that binary cannot be started, the plan body says that tesseract is
-    /// missing. The image chip stays.
+    /// The plan body also receives tesseract stdout for this image path.
+    /// `GROK_TESSERACT_BIN` is that binary when set. Otherwise the first
+    /// `tesseract` on PATH is used. That text is not an image description.
+    /// When that binary cannot be started, the plan body says that tesseract
+    /// is missing. The image chip stays.
     ///
     /// No-op when plan approval is not open, the path is not a readable image,
     /// or the prompt rejects the insert (policy / capacity). Callers still
@@ -2134,6 +2135,66 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    /// File-backed Revise prompt with the in-panel box open. Idle Preview
+    /// is not this. Empty Prompt without that box still uses `a` to approve.
+    fn file_backed_revision_box_is_focused(&self) -> bool {
+        self.line_viewer.is_some()
+            && self.plan_approval_view.as_ref().is_some_and(|pav| {
+                pav.source == PlanReviewSource::FileBacked
+                    && pav.focus == PlanApprovalFocus::Prompt
+                    && pav.prompt_intent == PlanPromptIntent::Revise
+            })
+    }
+
+    /// Printable keys and Backspace while that box is focused. Enter, Esc,
+    /// and Tab stay on the plan prompt path.
+    fn revision_box_owns_typed_key(&self, key: &KeyEvent) -> bool {
+        if !self.file_backed_revision_box_is_focused() {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char(ch) if !ch.is_control() => {
+                key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+            }
+            KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Insert one character, in order, into the revision box. `a` is the
+    /// letter a. The paint-only placeholder is not part of the draft.
+    fn edit_focused_plan_revision_box(&mut self, key: &KeyEvent) -> InputOutcome {
+        let synced = {
+            let Some(viewer) = self.line_viewer.as_mut() else {
+                return InputOutcome::Changed;
+            };
+            let text = &mut viewer.plan_mut().revision_prompt_text;
+            if text == "Type a revision..." {
+                text.clear();
+            }
+            match key.code {
+                KeyCode::Char(ch) if !ch.is_control() => {
+                    let ch = if key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                        && ch.is_ascii_lowercase()
+                    {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    };
+                    text.push(ch);
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    text.pop();
+                }
+                _ => {}
+            }
+            text.clone()
+        };
+        self.prompt.set_text(&synced);
+        self.prompt.set_cursor(synced.len());
+        InputOutcome::Changed
+    }
+
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         if crate::input::key::is_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
@@ -2259,7 +2320,12 @@ impl AgentView {
         if self.selected_comment_cta_owns_typed_key(key) {
             return self.edit_selected_plan_comment_field(key);
         }
-        // Preview types `a`. Empty Prompt (revision notes) still Approves.
+        // The in-panel revision box is focused. Each typed character,
+        // including `a`, is inserted once. It does not Approve.
+        if self.revision_box_owns_typed_key(key) {
+            return self.edit_focused_plan_revision_box(key);
+        }
+        // Preview types `a`. Empty Prompt without that box still Approves.
         if !is_commenting
             && !preview_focused
             && key.code == KeyCode::Char('a')

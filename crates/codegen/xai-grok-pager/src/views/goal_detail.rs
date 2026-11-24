@@ -290,11 +290,21 @@ fn json_object_span(text: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Pause text for the card. A research-role prefix plus a JSON object keeps the
-/// prefix and the human `message` sentence, and drops the raw object (`promptUsage`,
-/// `costUsdTicks`, and the rest). Any other reason is only control-stripped.
+/// Pause text for the card.
+/// Full session JSON (`modelUsage` from the usage attachment) keeps the prefix
+/// and the human `message` sentence, and drops the raw object.
+/// A research sampling-window pause without that object names the research
+/// role and its 200000 window instead. Any other reason is control-stripped,
+/// with the same message extraction when a JSON object is present.
 fn pause_reason_visible_text(msg: &str) -> String {
     let text = strip_control_chars(msg, true);
+    let full_session_json = json_object_span(&text)
+        .is_some_and(|(start, end)| text[start..end].contains("\"modelUsage\""));
+    if !full_session_json
+        && let Some(reason) = crate::scrollback::blocks::research_role_window_visible_reason(&text)
+    {
+        return reason;
+    }
     let Some((start, end)) = json_object_span(&text) else {
         return text;
     };
@@ -3007,3 +3017,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "goal_detail_research_window_tests.rs"]
+mod goal_detail_research_window_tests;

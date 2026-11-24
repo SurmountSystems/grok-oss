@@ -1251,9 +1251,25 @@ fn named_remote_cargo_source_contracts() {
     let named = recipe_body(&just, "remote_named_cargo");
     let test_body = recipe_body(&just, "test-remote");
     let cargo_body = recipe_body(&just, "cargo-remote");
+    let test_code: String = test_body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        test_body.contains("remote-named-cargo"),
-        "test-remote must invoke grok-nix-helper remote-named-cargo:\n{test_body}"
+        !test_code.contains("grok_helper")
+            && !test_code.contains("grok_nix_helper_bin")
+            && !test_code.contains("remote-named-cargo"),
+        "test-remote must not call grok_helper, grok_nix_helper_bin, or remote-named-cargo:\n{test_body}"
+    );
+    assert!(
+        test_code.contains("cargo nextest run --workspace --locked")
+            && test_code.contains("\"${remote_args[@]}\""),
+        "test-remote must pass the filter to the check-remote nextest command:\n{test_body}"
+    );
+    assert!(
+        !test_code.contains("cargo fmt") && !test_code.contains("cargo test --workspace --doc"),
+        "test-remote must not run the unfiltered quality suite:\n{test_body}"
     );
     assert!(
         cargo_body.contains("remote-named-cargo"),
