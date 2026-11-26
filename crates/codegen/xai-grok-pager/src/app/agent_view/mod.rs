@@ -198,6 +198,10 @@ mod live_prompt_task;
 mod model_notice_tests;
 #[cfg(test)]
 mod plan_approval_action_spacing_tests;
+#[cfg(test)]
+mod planning_box_shows_l1_prompt_text;
+#[cfg(test)]
+mod planning_view_paints_attached_image;
 mod rewind;
 mod role;
 pub(crate) use role::{AgentRole, ChildLink, ComposerRoute, ViewSurface};
@@ -206,6 +210,7 @@ mod session;
 mod session_mode;
 mod shell_completion;
 mod subagent_takeover;
+mod subagents_list_feed;
 #[cfg(test)]
 mod task_icon_mouse_tests;
 #[cfg(test)]

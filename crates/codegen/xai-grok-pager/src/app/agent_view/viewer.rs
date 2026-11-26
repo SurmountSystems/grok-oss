@@ -1022,8 +1022,37 @@ impl AgentView {
         if self.plan_approval_view.is_some() {
             // Keep Revise / Comment box text. `cancel_undo_group` reverts the
             // open group and drops Undo, which is why revision notes vanished.
+            // Snapshot first. A non-empty stash is the L1 text from before
+            // the pane opened. A blank stash is not that sentence: the saved
+            // revise draft is the live planning text and stays in this prompt.
+            // `feedback_draft` keeps the notes. It is not the editor.
             self.snapshot_or_clear_plan_feedback_draft();
             self.prompt.textarea.end_undo_group();
+            let restore_prior = self.plan_approval_view.as_ref().is_some_and(|pav| {
+                pav.focus == PlanApprovalFocus::Prompt
+                    && pav.prompt_intent == PlanPromptIntent::Revise
+                    && pav.stashed_prompt.text != self.prompt.text()
+            });
+            if restore_prior {
+                let (prior, cursor, saved_revise) = self
+                    .plan_approval_view
+                    .as_ref()
+                    .map(|pav| {
+                        (
+                            pav.stashed_prompt.text.clone(),
+                            pav.stashed_prompt.cursor,
+                            pav.feedback_draft.text().to_string(),
+                        )
+                    })
+                    .unwrap_or_default();
+                if prior.trim().is_empty() && !saved_revise.trim().is_empty() {
+                    self.prompt.set_text(&saved_revise);
+                    self.prompt.set_cursor(saved_revise.len());
+                } else {
+                    self.prompt.set_text(&prior);
+                    self.prompt.set_cursor(cursor.min(prior.len()));
+                }
+            }
         } else {
             self.prompt.textarea.cancel_undo_group();
         }

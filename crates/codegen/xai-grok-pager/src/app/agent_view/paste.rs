@@ -86,6 +86,7 @@ impl AgentView {
                     self.pending_effects.push(eff);
                 }
                 self.snapshot_or_clear_plan_feedback_draft();
+                self.sync_focused_plan_revision_box_from_l1_prompt();
                 self.persist_unsent_composer_draft();
                 (InputOutcome::Changed, ClipboardTextInsertion::Inserted)
             }

@@ -1720,12 +1720,7 @@ impl AgentView {
                 }
             }
         }
-        self.tasks.sync(
-            &self.session.bg_tasks,
-            &self.subagent_sessions,
-            &self.session.scheduled_tasks,
-            &self.workflow_runs,
-        );
+        self.refresh_subagents_list_from_live_host_tasks();
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
@@ -2127,13 +2122,33 @@ impl AgentView {
             status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let (subagent_running, subagent_listed) = if self.dock_on {
+            // Depth-2 implementer rows stay on the dock and do not increment
+            // header `tasks N/M`. N and M are the live L2 rows.
             let rows = self.dock_subagent_rows();
-            (
-                rows.iter().filter(|(_, _, row)| row.spinning).count(),
-                rows.len(),
-            )
+            let child_ids: std::collections::HashSet<&str> = self
+                .subagent_sessions
+                .values()
+                .map(|info| info.child_session_id.as_ref())
+                .collect();
+            let mut running = 0usize;
+            let mut listed = 0usize;
+            for (sid, _, row) in &rows {
+                let is_l2 = self
+                    .subagent_sessions
+                    .get(sid.as_str())
+                    .is_some_and(|info| crate::app::subagent::is_l2_list_row(info, &child_ids));
+                if !is_l2 {
+                    continue;
+                }
+                listed += 1;
+                if row.spinning {
+                    running += 1;
+                }
+            }
+            (running, listed)
         } else {
-            self.tasks.listed_subagent_counts()
+            self.tasks
+                .listed_l2_subagent_counts(&self.subagent_sessions)
         };
         let (task_running, task_listed) =
             status_row_task_counts(subagent_running, subagent_listed, self.todo.todos());
@@ -4396,6 +4411,10 @@ impl AgentView {
             } else {
                 self.plan_comments.len()
             };
+            // attached_image_chips_for_plan_paint borrows `self`. It cannot
+            // run inside the line_viewer.as_mut() closure. The chips still
+            // paint on the plan revision line.
+            let plan_image_chips = self.attached_image_chips_for_plan_paint();
             let mermaid_placements = self
                 .line_viewer
                 .as_mut()
@@ -4428,7 +4447,17 @@ impl AgentView {
                         {
                             viewer.plan_mut().revision_prompt_text = self.prompt.text().to_string();
                         } else if !show_revision {
-                            viewer.plan_mut().revision_prompt_text.clear();
+                            // Inline and post-turn planning do not mirror the
+                            // whole draft. An attached picture still paints
+                            // here, as the same `[Image #N]` chip the L1
+                            // transcript uses. OCR and a missing-image notice
+                            // do not replace that chip.
+                            if plan_image_chips.is_empty() {
+                                viewer.plan_mut().revision_prompt_text.clear();
+                            } else {
+                                viewer.plan_mut().show_revision_prompt = true;
+                                viewer.plan_mut().revision_prompt_text = plan_image_chips;
+                            }
                         }
                     } else {
                         viewer.plan_mut().active_commenting_range =

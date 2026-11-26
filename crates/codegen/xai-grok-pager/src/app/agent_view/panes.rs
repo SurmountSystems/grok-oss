@@ -339,12 +339,14 @@ impl AgentView {
             })
             .collect()
     }
-    /// Non-workflow L2 rows in dock display order: `(child_session_id, subagent_id, row)`.
+    /// Non-workflow rows in dock display order: `(child_session_id, subagent_id, row)`.
     ///
-    /// L3 specialists stay in the registry and are not their own rows. A live
-    /// count is appended to the L2 row (`1 specialist`, `N specialists`).
-    /// Running rows are not collapsed when descriptions match. Each L2 keeps
-    /// its own stop target and its own share of a revealed dock.
+    /// An L2 row stays. A running host task is also a row, so a depth-2
+    /// implementer stays visible while a depth-1 coordinator is already
+    /// listed. A completed host task is not a running row. A live count is
+    /// still appended to the L2 row (`1 specialist`, `N specialists`).
+    /// Running rows are not collapsed when descriptions match. Each row
+    /// keeps its own stop target and its own share of a revealed dock.
     pub(crate) fn dock_subagent_rows(&self) -> Vec<(String, String, crate::views::dock::DockRow)> {
         let show_done = self.tasks.show_done();
         let child_ids: std::collections::HashSet<&str> = self
@@ -366,7 +368,12 @@ impl AgentView {
                 }
                 show_done || info.is_running()
             })
-            .filter(|info| crate::app::subagent::is_l2_list_row(info, &child_ids))
+            .filter(|info| {
+                crate::app::subagent::is_l2_list_row(info, &child_ids)
+                    || self
+                        .tasks
+                        .is_running_host_task(info.child_session_id.as_ref())
+            })
             .filter(|info| {
                 !(self.is_plan_viewer()
                     && self.should_arm_plan_decision_chrome()
@@ -392,7 +399,16 @@ impl AgentView {
                 // Paint it as finished so dock `[clear]` is offered, then hide
                 // it when the Operator uses that control.
                 let running = info.is_running() && !info.should_hide_on_dock_clear();
+                let l2_row = crate::app::subagent::is_l2_list_row(info, &child_ids);
                 let (kind, description) = crate::app::subagent::format_subagent_label(info);
+                // The L2 label does not include the session id. A depth-2
+                // host-task row stays on the list by id. The specialist
+                // description is not the L1 row label.
+                let description = if l2_row {
+                    description
+                } else {
+                    info.child_session_id.to_string()
+                };
                 let mut meta = String::new();
                 if let Some(model) = info.attempt.model.as_deref().filter(|s| !s.is_empty()) {
                     meta.push_str(model);
@@ -461,12 +477,7 @@ impl AgentView {
         for id in &ids {
             self.tasks.hide_completed_subagent(id);
         }
-        self.tasks.sync(
-            &self.session.bg_tasks,
-            &self.subagent_sessions,
-            &self.session.scheduled_tasks,
-            &self.workflow_runs,
-        );
+        self.refresh_subagents_list_from_live_host_tasks();
     }
 
     /// Running background commands (non-monitor): `(task_id, row)`.

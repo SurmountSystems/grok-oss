@@ -924,6 +924,7 @@ impl AgentView {
             match self.prompt.handle_key(key) {
                 PromptEvent::Edited => {
                     self.snapshot_or_clear_plan_feedback_draft();
+                    self.sync_focused_plan_revision_box_from_l1_prompt();
                     self.persist_unsent_composer_draft();
                     if undo_tip_accepted {
                         xai_grok_telemetry::session_ctx::log_event(

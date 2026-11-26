@@ -83,7 +83,32 @@ impl AgentView {
         if let Some(pav) = self.plan_approval_view.as_mut() {
             super::plan_image_tesseract::append_tesseract_stdout(&mut pav.plan_content, &text);
         }
+        // OCR stays on the plan body. It does not replace the picture.
+        // The planning box paints the same `[Image #N]` chip as the L1 transcript.
+        self.sync_focused_plan_revision_box_from_l1_prompt();
         true
+    }
+
+    /// `[Image #N]` for each attached picture. This is the chip text the L1
+    /// transcript paints. Empty when the live prompt has no image bytes.
+    pub(crate) fn attached_image_chips_for_plan_paint(&self) -> String {
+        self.prompt
+            .images
+            .iter()
+            .map(|image| crate::prompt_images::display_text(image.display_number))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Snapshot the composer for plan open without dropping image bytes.
+    /// `stash` moves the bytes into the snapshot. The live prompt keeps the
+    /// same bytes so a missing-image notice does not replace the picture.
+    fn stash_prompt_keeping_images(&mut self) -> crate::views::prompt_widget::StashedPrompt {
+        let stashed = self.prompt.stash();
+        if !stashed.images.is_empty() {
+            self.prompt.set_images(stashed.images.clone());
+        }
+        stashed
     }
 
     /// Resolve the absolute path to the plan file for this session.
@@ -1072,7 +1097,7 @@ impl AgentView {
         let Some(content) = self.post_turn_review_plan_content() else {
             return;
         };
-        let stashed = self.prompt.stash();
+        let stashed = self.stash_prompt_keeping_images();
         self.plan_approval_view = Some(PlanApprovalViewState::after_turn(
             "CreatePlan".to_owned(),
             content,
@@ -2187,53 +2212,66 @@ impl AgentView {
             })
     }
 
-    /// Printable keys and Backspace while that box is focused. Enter, Esc,
-    /// and Tab stay on the plan prompt path.
-    fn revision_box_owns_typed_key(&self, key: &KeyEvent) -> bool {
+    /// The focused file-backed Revise box paints `revision_prompt_text`.
+    /// That string is not an editor. Copy it from `self.prompt` after the
+    /// L1 widget inserts, so the box shows the same text.
+    pub(crate) fn sync_focused_plan_revision_box_from_l1_prompt(&mut self) {
         if !self.file_backed_revision_box_is_focused() {
-            return false;
+            return;
         }
-        match key.code {
-            KeyCode::Char(ch) if !ch.is_control() => {
-                key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT
-            }
-            KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
-            _ => false,
-        }
+        let text = self.prompt.text().to_string();
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return;
+        };
+        viewer.plan_mut().revision_prompt_text = text;
     }
 
-    /// Insert one character, in order, into the revision box. `a` is the
-    /// letter a. The paint-only placeholder is not part of the draft.
-    fn edit_focused_plan_revision_box(&mut self, key: &KeyEvent) -> InputOutcome {
-        let synced = {
-            let Some(viewer) = self.line_viewer.as_mut() else {
-                return InputOutcome::Changed;
-            };
-            let text = &mut viewer.plan_mut().revision_prompt_text;
-            if text == "Type a revision..." {
-                text.clear();
-            }
-            match key.code {
-                KeyCode::Char(ch) if !ch.is_control() => {
-                    let ch = if key.modifiers == crossterm::event::KeyModifiers::SHIFT
-                        && ch.is_ascii_lowercase()
-                    {
-                        ch.to_ascii_uppercase()
-                    } else {
-                        ch
-                    };
-                    text.push(ch);
-                }
-                KeyCode::Backspace | KeyCode::Delete => {
-                    text.pop();
-                }
-                _ => {}
-            }
-            text.clone()
+    /// Text the focused planning box paints. Empty when that box is shut.
+    pub fn planning_box_shown_text(&self) -> String {
+        if !self.file_backed_revision_box_is_focused() {
+            return String::new();
+        }
+        self.line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot text copied out of the L1 composer. Not a second editor.
+    /// Empty when no plan approval is open.
+    pub fn planning_feedback_draft_text(&self) -> String {
+        self.plan_approval_view
+            .as_ref()
+            .map(|pav| pav.feedback_draft.text().to_string())
+            .unwrap_or_default()
+    }
+
+    /// File-backed Revise box, focused, the same way Tab focuses it after
+    /// the pane opens. Keys then go through `self.prompt`.
+    pub fn open_file_backed_revise_box(&mut self) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
         };
-        self.prompt.set_text(&synced);
-        self.prompt.set_cursor(synced.len());
-        InputOutcome::Changed
+        self.plan_approval_view = Some(PlanApprovalViewState::with_source(
+            request,
+            PlanReviewSource::FileBacked,
+            self.stash_prompt_keeping_images(),
+            tx,
+        ));
+        self.plan_mode_active = true;
+        self.display_name = Some("Grok Build".into());
+        self.show_plan_preview_if_available();
+        let _ = self.handle_input(
+            &crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &crate::actions::ActionRegistry::defaults(),
+        );
     }
 
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
@@ -2241,7 +2279,9 @@ impl AgentView {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
             );
-            return self.handle_paste_key_deferred(clipboard_text);
+            let outcome = self.handle_paste_key_deferred(clipboard_text);
+            self.sync_focused_plan_revision_box_from_l1_prompt();
+            return outcome;
         }
         // Enter on `[Image #N]` opens the viewer. The main composer does
         // this from `handle_prompt_key`. The plan prompt calls
@@ -2361,11 +2401,6 @@ impl AgentView {
         if self.selected_comment_cta_owns_typed_key(key) {
             return self.edit_selected_plan_comment_field(key);
         }
-        // The in-panel revision box is focused. Each typed character,
-        // including `a`, is inserted once. It does not Approve.
-        if self.revision_box_owns_typed_key(key) {
-            return self.edit_focused_plan_revision_box(key);
-        }
         // The planning composer is the same PromptWidget as the L1 box.
         // A typed `a` is the letter a, once, including when the prompt is
         // empty. It is not an approve hotkey and does not call
@@ -2409,6 +2444,7 @@ impl AgentView {
         {
             self.prompt.textarea.insert_str("\n");
             self.snapshot_or_clear_plan_feedback_draft();
+            self.sync_focused_plan_revision_box_from_l1_prompt();
             self.persist_unsent_composer_draft();
             return InputOutcome::Changed;
         }
@@ -2538,6 +2574,7 @@ impl AgentView {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }
                 self.snapshot_or_clear_plan_feedback_draft();
+                self.sync_focused_plan_revision_box_from_l1_prompt();
                 self.persist_unsent_composer_draft();
                 InputOutcome::Changed
             }

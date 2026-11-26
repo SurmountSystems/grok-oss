@@ -22,6 +22,10 @@ use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
 use crate::theme::{Theme, ThemeKind};
 use crate::util::format_duration;
+use crate::views::subagents_list_host_tasks::{
+    HostTask, SubagentsListRow, running_host_tasks, session_context_agents_running_sentence,
+    subagents_list_rows,
+};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
@@ -564,6 +568,28 @@ impl TaskEntry {
             type_label,
         }
     }
+    fn from_listed_host_task(row: &SubagentsListRow) -> Self {
+        let theme = Theme::current();
+        let style = Style::default().fg(theme.text_primary);
+        let styled = Line::from(Span::styled(row.label.clone(), style));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "host-task:".hash(&mut hasher);
+        row.id.hash(&mut hasher);
+        let id = hasher.finish();
+        let started_at = Instant::now()
+            .checked_sub(row.elapsed)
+            .unwrap_or_else(Instant::now);
+        TaskEntry::Agent {
+            id,
+            subagent_id: row.id.clone(),
+            child_session_id: row.id.clone(),
+            label: row.label.clone(),
+            styled,
+            running: true,
+            started_at,
+            type_label: "Subagent".to_string(),
+        }
+    }
     fn from_workflow_run(run: &crate::views::workflows::WorkflowRunSnapshot) -> Self {
         let theme = Theme::current();
         let running = run.is_active();
@@ -825,30 +851,48 @@ pub struct TasksPane {
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
     last_theme: ThemeKind,
     workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
-    /// When this pane is an L2 overlay, list only that L2's L3s.
-    /// `None` is L1: L2 rows only, never L3s just because the L2 filter is empty.
+    /// When this pane is an L2 overlay, list only that L2's specialists.
+    /// `None` is the L1 list.
     overlay_l2_session_id: Option<String>,
+    /// Live host tasks for this session. On L1, `sync` paints each running
+    /// host task in addition to any L2 Agent row. A completed task is not
+    /// a running row. An L2 overlay does not paint this set.
+    host_tasks: Vec<HostTask>,
+    /// Running set last painted. The session-context sentence uses this.
+    painted_running_host_tasks: Vec<HostTask>,
 }
 impl Default for TasksPane {
     fn default() -> Self {
         Self::new()
     }
 }
-/// Columns the agent overlay paints on the right of one row.
-/// Same sum as `render_agent_overlay`: kill, view, elapsed, model,
-/// forked badge, and one gap.
-fn agent_overlay_right_text(info: &SubagentInfo, elapsed: &str) -> String {
-    match subagent_overlay_status_cell(info) {
-        Some(cell) => format!("{cell} {elapsed} "),
-        None => format!("{elapsed} "),
-    }
+/// L1 must not paint an L3 context figure. An L2 overlay may paint the
+/// specialist it opened. Depth 2 or deeper is an L3. A missing figure
+/// stays off the row. It is not printed as 0.
+fn paints_row_context_cell(overlay_l2: Option<&str>, info: &SubagentInfo) -> bool {
+    overlay_l2.is_some() || !info.attempt.depth.is_some_and(|depth| depth >= 2)
 }
 
-fn agent_overlay_columns(info: &SubagentInfo) -> u16 {
+/// Columns the agent overlay paints on the right of one row.
+/// Same sum as `render_agent_overlay`: kill, view, elapsed, model,
+/// forked badge, and one gap. `paint_context` is false for an L3 row
+/// on the L1 list.
+fn agent_overlay_right_text(info: &SubagentInfo, elapsed: &str, paint_context: bool) -> String {
+    if paint_context && let Some(cell) = subagent_overlay_status_cell(info) {
+        return format!("{cell} {elapsed} ");
+    }
+    format!("{elapsed} ")
+}
+
+fn agent_overlay_columns(info: &SubagentInfo, paint_context: bool) -> u16 {
     let right_text = if info.attempt.pending_kill {
         "killing\u{2026} ".to_string()
     } else {
-        agent_overlay_right_text(info, &format_duration(info.display_elapsed()))
+        agent_overlay_right_text(
+            info,
+            &format_duration(info.display_elapsed()),
+            paint_context,
+        )
     };
     let badge = format_context_badge(info);
     let model_text = info
@@ -879,6 +923,7 @@ fn agent_chip_reserve(
     scroll_offset: usize,
     list_height: u16,
     subagents: &HashMap<String, SubagentInfo>,
+    overlay_l2: Option<&str>,
 ) -> u16 {
     let mut reserve = 0u16;
     for entry in entries
@@ -895,7 +940,10 @@ fn agent_chip_reserve(
         let Some(info) = subagents.get(child_session_id) else {
             continue;
         };
-        reserve = reserve.max(agent_overlay_columns(info));
+        reserve = reserve.max(agent_overlay_columns(
+            info,
+            paints_row_context_cell(overlay_l2, info),
+        ));
     }
     reserve
 }
@@ -988,6 +1036,8 @@ impl TasksPane {
             last_theme: Theme::current_kind(),
             workflow_runs: Vec::new(),
             overlay_l2_session_id: None,
+            host_tasks: Vec::new(),
+            painted_running_host_tasks: Vec::new(),
         }
     }
 
@@ -997,10 +1047,34 @@ impl TasksPane {
     }
 
     /// Session id of the open L2 overlay, if this pane is that overlay.
-    /// `None` is L1: wait chrome and the list must not name L3s.
+    /// `None` is L1. Wait chrome still names L2 rows only. Running host
+    /// tasks are painted in addition to those rows.
     pub(crate) fn overlay_l2_session_id(&self) -> Option<&str> {
         self.overlay_l2_session_id.as_deref()
     }
+
+    /// Store this session's live host tasks. On L1, `sync` paints one
+    /// Subagents row per running task in addition to any L2 Agent row.
+    /// A running coordinator does not drop those rows. A completed task
+    /// is not a running row. This does not start or resume a host job.
+    pub(crate) fn set_host_tasks(&mut self, tasks: Vec<HostTask>) {
+        self.host_tasks = tasks;
+    }
+
+    /// True when `id` is a running host task. A completed id is absent,
+    /// even when `running` is still set.
+    pub(crate) fn is_running_host_task(&self, id: &str) -> bool {
+        running_host_tasks(&self.host_tasks)
+            .iter()
+            .any(|task| task.id == id)
+    }
+
+    /// Session-context sentence for the running host tasks painted on the
+    /// last `sync`. Empty when that set is empty. A completed id is not named.
+    pub(crate) fn session_context_agents_running(&self) -> String {
+        session_context_agents_running_sentence(&self.painted_running_host_tasks)
+    }
+
     pub fn sync(
         &mut self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
@@ -1029,9 +1103,10 @@ impl TasksPane {
             .iter()
             .map(|info| info.child_session_id.as_ref())
             .collect();
-        // L1 (`overlay_l2_session_id` none): L2 rows only. Never list L3s
-        // just because that filter is empty. An L2 overlay lists only
-        // `l3_rows_for_l2` for this view's session id.
+        // L1 (`overlay_l2_session_id` none): L2 Agent rows only in this
+        // loop. A depth-2 implementer is not an L2 row. Running host tasks
+        // paint that id later. An L2 overlay lists only `l3_rows_for_l2`
+        // for this view's session id.
         let list_rows: Vec<&SubagentInfo> =
             if let Some(l2_sid) = self.overlay_l2_session_id.as_deref() {
                 l3_rows_for_l2(listed.iter().copied(), l2_sid)
@@ -1069,6 +1144,47 @@ impl TasksPane {
                     &listed,
                 ));
             }
+        }
+        // A header is not a row. Paint each running host task in addition
+        // to any L2 Agent row. A depth-1 coordinator must not clear the
+        // depth-2 implementer. Skip an id that is already an Agent row so
+        // the coordinator is not listed twice. A completed id stays off
+        // this list. An L2 overlay does not take this path.
+        if self.overlay_l2_session_id.is_none() {
+            let rows = subagents_list_rows(&self.host_tasks);
+            let hidden_leftover = |id: &str| {
+                self.cleared_completed_ids.contains(id)
+                    && subagents
+                        .get(id)
+                        .is_some_and(|info| info.should_hide_on_dock_clear())
+            };
+            // Session `/clear` and dock `[clear]` hide occupancy-dead
+            // stale-running rows. They stay in the registry. Do not paint
+            // them again as running host tasks.
+            self.painted_running_host_tasks = running_host_tasks(&self.host_tasks)
+                .into_iter()
+                .filter(|task| !hidden_leftover(&task.id))
+                .cloned()
+                .collect();
+            for row in &rows {
+                if hidden_leftover(&row.id) {
+                    continue;
+                }
+                let already_listed = self.items.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        TaskEntry::Agent {
+                            child_session_id, ..
+                        } if child_session_id == &row.id
+                    )
+                });
+                if already_listed {
+                    continue;
+                }
+                self.items.push(TaskEntry::from_listed_host_task(row));
+            }
+        } else {
+            self.painted_running_host_tasks.clear();
         }
         let now = Utc::now();
         for info in scheduled.values() {
@@ -1263,6 +1379,41 @@ impl TasksPane {
                 if *is_run {
                     running += 1;
                 }
+            }
+        }
+        (running, total)
+    }
+
+    /// Header `tasks N/M` when the dock is off. Depth-2 implementer rows
+    /// stay on the list and do not increment N or M.
+    pub(crate) fn listed_l2_subagent_counts(
+        &self,
+        sessions: &HashMap<String, SubagentInfo>,
+    ) -> (usize, usize) {
+        let child_ids: std::collections::HashSet<&str> = sessions
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
+        let mut total = 0usize;
+        let mut running = 0usize;
+        for item in &self.items {
+            let TaskEntry::Agent {
+                running: is_run,
+                child_session_id,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let is_l2 = sessions
+                .get(child_session_id)
+                .is_some_and(|info| is_l2_list_row(info, &child_ids));
+            if !is_l2 {
+                continue;
+            }
+            total += 1;
+            if *is_run {
+                running += 1;
             }
         }
         (running, total)
@@ -1482,6 +1633,7 @@ impl TasksPane {
             self.list_state.scroll_offset(),
             list_area.height,
             subagents,
+            self.overlay_l2_session_id.as_deref(),
         );
         let text_width = list_area.width.saturating_sub(chip_reserve);
         let text_area = Rect {
@@ -1969,6 +2121,7 @@ impl TasksPane {
         info: &SubagentInfo,
         theme: &Theme,
     ) {
+        let paint_context = paints_row_context_cell(self.overlay_l2_session_id.as_deref(), info);
         let (icon, icon_style, right_text, right_style) = if info.attempt.pending_kill {
             let frames = crate::glyphs::dot_spinner_frames();
             let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
@@ -1985,7 +2138,7 @@ impl TasksPane {
             (
                 frames.get(frame_idx).copied().unwrap_or(""),
                 Style::default().fg(theme.accent_running),
-                agent_overlay_right_text(info, &elapsed),
+                agent_overlay_right_text(info, &elapsed, paint_context),
                 Style::default().fg(theme.gray),
             )
         } else if info.attempt.status.as_deref() == Some("completed") {
@@ -1993,7 +2146,7 @@ impl TasksPane {
             (
                 crate::glyphs::check_mark(),
                 Style::default().fg(theme.accent_success),
-                agent_overlay_right_text(info, &elapsed),
+                agent_overlay_right_text(info, &elapsed, paint_context),
                 Style::default().fg(theme.gray),
             )
         } else {
@@ -2001,7 +2154,7 @@ impl TasksPane {
             (
                 crate::glyphs::ballot_x(),
                 Style::default().fg(theme.accent_error),
-                agent_overlay_right_text(info, &elapsed),
+                agent_overlay_right_text(info, &elapsed, paint_context),
                 Style::default().fg(theme.gray),
             )
         };
@@ -4747,5 +4900,74 @@ mod tests {
             l1_two_l2_two_l3_sessions(None),
             "L1 Subagents view does not include L3 rows. A live spawn that left L3 depth None and parent l2-a still must not list that L3.",
         );
+    }
+
+    #[test]
+    fn subagents_list_paints_one_row_per_live_host_task() {
+        let tasks =
+            crate::views::subagents_list_host_tasks::grub_fontforge_live_host_tasks_fixture();
+        let mut pane = TasksPane::new();
+        pane.set_host_tasks(tasks.clone());
+        pane.sync(&BTreeMap::new(), &HashMap::new(), &HashMap::new(), &[]);
+        let ids = pane.listed_agent_session_ids();
+        assert_eq!(
+            ids,
+            vec![
+                "01a2165b-8168-7629-88d8-2c9f585c0eb6".to_string(),
+                "01a21664-fa98-750b-b5c5-03519147d2b7".to_string(),
+            ],
+            "a live host task produces no Subagents row: {ids:?}"
+        );
+        assert!(
+            !ids.iter()
+                .any(|id| id == "completed-grub-not-a-running-row"),
+            "a completed id is not a running row: {ids:?}"
+        );
+        let labels: Vec<String> = pane
+            .items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent {
+                    label,
+                    running: true,
+                    ..
+                } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|label| {
+                label.contains("01a2165b-8168-7629-88d8-2c9f585c0eb6")
+                    && label.contains("fontforge")
+                    && label.contains("14m51s")
+            }),
+            "coordinator row needs id, description, and elapsed: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| {
+                label.contains("01a21664-fa98-750b-b5c5-03519147d2b7")
+                    && label.contains("grub hook")
+                    && label.contains("4m41s")
+            }),
+            "implementer row needs id, description, and elapsed: {labels:?}"
+        );
+        assert!(
+            pane.entries
+                .iter()
+                .any(|entry| matches!(entry, TaskEntry::Agent { .. })),
+            "header is not a substitute for rows"
+        );
+        assert!(
+            pane.entries
+                .iter()
+                .all(|entry| entry.search_text() != "Two newer IDs exist beyond the L2")
+        );
+        let sentence = pane.session_context_agents_running();
+        assert_eq!(sentence, session_context_agents_running_sentence(&tasks));
+        assert!(sentence.starts_with("2 agents are running:"));
+        assert!(sentence.contains("01a2165b-8168-7629-88d8-2c9f585c0eb6"));
+        assert!(sentence.contains("01a21664-fa98-750b-b5c5-03519147d2b7"));
+        assert!(!sentence.contains("completed-grub-not-a-running-row"));
+        assert_ne!(sentence, "Two newer IDs exist beyond the L2");
     }
 }
