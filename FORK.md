@@ -169,11 +169,11 @@ identifier that has no matching `fn`.
   regress silently): `materialize_new_auto_stays_welcome_when_no_last_session`,
   `materialize_new_auto_does_not_open_last_when_headless`,
   `from_pager_args_opens_last_session_on_start`.
-- [x] **Finished nested sessions must not hang L1 chrome**: a parent wait
+- [x] **Finished nested sessions must not hang L1 chrome**: an L1 wait
   whose nested id already exited must not stay on `Waiting for the model`
   with a climbing timer. Duplicate Human `[Image #1]` after send is FAIL.
   Overlay L3 status click must open that specialist view (`/dashboard` is
-  not `/running`). Frozen overlay elapsed after child ACP turn-end.
+  not `/running`). Frozen overlay elapsed after the nested ACP turn-end.
   Overlay title after `SubagentFinished` equals host `duration_ms`
   (54m34s), not a later spawn-wall clock (1h14m). Reopening a finished
   overlay must not start a climbing title clock. Live list must drop
@@ -492,7 +492,7 @@ identifier that has no matching `fn`.
   `format_compact_summary_caps_unique_75k_body_to_compact_summary_budget`,
   `build_compacted_history_unique_75k_summary_stays_within_compact_summary_budget`.
 - [x] **Pasted images are image tokens, not data-URL text**: the main
-  (parent) session model request must not include image content parts.
+  (L1) session model request must not include image content parts.
   Files live under the session directory (`images/`). History, the prompt
   write-ahead log, and `pending_prompts` keep `[Image #N]` and file ids,
   not `data:image/...;base64` crates. Understanding a paste uses public
@@ -501,13 +501,13 @@ identifier that has no matching `fn`.
   not Imagine. See
   [xAI image understanding](https://docs.x.ai/docs/guides/image-understanding)
   (accessed: 2026-09-07). A nested agent may send `input_image` on its
-  own request from those session files. The parent spawn prompt is text
+  own request from those session files. The L1 spawn prompt is text
   (paths and `[Image #N]`), never a data URL. The nested report is text.
   Compact/recap and `compaction_requests` still use `strip_images`
   (`[image]`). `image_edit` still uses `AttachedImages`. `view_image` is
   the tool path for search-found images only. Count via
   `estimate_item_tokens` (`IMAGE_TOKEN_ESTIMATE` 765) only for
-  `ContentPart::Image`; a parent text-only item after persist does not
+  `ContentPart::Image`; an L1 text-only item after persist does not
   add 765. Tests: `estimate_item_tokens_ignores_data_url_byte_length`,
   `strip_images_does_not_serialize_the_data_url_crate`,
   `compact_history_does_not_copy_the_data_url_crate`,
@@ -557,21 +557,21 @@ identifier that has no matching `fn`.
   `main_session_sampling_window_is_catalog_500k_even_when_economic_is_on`,
   `nested_session_sampling_window_stays_200k_when_catalog_is_500k`
   (`xai-grok-shell` `session/acp_session_impl/spawn.rs`).
-- [x] **Parent ingest folds huge spawn prompts**: parent ingest folds
+- [x] **L1 ingest folds huge spawn prompts**: L1 ingest folds
   spawn prompts over 40k into a pointer (description + size + report path
   if any). Live L2 execute still uses the full spawn prompt. Spawn
-  **tool-call arguments** on the parent assistant item can still count
+  **tool-call arguments** on the L1 assistant item can still count
   until fold runs. Tests (filter `fold_spawn_prompt`):
   `huge_spawn_prompt_becomes_pointer_with_description_and_report`,
   `small_spawn_prompt_stays`, `read_file_args_are_not_folded`
   (`xai-grok-sampling-types` `fold_spawn_prompt_parent_ingest_tests`);
   `parent_estimated_tokens_omit_huge_spawn_prompt`
   (`xai-chat-state` `actor/tests.rs`).
-- [x] **Parent ingest folds huge shell/nix ToolResults (2026-09-02)**: a
+- [x] **L1 ingest folds huge shell/nix ToolResults (2026-09-02)**: a
   2MB ANSI/nix-looking tool result must not add ~200k tokens to L1 500k
   or nested 200k sampling. Store a head/tail pointer (and a log path when
   the body names one). Goal Plan Writer / nested fork must not inherit
-  the parent's full `just check-remote` dump as opening context. L3 and
+  the L1 session's full `just check-remote` dump as opening context. L3 and
   once-run Goal Plan Writer still must not compact-and-continue.
   Tests: `two_megabyte_nix_ansi_tool_result_does_not_add_200k_tokens`,
   `two_megabyte_task_completed_user_is_folded`
@@ -584,9 +584,9 @@ identifier that has no matching `fn`.
   (`xai-grok-shell` compaction). Catalog:
   [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
   § Shell/nix tool-result ingest.
-- [x] **Parent ingest caps huge last answers**: parent ingest /
+- [x] **L1 ingest caps huge last answers**: L1 ingest /
   completed-poll / blocking-spawn prompt format cap huge last answers
-  (~40k) and point at an on-disk report if one exists. Stored child
+  (~40k) and point at an on-disk report if one exists. Stored nested
   output can still be the full string. There is no automatic on-disk
   last-answer report. Tests:
   `to_model_text_caps_huge_last_answer_for_parent_ingest`
@@ -754,12 +754,12 @@ identifier that has no matching `fn`.
   `start_with_cancel_resume_marker_continues_interrupted_turn`.
 - [x] **`/unstick` resends the last L1 prompt**: pager builtin, not `/resume`
   (picker) and not continue interrupted turn (`canceled_turn_resume.json`).
-  When graceful resume did not unstick chrome, resend the last parent prompt
+  When graceful resume did not unstick chrome, resend the last L1 prompt
   as if the network dropped it. Do not paint a second Human line. Do not
   append a second `<user_query>`. Do not cancel nested agents, rewind, drop
   the transcript, reset sampler usage meters, or compact the turn away.
   Prefer `prompt_wal.jsonl` L1 text when that file exists; else last Human
-  send on the parent session, not a nested overlay. Image tokens stay
+  send on the L1 session, not a nested overlay. Image tokens stay
   `[Image #N]`. WAL image file ids resend as resource links (`file://`
   under session `images/`), never data URLs. A hung `running_task` is
   orphaned the way a reconnecting client drops an in-flight RPC, then the
@@ -915,20 +915,23 @@ identifier that has no matching `fn`.
   `CHILD_TASK_DESCRIPTION`),
   `default_max_allows_l2_to_spawn_l3` (`xai-grok-tools` `task/mod.rs`).
   User-guide `16-subagents.md` names Hierarchical fast path (L1-only:
-  one-command host question, one already named path, or the asked-for
-  report). Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
+  one already-named host command, one already-named path read, one
+  asked-for report quote, and one already-named one-line edit). Do not
+  put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
   A restack can keep AGENTS via `FORK_PATHS` and still drop
   `CHILD_TASK_DESCRIPTION`. Product cargo is the seam.
 
 Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cannot bypass L1. Only L1 spawns L2s. An L2 spawn is an L3. An L3 cannot spawn.
 
 - [x] **Hierarchical subagents L0 L1 L2 L3 (GitHub #224)**: L0 is the
-  dashboard, one level above L1. L1 is the Operator context. L2 is a
-  coordinator (the Operator can prompt an L2 they are watching). L3
-  implements and reviews. An L3 does not spawn. There is no L4. Default:
+  laptop coordinator. The crate name is `surmount-coordinator-gui`. L0
+  queues prompts and is not a nested agent. L1 is the main session that
+  talks to the Operator. L2 is a coordinator (the Operator can prompt an
+  L2 they are watching). L3 implements and reviews. An L3 does not spawn.
+  There is no L4. Default:
   L1 spawns an L2; that L2 spawns and manages L3s. Do not keep implement
   work on L1. All tokens in an L3 contribute to the token costs of the
-  L2. Deep home: § *Hierarchical subagents (GitHub #224)*. KEEP GitHub #222
+  L2. Deep home: § *Hierarchical subagents (specification 0016)*. KEEP GitHub #222
   tests `l2_after_compact_still_resumes_its_l3s`,
   `l2_resume_from_of_running_l3_still_fails_active`,
   `l2_follow_up_of_l3_does_not_spawn_l4`. `MAX_SUBAGENT_DEPTH` stays 2
@@ -937,9 +940,9 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   `l3_cannot_spawn_l4_or_another_l3`). L3 cost rolls into the L2 row:
   `subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists`.
 
-- [x] **`/goal` parent coordinates; L2 MUST spawn L3 (Surmount / grok-oss
-  fork of the injected prompt):** Upstream `goal_instruction` tells the
-  parent to "Deliver everything the user asked for yourself," which
+- [x] **`/goal` L1 coordinates; L2 MUST spawn L3 (Surmount / grok-oss
+  fork of the injected prompt):** Upstream `goal_instruction` tells
+  L1 to "Deliver everything the user asked for yourself," which
   fills L1. Surmount keeps the objective and the `update_goal` contract,
   and tells L1 to coordinate (spawn L2; that L2 MUST spawn L3 for
   tools; L3 does the tools; no L4). There is no bundled goal skill;
@@ -954,18 +957,18 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   harness: `xai-grok-shell`
   `goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools`,
   `goal_task_discipline_parent_spawns_l2_not_product_tools`.
-- [x] **Parent fire-and-return spawn (Surmount / grok-oss fork)**: a nested
-  L2 that is a long builder (compile, lake, mill) must not occupy the
-  parent as a blocking 10-minute `get_command_or_subagent_output` wait
-  loop. Parent starts it, keeps working, completion is a notification.
-  Parent can spawn a second L2 while the first is still running without
+- [x] **L1 fire-and-return spawn (Surmount / grok-oss fork)**: a nested
+  L2 that is a long builder (compile, lake, mill) must not occupy
+  L1 as a blocking 10-minute `get_command_or_subagent_output` wait
+  loop. L1 starts it, keeps working, completion is a notification.
+  L1 can spawn a second L2 while the first is still running without
   waiting for the first to exit. Snapshot (`omit` / `0`) is allowed.
-  Positive `timeout_ms` remains only when the parent must join.
-  Upstream parent turns often sit on a 10-minute wait. Named test:
+  Positive `timeout_ms` remains only when L1 must join.
+  Upstream L1 turns often sit on a 10-minute wait. Named test:
   `parent_spawn_subagent_second_l2_while_first_still_running_without_wait`
   in `xai-tool-types` (`task.rs`) and `xai-grok-tools`
   (`task/backend_tests.rs`).
-- [x] **Parent follow-up onto a running nested L2 (Surmount / grok-oss
+- [x] **L1 follow-up onto a running nested L2 (Surmount / grok-oss
   fork, GitHub #143)**: L1 can enqueue a follow-up onto a still-running
   nested L2 as additive work. It does not kill that L2, does not respawn
   it, and does not wait for it to exit. `resume_from` still continues a
@@ -980,7 +983,7 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   key. Keywords: running L2 follow-up versus `resume_from` completed, L3
   unbothered, additive not kill. Operator: "You can't talk to your own
   L2s? And you're fine with that? Why?" Grok OSS vs SpaceXAI: upstream
-  L1 has no this live-L2 parent-tool enqueue. Schema:
+  L1 has no this live-L2 follow-up enqueue. Schema:
   `TaskToolInput.follow_up` is optional and distinct from `resume_from`
   (`xai-tool-types` `task.rs`). Coordinator: `SubagentBackend::follow_up`,
   `SubagentEvent::FollowUp`, `handle_follow_up` (`xai-grok-tools`
@@ -1010,7 +1013,7 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   tests as contracts, red then green TDD, do not interrupt live L2s when
   L1 shows a plan pane, fire-and-return for long builder L2s) is the
   first section of the post-compaction `<system-reminder>`. It is not a
-  buried AGENTS.md paragraph and not `/recap`. Upstream parent turns
+  buried AGENTS.md paragraph and not `/recap`. Upstream L1 turns
   often sit on a 10-minute `get_command_or_subagent_output` wait.
   Surmount starts the builder L2 and keeps working; completion is a
   notification. Crate: `xai-grok-shell`
@@ -1050,7 +1053,7 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   2026-08-09 wave filter; not one of the seven product land classes.
 - [x] **Continue interrupted turn on restart**: `canceled_turn_resume.json`;
   distinct from last-session on start. Mid-turn `/rebuild` does not cancel
-  the parent and does not write this marker; the new TUI adopts the live
+  the L1 session and does not write this marker; the new TUI adopts the live
   turn like a disconnect (`runningPromptId`). Nested ids are still not
   cancelled. `/rebuild` is not a nested-work gate. Idle completed turns
   do not write a marker and do not re-fire the last prompt. Load drops a
@@ -1071,7 +1074,7 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   interruption resumes it. The relaunch continues that task. A session that
   has restored its context still continues the task that was in flight.
   Mid-turn `/rebuild` does not cancel
-  the parent; the new TUI adopts the live turn (`runningPromptId`). Unsent
+  the L1 session; the new TUI adopts the live turn (`runningPromptId`). Unsent
   composer draft (`unsent_prompt_draft`), queued prompts including
   mid-turn interject text (`pending_prompts.json`), plan Operator-box
   `feedback_draft`, and session `plan.md` survive. Nested subagent ids are
@@ -1115,7 +1118,7 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`.
   Leader `RelaunchForUpdate` keeps nested ids on that leader the same way
   a TUI disconnect does (the leader is not exec-replaced while nested ids
-  are live). After nested ids finish, that leader stays up while the parent
+  are live). After nested ids finish, that leader stays up while the L1
   turn is still busy, with no five-second cap. Named drain tests:
   `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`,
   `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
@@ -1214,10 +1217,10 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   Do not delete or weaken `prompt_wal_appends_on_mid_turn_interject`. Catalog:
   [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
   § Interject Ctrl+Enter and Send now.
-- [x] **Leader `RelaunchForUpdate` nested work and parent-turn busy survive like a TUI
+- [x] **Leader `RelaunchForUpdate` nested work and L1-turn busy survive like a TUI
   disconnect**: this leader process stays up while nested ids are live
   (spawned leaders already pass `--no-exit-on-disconnect`). After nested
-  ids finish, this process stays up while the parent turn is still busy
+  ids finish, this process stays up while the L1 turn is still busy
   (`AgentActivity::is_busy` or IPC `agent_busy`), with no five-second
   wall-clock kill, then the leader may relaunch. Named tests:
   `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`,
@@ -1312,7 +1315,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `forked_session_status_header_clicks_open_dashboard_and_cycle`,
   `forked_session_status_header_paints_dashboard_for_lone_fork`
   (`app/agent_view/render.rs`). Resume of a persisted fork restores the
-  parent as a live agent and stamps `forked_from`:
+  L1 session as a live agent and stamps `forked_from`:
   `load_session_restores_fork_family_from_disk`
   (`app/dispatch/tests/session/load.rs`).
 - [x] **Plan footer CTAs**: idle footer is Approve / Comment / Revise / Exit
@@ -1428,7 +1431,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   frozen SQL snapshot and not a previous transcript plan body. Two
   different plan texts in the same window after Exit plus re-present is
   a fail unless the panel matches disk. After Plan Exit, Isolated
-  Preview must not wedge: Esc:close, `/start`, or `/unstick` (hung parent
+  Preview must not wedge: Esc:close, `/start`, or `/unstick` (hung L1
   prompt) leave the pane. `/start` continues paused or interrupted work
   in this process. It is not `/resume`. After Plan Exit, Isolated Preview
   must paint this session's current disk `plan.md`, not leftover TECH.md,
@@ -1493,8 +1496,8 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `agent_empty_bracketed_paste_defers_probe_for_clipboard_image`,
   `approve_or_revise_drains_plan_composer_images`.
 - [x] **No two live same-description Subagent rows**: product spawn
-  **rejects** a second live Task-owned child with the same trimmed
-  description on the same parent. It does not replace the first child.
+  **rejects** a second live Task-owned nested session with the same trimmed
+  description on the same L1. It does not replace the first nested session.
   Unlimited retry paints `Retrying (1)`, never `Retrying (1/4294967295)`.
   Finite `Retrying (2/5)` stays. Token Economy implement-loop effort is
   thoroughness, not reviewer count (one reviewer unless the operator asked
@@ -1518,7 +1521,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `[clear]` on the Subagents list removes completed rows and leaves a running row (`clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running_row`). A left click on the painted control is `clicking_clear_removes_completed_subagent_rows_and_leaves_the_running_row`. Hover from yellow to white is `clear_button_turns_from_yellow_to_white_on_hover`. A left click on `1 specialist` is `clicking_the_specialist_count_opens_that_l3`.
   The Subagents list paints a scrollbar when the rows are taller than the panel, and scrolling reaches every row, including the last one (`subagent_list_scrolls_when_rows_overflow_the_panel`).
 - [x] **Live Subagents list is still-running only; already_exited drops the paused Implementer overlay**: the live Subagents list, header `:: N`, Subagents N, and footer N subagents share one running-only filter (`listed_live_subagents`). Host exit sets `finished = true` the same turn and the timer stops. Kill `already_exited` / `AlreadyFinished` still dismisses the paused Implementer overlay (`finalize_killed_subagent` idles leftover chrome and calls `dismiss_nested_overlay`). Paused closeout is not live. `/rebuild` occupancy restore (`restore_nested_occupancy_from_disk`) must not un-finish or revive a dead host from a snapshot that always has `finished: false`; Occupied rows stay as-is; vacant insert is still-running resume (`retain_still_running_nested_occupancy`). Grok OSS: SpaceXAI list paint does not encode this already_exited overlay closeout. Tests: `kill_already_exited_dismisses_paused_implementer_overlay`, `restore_nested_occupancy_does_not_unfinish_or_revive_dead_host`, `running_count_matches_listed_live_l2_not_l3`, `kill_already_completed_drops_live_list_responding_and_still_running_cue`.
-- [x] **Compacting Subagents row `[↗]` still opens**: Operator `[↗]` must open the L2 window while that row is Compacting, on any painted row including the top and the last. Compact chrome must not swallow the open hit target. `[X]` on a Compacting row still kills. AutoCompactStarted still clears `active_subagent` so compact does not auto-steal the parent TUI. Operator `[↗]` may set `visible_nested_overlay_sid` while AutoCompacting. Keywords: `open_subagent_fullscreen` versus AutoCompactStarted auto-steal. Grok OSS: SpaceXAI auto-compact steal is not this Operator open path. Tests: `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`. KEEP `nested_compact_chrome_does_not_steal_parent_fullscreen_overlay`. `nested_compact_chrome_must_not_steal_parent_tui_scroll` is the AutoCompactStarted path (`active_subagent` None).
+- [x] **Compacting Subagents row `[↗]` still opens**: Operator `[↗]` must open the L2 window while that row is Compacting, on any painted row including the top and the last. Compact chrome must not swallow the open hit target. `[X]` on a Compacting row still kills. AutoCompactStarted still clears `active_subagent` so compact does not auto-steal the L1 TUI. Operator `[↗]` may set `visible_nested_overlay_sid` while AutoCompacting. Keywords: `open_subagent_fullscreen` versus AutoCompactStarted auto-steal. Grok OSS: SpaceXAI auto-compact steal is not this Operator open path. Tests: `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`. KEEP `nested_compact_chrome_does_not_steal_parent_fullscreen_overlay`. `nested_compact_chrome_must_not_steal_parent_tui_scroll` is the AutoCompactStarted path (`active_subagent` None).
 - [x] **L2 implement coordinator strips grep/read/edit (GitHub #141)**: an L2 coordinator for implement work (`apply_child_tool_policy`) must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. Compact on that L2 is a product miss when the cause is L2-solo implement tools. `CHILD_TASK_DESCRIPTION` must contain those Operator strings and must not teach "Easy work can stay on L2", "Including implement loops", or "Spawn L3 only if the problem is actually hard" for greps, reads, or product edits. `SubagentCapabilityMode::All` is the existing upstream/full-tool escape. Do not invent a second permission system. Ordinary L2 still AUTO compact at 95% of nested 200k. Do not fold implement L2 into never_auto_compact. A specialist must not compact itself. Grok OSS vs SpaceXAI: SpaceXAI nested L2 keeps grep/read/edit. Surmount implement coordinator strips those and keeps spawn. Tests: `l2_implement_coordinator_capability_none_strips_search_replace`, `l2_implement_coordinator_capability_none_strips_grep_and_read_file`, `l2_implement_coordinator_still_keeps_spawn_subagent`, `l3_at_max_depth_keeps_search_replace_and_grep_without_task`, `l2_capability_mode_all_keeps_edit_grep_read`, `child_task_description_is_concise`. KEEP `l2_auto_compact_still_fires_at_95_percent_of_200k` and the four #140 tests `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`.
 - [x] **Ctrl+C two-stage**: first Ctrl+C with a non-empty draft (text or image chips) clears. Isolated Preview stays. Second Ctrl+C when already empty then Isolated Preview Exit / abandon / cancel. Isolated Preview calls the same `CancelTurn` path as the mill composer (`handle_prompt_key` skip-promote when draft, overlay `try_plan_overlay_agent_action` returns None when draft). Leftover Isolated Preview first-Ctrl+C-to-Exit arm is deleted. Grok OSS: SpaceXAI mill two-stage is the mill composer only; Isolated Preview used to Exit on first Ctrl+C. Tests: `isolated_preview_handle_input_ctrl_c_with_text_clears_and_stays`, `isolated_preview_handle_input_second_empty_ctrl_c_exits`, `isolated_preview_handle_input_running_turn_draft_ctrl_c_does_not_cancel_turn`, `leftover_isolated_preview_handle_input_ctrl_c_clears_then_exits`. KEEP mill `ctrl_c_idle_prompt_with_text_clears_text`, `ctrl_c_idle_prompt_with_image_chips_only_clears_chips`, `ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn`, `ctrl_c_running_prompt_with_image_chips_only_clears_chips_and_preserves_turn`, `plan_approval_ctrl_c_clears_draft_then_second_abandons`, `line_viewer_ctrl_c_clears_draft_then_second_abandons`.
 - [x] **`/model` last Tab**: when slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab and Enter apply `SwitchModel` now (reuse `ModelCommand::action_for_args`; `SetDefaultModel` becomes `SwitchModel { effort: None }`). Composer clears. No Operator `/model` chat. More than one row still completes. Unique trailing-space reasoning row still switches now. Complete typed `Grok 4.6 xhigh` switches with effort even when the effort dropdown still lists every level. Command-phase unique `/model` still completes `/model `. Isolated Preview slash Tab intercepts before RowWalk. Ctrl+M picker unchanged. Grok OSS: SpaceXAI Tab is text-only accept; Enter accepted then sent as a prompt. Tests: `unique_model_slash_tab_switches_now_empty_composer_no_send`, `unique_model_slash_enter_switches_now_no_operator_model_chat`, `unique_m_slash_tab_switches_now`, `complete_typed_model_xhigh_tab_switches_now_with_effort`, `command_phase_unique_model_tab_still_completes`, `multi_row_model_tab_stays_complete_not_switch`, `isolated_preview_unique_model_tab_switches_now_does_not_rowwalk`.
@@ -1540,7 +1543,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   not contain `measured`. Each L2 row is a live atomic total of that
   L2's present plus past usage, including every specialist it spawned,
   with each unit counted once. Specialists still show separately. Do not
-  add nested windows into the parent `239K / 500K` L1 context chip.
+  add nested windows into the L1 `239K / 500K` context chip.
   `sum_live_nested_session_windows` adds each live nested session once
   and does not add an L3 both inside its L2 figure and again in the
   total. Internal field names such as `measured_tokens` and the
@@ -1599,7 +1602,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `global_paused_idle_paints_resume_not_stop` (`views/turn_status.rs`).
 - [x] **Esc on an L2/L3 overlay dismisses the nested view** and leaves that
   subagent running. It does not emit CancelTurn and does not start
-  Cancelling chrome. A prior parent cancel-confirm arm does not fire
+  Cancelling chrome. A prior L1 cancel-confirm arm does not fire
   while that overlay is open. Esc while not in the overlay still needs
   confirm before cancel. Keep-working / interject while Cancelling
   aborts the local cancel. Tests: `l2_overlay_esc_leaves_overlay_without_cancelling`,
@@ -1716,7 +1719,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   Ctrl-Z debounce, WAL, or Operator labels.
 - [x] **Plan cancel and overlay Write finish in a bounded way (2026-09-02)**:
   cancel of a plan-mode or overlay turn must leave `Cancelling…` after the
-  resend cap (overlay children are on the turn-end reconcile). A plan-mode
+  resend cap (nested overlay sessions are on the turn-end reconcile). A plan-mode
   turn with a live queue row must not stay Cancelling after the cancel path
   returns. `[stop]` during Cancelling must finish cancel, not sit. Queue
   promotion that changes `current_prompt_id` must not skip turn-end
@@ -1768,7 +1771,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   the lock still has it. Optional `bincode` 1.0 remains
   ([RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html),
   accessed: 2026-10-18). paste, smartstring, and bincode stay remaining
-  (parents have no drop; no ignore; no vendor). GitHub syntect HEAD is not
+  (no drop; no ignore; no vendor). GitHub syntect HEAD is not
   dump-format compatible with two-face 0.4.5. Do not path-vendor
   `third_party/syntect`. Do not `cargo audit --ignore`. Named tests stay:
   `highlight_lines_for_fence_info_still_accepts_rust_token`,
@@ -1846,7 +1849,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   crane builds stay fileset-rooted
   ([`flake/grok-nix-helper.nix`](flake/grok-nix-helper.nix),
   [`flake/cargo-mem-guard.nix`](flake/cargo-mem-guard.nix)) so crane never
-  loads the parent workspace `Cargo.toml`. Quality
+  loads the workspace root `Cargo.toml`. Quality
   `.#workspace-cargo-quality` deps (`workspaceCargoArtifacts`) runs
   `cargo check --locked --all-targets` (and `cargo build --locked`). Do
   **not** drop `--locked` to go green. When a workspace member
@@ -1899,7 +1902,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   yaml-load is crate yaml-rust2. The lock still has `name = "yaml-rust"`
   until a permitted host runs `cargo update -p syntect`. Do not claim that
   row is dropped while the lock still has it. paste, smartstring, and
-  bincode stay remaining (parents have no drop; no ignore; no vendor).
+  bincode stay remaining (no drop; no ignore; no vendor).
   Do not fetch crates.io to skip menhera-cooldown.
   office_oxide is registry 0.1.17. That menhera-cooldown exception is
   this crate only. Do not vendor. Do not point cargo at crates.io to
@@ -1998,67 +2001,223 @@ This is what speaker-label sentences mean. Dual-pin:
 / Operator / Next. It supersedes the 2026-09-01 line that left the
 composer named Human box.
 
-### Hierarchical subagents (GitHub #224)
+### Hierarchical subagents (specification 0016)
 
-This heading is the deep home. [`AGENTS.md`](AGENTS.md) § *Agent depth*
-is the short pointer. Hierarchical subagents are the default way
-grok-oss does work.
+This heading is the deep home for specification 0016, version 0.1.0,
+dated 20261026, file `0016_Hierarchical_Subagents.md`. Normative clauses
+through 6.6 are recorded here in product prose. [`AGENTS.md`](AGENTS.md)
+§ *Agent depth* stays a short pointer. Skills, workflows, and the user
+guide point here. They do not copy this contract. A conforming
+hierarchical subagent program is not claimed. Numbered markdown remains
+the contract humans read. This note does not paste Lean theorems. Lean
+encodings and their proofs stay in separate modules. A module that
+mixes them does not conform. This note does not claim those companion
+files are already present. This note does not restate specification
+0015. Sandbox inheritance, act targets, bus fields, socket ownership,
+and the exit-without-report event stay in that specification.
 
-**Layers.** L0 is the dashboard, one level above L1. In this product
-that dashboard is `grok-oss gui` (crate `surmount-coordinator-gui`). It
-is not pager `/dashboard`. Those products must not merge. L1 is the
-context where the agent talks to the Operator. L2 is a coordinator. The
-Operator can still prompt an L2 they are watching. L3 implements and
-reviews. An L3 does not spawn. There is no L4. Nested agents are L1,
-L2, and L3. L0 is the dashboard, not a nested spawn layer.
+**Layers.** L0 is the laptop coordinator. The crate name is
+`surmount-coordinator-gui`. L0 queues prompts. L0 is not a nested agent.
+The call name `grok-oss gui` is informative and matches that crate. L0
+does not merge into pager `/dashboard`. L1 is the main session, the
+context where the agent talks to the Operator. L2 is the coordinator.
+The word coordinator means L2 only. L3 is the specialist. The word
+specialist means L3 only. There is no L4. An attached client is not a
+layer. The session bus server is not a layer. Nested agents are L1, L2,
+and L3. [Issue 224](https://github.com/SurmountSystems/grok-oss/issues/224)
+calls L0 the dashboard, one level above L1, and L0 remains that laptop
+coordinator. Layers can talk to the layer above and the layer below.
 `MAX_SUBAGENT_DEPTH` stays 2 (L1 spawns L2, L2 spawns L3). Named tests:
 `default_max_allows_l2_to_spawn_l3`,
 `l3_cannot_spawn_l4_or_another_l3`,
 `l3_spawn_subagent_with_prompt_and_omitted_description_still_cannot_spawn`,
 `l2_follow_up_of_l3_does_not_spawn_l4`. KEEP those. Do not weaken them.
 
-Speaker labels stay Operator and Agent. Do not call the layers parent
-or child. Do not analogize nested agents to OS process trees.
+**Naming.** In chat, board titles, spawn descriptions, plans, reports,
+residual, and docs, do not use kinship words for a layer. Name layers
+only as L0, L1, L2, and L3. Do not compare layers to operating system
+process trees. Do not use an operating-system process phrase for an
+agent. Files that pass work from one layer to the next are reports.
+They are not joins. An author may name parallelism that forks work and
+then joins the results. That permission does not allow a kinship word
+for a layer. Speaker labels stay Operator and Agent.
 
-**Default flow.** It is hard to estimate complexity early. Do not keep
-implement work on L1. Almost always, L1 spawns a coordinator L2 to
-accomplish the task. That L2 spawns and manages L3s. The L2 can restart
-and compact its L3s when those L3s are doing well. After compact, that
-L2 still talks to its L3s: `follow_up` a running L3, `resume_from` a
-completed L3. KEEP GitHub #222 named tests:
+**Depth.** When implement work, diagnosis across more than one file,
+continuous integration, or a regression needs tools, that work runs
+three layers deep, including implement loops. Complexity is hard to
+estimate early, so the default is that L1 spawns an L2 and that L2
+spawns and manages L3s. Hierarchical subagents are the default way
+grok-oss does work. Do not keep implement work on L1.
+
+**L1 and the fast path.** L1 duties are status, spawning an L2, waiting,
+reading short reports, and a board upsert. Aside from one already named
+edit of a single line on the fast path, L1 does not edit product code
+and L1 does not edit docs. The hierarchical fast path is for L1 only.
+It has exactly four acts: one command that answers a host question, one
+read of a path that was already named, reading and quoting a report
+that L1 asked for, and one already named edit of a single line. That
+single-line edit is in scope. It is not out of scope. "Just a quick
+look" is not that path. The fast path does not appear in the task
+description given to an L2.
+
+**L2.** An L2 runs at the same time as the disjoint work this heading
+allows to run at the same time, spawns an L3, waits, reads the L3
+report, writes one L2 report, records a board upsert, and discards
+context after that report. An L2 does not grep, read product files,
+diagnose, edit, implement, or review. The spawn rule that easy work
+stays on the L2 is nonconforming. The spawn rule that an L2 spawns an
+L3 only when the slice is hard is nonconforming. An L2 does not compact
+because it ran implement tools itself. That compaction is nonconforming.
+Operator clarifications go to the L2. The L3 stays undisturbed. The
+Operator can still prompt an L2 they are watching. An L2 may compact
+its own coordinator context. After that compact, that L2 still receives
+the L3 completion report and still resumes its L3s. Compact on an L2
+does not drop the L3. That L2 can resume a finished L3. The identifier
+for that act on a completed L3 is `resume_from`. That L2 can follow up
+a running L3. The identifier for that act is `follow_up`.
+[Issue 222](https://github.com/SurmountSystems/grok-oss/issues/222) is
+the L2 path: an L2 may compact, and after compact that L2 must still
+resume its L3s.
+[Issue 143](https://github.com/SurmountSystems/grok-oss/issues/143) is
+the path where L1 follows up a running L2. An L2 can restart and
+compact its L3s when those L3s are doing well. Discarded L2 and L3
+contexts do not have to be compacted into L1. They report up. That is
+the token efficiency. Every token counted for an L3 contributes to the
+token cost of its L2. An L2 token total is at least the sum of the
+token totals of its L3s. KEEP GitHub #222 named tests:
 `l2_after_compact_still_resumes_its_l3s`,
 `l2_resume_from_of_running_l3_still_fails_active`,
 `l2_follow_up_of_l3_does_not_spawn_l4`. Do not weaken them.
 
-**Hierarchical fast path on L1.** One already-named command, one
-already-named file read, the asked-for short report, or one
-already-named one-line edit. "Just a quick look" is not that path.
+**L3.** An L3 is an implementer, a researcher, or a reviewer. The L3
+does the tool work for the jobs in the depth paragraph, aside from the
+L1 fast path. The L3 does not coordinate, and the L3 does not spawn.
+There is no L4. An L3 is not called a coordinator.
 
-**Token efficiency.** Discarded L2 and L3 contexts do not have to be
-compacted into L1. They report up to L1. That is why hierarchical
-subagents are maximally token efficient.
+**Reports.** Reports are written under `~/.agents/reports/` on the host.
+Reports are not written in the repository. A report states what
+changed, how it was verified, what remains, and any question for the
+Operator. Call those files reports, not joins.
 
-**Talk.** All layers can talk to the layers above and below.
+**Plan gate.** While a plan is being written or presented, nested
+exploration does not start, and nested implementation does not start.
+Nested exploration and nested implementation start only after the
+Operator Approve.
 
-**A finished nested agent is a same-turn next action (operator 2026-10-23).**
-When an L2 or L3 finishes, L1 reports and starts the next named action
-in that same turn. Read the short report. Tell the Operator what landed.
-Then spawn the leftover, start the one `just check-remote`, close the
-board item, or name the blocker. Silence after a finish looks like a
-stall. Waiting for the next Operator ping is a miss. This does not
-weaken fire-and-return on a live compile. Dual-pin: this heading;
+**Parallelism.** Independent work streams with disjoint write sets run
+as parallel L2 coordinators at a sustainable count. This contract does
+not set that count to an integer. Work streams that share a file run in
+sequence. Each L2 stays listed until that L2 writes its own report. An
+L2 that exits after only spawning is not finished. An L2 that exits
+without a report is not finished.
+
+**Long builds.** A long build gets one dedicated L2. That L2 runs one
+job. That job runs at nice 19. That job is not split into several
+copies at once. That job is not terminated early. Other work continues
+while that job runs. Progress and memory events for that build stay in
+specification 0015. This heading does not copy those fields.
+
+**Context budget (informative).** Clause 4.11 is informative. It is not
+a conformance cap. No named product function enforces the sampling
+figures recorded in this file's Economic mode notes. Those notes record
+nested L2 and L3 sampling at 200k and L1 on the catalog window of 500k.
+The function that would enforce those figures is unnamed. Recorded test
+names from that note are
+`nested_session_sampling_window_stays_200k_when_catalog_is_500k` and
+`main_session_sampling_window_is_catalog_500k_even_when_economic_is_on`.
+Those names are records. They are not an enforcer. The same note names
+`refresh_context_used` and records that this function does not copy the
+catalog window into the nested field. That name is not an enforcer of
+either figure. This heading does not claim those tests were run from
+the specifications repository. Do not add those figures as a cap.
+
+**Finished work.** Work is finished only when the approved plan's owed
+outcome has landed. That landing is checked against files on disk. One
+passing test is not that landing. Remaining work goes to the residual
+home this project already uses, and the next step there is the highest
+value next step. This contract is not an instruction to recreate
+`INVENTORY.md` or `RESIDUAL.md` in the specifications repository.
+Specification 0016 keeps its own leftover list in its clause 6. When an
+L2 or L3 finishes, L1 reports and starts the next named action in that
+same turn. Read the short report. Tell the Operator what landed. Then
+spawn the leftover, start the one `just check-remote`, close the board
+item, or name the blocker. Silence after a finish looks like a stall.
+Waiting for the next Operator ping is a miss. This does not weaken
+fire-and-return on a live compile. Dual-pin: this heading;
 [`AGENTS.md`](AGENTS.md) § *Agent depth*; host `~/.grok/AGENTS.md`
 § *Report finished nested work the same turn*.
 
-**Cost.** All tokens in an L3 contribute to the token costs of the L2.
-That is cost, not the L1 context chip. Nested L2 and L3 windows stay
-out of the L1 context chip. Each L2 Subagents-list row is a live atomic
-total of that L2's present plus past usage, including every specialist
-it spawned, with each unit counted once. Named tests:
+**Tests.** Where a change is a behavior change, observe a failing test
+first and make the fix after that failure. That order is red then
+green. Where a change is not a behavior change, this contract does not
+ask for a failing test first.
+
+**Process repair.** When the Operator repeats an instruction, that
+repetition is a process defect. The repair lands in a durable place.
+A durable place is an `AGENTS.md` file, a skill, or a check. A chat
+promise is not that repair. Specification 0006 says a chat reminder is
+not a durable tool. That statement is not this repetition rule. The
+repetition rule is this paragraph.
+
+**Product homes and recorded tests.** grok-oss writes this contract in
+this heading, in skills, in workflows, and in the user guide.
+`AGENTS.md` stays a pointer of about one thousand tokens and points
+here. This specification does not vendor those files. Named tests encode
+the contracts. Recorded names are
+`default_accomplishment_is_l1_spawn_of_l2_not_l1_doing_the_multi_file_job`,
+`l3_model_call_tokens_contribute_to_l2_cost`, and
+`l2_after_compact_still_receives_l3_completion_report`. Those names are
+records. This note does not claim those tests were run from the
+specifications repository. Issue 224 says the tests for issue 222 are
+kept. The body of issue 222 names no test identifier. `resume_from` and
+`follow_up` are identifiers in that body. They are not test names.
+Cost stays on the L2 row, not the L1 context chip. Nested L2 and L3
+windows stay out of the L1 context chip. Each L2 Subagents-list row is
+a live atomic total of that L2's present plus past usage, including
+every specialist it spawned, with each unit counted once. Named tests:
 `subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists`,
 `nested_specialist_windows_are_not_double_counted_in_the_total`,
 `parent_context_chip_is_l1_window_and_does_not_add_nested_windows`.
-KEEP those. Do not weaken them.
+KEEP those. Do not weaken them. The last name is a test identifier. It
+is not a layer name.
+
+**Residual through clause 6.6.** fargo has no numbered specification and
+no assigned number. The Carbonado Network Protocol has no numbered
+specification and no assigned number. Number 0016 is Hierarchical
+Subagents. This note does not steal numbers 0005 through 0015 and does
+not assign 0016 to fargo or to Carbonado. It does not invent a
+specification number after 0016. The stack list in `AGENTS.md` and the
+registry in `lean/SpecRegistry.lean` are not a second specification.
+This note does not edit that list. Lake and flake wiring for a tests
+executable is not claimed. The figures 200k and 500k are not pinned by
+a named enforcer. They stay informative. The source path
+`/home/hunter/implement/skill.md` is missing. The skill body that exists
+is `/home/hunter/.agents/skills/implement/SKILL.md`. The operator prompt
+log that exists is `/home/hunter/implement skill.md`. The cite for one
+dedicated L2, one long job, and nice 19 is that operator prompt log.
+The `surmount-server` agent rules state nice 19 for builds a developer
+runs and do not state the one L2 rule. Specification 0007 does not
+state the one job rule or nice 19. The four-part report list above is a
+requirement of specification 0016. The cited sources describe shorter
+reports. An edit of a single line on the fast path is in scope. Seat
+counts in other rules are not this contract. A preference for two to
+four workers is not this contract. Whether an L2 or an L3 reads a
+persona file is not specified here. Amending other repositories that
+still use kinship words for a layer is out of scope. The first
+publication sentences inside specification 0000 are not amended here.
+This note does not wire Lake or Nix. Companion module names are
+`lean/HierarchicalSubagentsSpec.lean`,
+`lean/HierarchicalSubagentsProofs.lean`,
+`0016_Hierarchical_Subagents.lean`, and `lean/Proofs_0016.lean`. This
+note does not claim those files are already present. On 2026-10-20 the
+comment on issue 224 said the landing was in the product tree and was
+not installed. That dated status is not a conformance rule. The comment
+used the words this session for that landing. Those words are not a
+conformance rule. The figure 669 is one measurement on 2026-10-20,
+characters divided by 4, of the `AGENTS.md` pointer in this product.
+That figure is not a conformance number. The bundled skill cache
+refreshing on install is a review leftover named in that comment. That
+leftover is not a layer requirement.
 
 Dual-pin: this heading; [`AGENTS.md`](AGENTS.md) § *Agent depth*.
 
@@ -2081,7 +2240,7 @@ Dual-pin: this heading; [`AGENTS.md`](AGENTS.md) § *Agent depth*.
 - [x] **PRs accepted**: CONTRIBUTING / this fork
 - [x] **L1 coordinates; three nested layers plus Hierarchical fast path
   (2026-08-15, fast path 2026-08-16)**: deep home is § *Hierarchical
-  subagents (GitHub #224)*. Mention is in scope: if the Operator mentions
+  subagents (specification 0016)*. Mention is in scope: if the Operator mentions
   work, that mention is in scope. Additive asks onto the same live L2 use
   L1 follow-up. Disjoint work still spawns another L2. L1 AUTO compact
   uses the catalog 500k window. L2 nested stays 200k and may compact. A
@@ -2138,10 +2297,10 @@ Dual-pin: this heading; [`AGENTS.md`](AGENTS.md) § *Agent depth*.
   `hierarchically-structured-subagents`.
 - [x] **Fire-and-return (pinned 2026-09-09).** Surmount wait law, not
   upstream default. Start a long nested job (compile, mill, Lake).
-  The parent keeps working. It does not sit in a blocking
+  L1 keeps working. It does not sit in a blocking
   `get_command_or_subagent_output` ten-minute loop. When the job
-  finishes, the parent is notified and then does the next step or
-  reports the fail. Return means the parent still owns the outcome.
+  finishes, L1 is notified and then does the next step or
+  reports the fail. Return means L1 still owns the outcome.
   Forget would mean never look at the result. "Background the job"
   and "don't wait" omit that ownership. Named tests now exist:
   `parent_spawn_subagent_second_l2_while_first_still_running_without_wait`
@@ -2407,7 +2566,7 @@ before canonicalize or any write. Existing-file edits and new-file
 - `reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot`
 - `two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file`
 
-Spawn `write_paths` on `task` / `spawn_subagent` is a **soft assignment**. Other nested agents get a reminder (`L2 X is assigned these paths`). Share is allowed. Spawn and later sequential edits do not fail for the child's lifetime. Exclusive is `try_acquire_write` for one `search_replace` / `write` / `apply_patch` call, then Drop. Two agents still cannot write the same file at the same instant. After write returns, `held()` is empty.
+Spawn `write_paths` on `task` / `spawn_subagent` is a **soft assignment**. Other nested agents get a reminder (`L2 X is assigned these paths`). Share is allowed. Spawn and later sequential edits do not fail for the nested session's lifetime. Exclusive is `try_acquire_write` for one `search_replace` / `write` / `apply_patch` call, then Drop. Two agents still cannot write the same file at the same instant. After write returns, `held()` is empty.
 
 The path table is a reader-writer lock, not write-only. [`try_acquire_read`](crates/codegen/xai-grok-tools/src/implementations/editor_infra/per_path_write_lock.rs) is a CoW snapshot read: ephemeral, many concurrent readers, snapshot at a point in time. It does not take the exclusive write lock, does not block a writer, and is not blocked by a writer for the snapshot itself. `read_file` uses that CoW `published` snapshot (`published_cow_snapshot`) while a writer holds the path. Soft `write_paths` assignment stays a writer reminder.
 
@@ -2467,7 +2626,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. `[ui] composer_multiline` defaults on; false makes the Operator box single-line. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Operator green / agent magenta roles. | Class 4 theme + rail `fn`s. `user_guide_operator_agent_speaker_labels_not_human_user_grok`. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill`; `what_instruction_prefers_operator_and_agent_speaker_labels`; `what_skill_does_not_mix_grok_build_version_with_grok_oss`; `user_guide_what_does_not_mix_grok_build_version_with_grok_oss`; `user_guide_operator_agent_speaker_labels_not_human_user_grok` |
-| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Deep home: § *Hierarchical subagents*. | Named tests under Product and that heading. No dedicated user-guide `fn`. |
+| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Deep home: § *Hierarchical subagents (specification 0016)*. | Named tests under Product and that heading. No dedicated user-guide `fn`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` is not a fifth idle CTA (title bar + hint). Approve files a GitHub issue with the plan text (`docs/github-tracking.md`). Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. `/plan --soft` docks Isolated Preview and does not enter plan mode. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. `user_guide_plan_soft_docks_isolated_preview`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
@@ -2567,37 +2726,37 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 
 **L2 floor prompt and L1 mid-turn Enter (pinned 2026-10-13).** These sentences say what the three named tests require. Do not reshape the asserts to match the code.
 
-- `l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn` requires Enter with text in the L2 floor prompt to send that text to that L2. That Enter must not start a new L1 turn. A hidden child view must not send on Enter.
+- `l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn` requires Enter with text in the L2 floor prompt to send that text to that L2. That Enter must not start a new L1 turn. A hidden nested view must not send on Enter.
 - `enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count` requires empty Enter on the L2 floor to open the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count. It does not list specialist names in place of that count. `q` or Esc from that L3 returns to the L2 and does not cancel the L2.
 - `l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan` requires Enter with text in the L1 Operator box, while a turn is running, to soft-interject into that turn on the L1 session. Empty Enter must not approve a plan.
 
 **Nested L2 inherit and Authentication required nag (pinned 2026-10-15).** These sentences say what nested spawn and the `/login` banner must do. Do not reshape the asserts to match the code. SuperGrok is a paid product. Never tell the Operator to /login. GitHub issue 203.
 
-- Nested spawn inherits the live parent OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
-- Nested 401 `reason=no auth context` while the parent session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
-- Nested spawn POST Authorization Bearer is the parent sampler JWT when AuthManager has a recovered snapshot. Named test: `nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recovered`.
+- Nested spawn inherits the live L1 OIDC session. A missing or `"default"` ACP method with a live Oidc credential becomes `oidc`, so cli-chat-proxy gets a Bearer. Named test: `inherited_session_auth_method_id_uses_oidc_when_loaded_method_is_default`.
+- Nested 401 `reason=no auth context` while the L1 session still talks does not paint `Authentication required: … Run /login`. That includes the live wire `auth_kind=bearer` … `upstream=PermissionDenied` … `reason=no auth context`. Named tests: `apply_retry_state_nested_no_auth_context_does_not_paint_login_while_parent_talks`, `apply_retry_state_nested_bearer_no_auth_context_does_not_paint_login_while_parent_talks`.
+- Nested spawn POST Authorization Bearer is the L1 sampler JWT when AuthManager has a recovered snapshot. Named test: `nested_spawn_post_uses_parent_sampler_jwt_when_auth_snapshot_is_recovered`.
 - Nested reconstruct keeps the live sampler JWT as Authorization Bearer. Named test: `reconstruct_full_config_nested_does_not_rotate_parent_session_when_live_jwt_is_present`.
-- Nested POST Authorization Bearer is the inherited parent sampler JWT. Named test: `nested_post_uses_inherited_parent_jwt_as_authorization_bearer`.
+- Nested POST Authorization Bearer is the inherited L1 sampler JWT. Named test: `nested_post_uses_inherited_parent_jwt_as_authorization_bearer`.
 - The Operator live paste `Request failed: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)` is the nested missing-auth banner. Named test: `nested_missing_auth_formats_the_operator_live_paste`.
-- A parent JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
-- Nested spawn stamps the parent session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`.
-- A `"default"` ACP method with a live parent session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.
-- The nested bearer resolver returns the inherited parent key when `AuthManager` has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`.
+- An L1 JWT that actually expired (`auth_kind=bearer` Unauthorized (401)) still paints that sentence once. Named test: `apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run`.
+- Nested spawn stamps the L1 session key when chat credentials and `current_wire_valid` are empty. Named test: `nested_request_bearer_falls_back_to_the_inherited_parent_key`.
+- A `"default"` ACP method with a live L1 session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.
+- The nested bearer resolver returns the inherited L1 key when `AuthManager` has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`.
 - A missing wire-valid bearer that still has a refresh token is refreshed before send. Named test: `prepare_for_send_refreshes_when_wire_life_is_gone_and_a_refresh_token_remains`.
 - A later send after that PreRequest already ran while unusable does not refresh again. Parked credential-less 401s keep the pre-park preflight count. Named tests: `deferred_recovery_credential_less_401_parks_and_survives`, `park_disabled_recovered_401_still_resubmits`.
 - A wired resolver that returns `None` does not send `X-XAI-Token-Auth` without a Bearer. Named test: `bearer_resolver_none_strips_token_auth_when_authorization_is_absent`.
-- A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`.
+- A 401 `reason=no auth context` stamps the L1 bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`.
 - Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`.
 - An empty `Bearer` is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`.
 - Compact wrappers that keep `auth_kind=other` and drop `reason=no auth context` still do not paint `/login`. Named test: `apply_retry_state_auth_kind_other_does_not_paint_login`.
-- After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`. Nested L2s that 401'd resume the same way a dropped network does. The parent session stays bound. Named test: `auth_complete_resumes_nested_l2s_that_401d`.
-- A no-auth-context 401 stamps a new parent JWT once. The same key is not resubmitted as an uncharged park (50 paced retries). Named tests: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`, `missing_auth_context_401_does_not_resubmit_the_same_key`.
+- After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`. Nested L2s that 401'd resume the same way a dropped network does. The L1 session stays bound. Named test: `auth_complete_resumes_nested_l2s_that_401d`.
+- A no-auth-context 401 stamps a new L1 JWT once. The same key is not resubmitted as an uncharged park (50 paced retries). Named tests: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`, `missing_auth_context_401_does_not_resubmit_the_same_key`.
 - A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
-- After auth recovery claims success, a nested turn resumes with the live sampler JWT the parent is talking with. It does not give up after 3 retries while that JWT is available. Named tests: `nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt`, `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token`. Nested POST stamps `InheritedSessionBearerResolver`, not `SamplingConfig.api_key`. A recovered AuthManager token must not win on that wire. The inherited parent JWT wins over `current_wire_valid` in `nested_request_bearer`.
-- Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the parent session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. A parent JWT that actually expired still paints that sentence once.
-- Waiting parent 401 after login retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_the_turn_resumes`, `login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_login_retries_with_live_login_jwt`, `credentials_toast_parent_401_without_no_auth_context_after_login_retries_with_live_login_jwt`.
+- After auth recovery claims success, a nested turn resumes with the live sampler JWT L1 is talking with. It does not give up after 3 retries while that JWT is available. Named tests: `nested_401_after_auth_recovery_resumes_with_the_live_sampler_jwt`, `inherited_session_resolver_prefers_the_parent_key_over_a_wire_valid_auth_manager_token`. Nested POST stamps `InheritedSessionBearerResolver`, not `SamplingConfig.api_key`. A recovered AuthManager token must not win on that wire. The inherited L1 JWT wins over `current_wire_valid` in `nested_request_bearer`.
+- Nested give-up after that recovery (`error_type` `nested_auth`) does not paint `Authentication required: … Run /login` while the L1 session still talks. Named test: `apply_retry_state_nested_auth_give_up_does_not_paint_login`. An L1 JWT that actually expired still paints that sentence once.
+- Waiting L1 HTTP 401 after login retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `nested_no_auth_context_401_after_login_retries_with_live_login_jwt_so_the_turn_resumes`, `login_still_fails_to_resume_waiting_parent_no_auth_context_401_after_login_retries_with_live_login_jwt`, `credentials_toast_parent_401_without_no_auth_context_after_login_retries_with_live_login_jwt`.
 
-**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting parent 401 retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth`, `already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`, `authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
+**Already-open L1 sibling IPC re-auth (pinned 2026-10-24).** SuperGrok is a paid product. Never tell the Operator to /login. Login success in one grok-oss process live-publishes IPC `{authorized, permission_mode}` (never tokens) on `$GROK_HOME/authorize_ask.sock`. Already-open L1 contexts reload credentials from the shared store, resend the waiting prompt, and must not paint `Run /login to re-authenticate, then resend your message.` Inherit-on-startup of a new session is not that path. One expiry must not paint Authentication required / Run /login twice. Waiting L1 HTTP 401 retries with the live login JWT (stamp Sent, reconstruct POST Bearer live-login-jwt). Named tests: `already_open_l1_with_expired_credentials_applies_sibling_ipc_authorize_reloads_resends_and_does_not_paint_login`, `sibling_ipc_authorize_is_noop_when_this_l1_does_not_need_reauth`, `already_open_l1_recovered_bearer_uses_shared_store_not_expired_live_api_key`, `single_expiry_does_not_paint_authentication_required_login_nag_twice`, `authorize_ask_document_serializes_authorized_and_permission_mode_never_tokens`. Dual-pin: [`AGENTS.md`](AGENTS.md) same heading.
 
 **Responses reasoning id (pinned 2026-10-15).** These sentences say what the Responses input must send. Do not reshape the asserts to match the code. A reasoning item must carry a string `id`. `"id": null` is a 422 (`invalid type: null, expected a string`). Named tests: `patch_reasoning_text_types_replaces_null_reasoning_id_with_a_string`, `synthesized_reasoning_item_does_not_serialize_a_null_id`.
 

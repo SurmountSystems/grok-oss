@@ -1449,19 +1449,8 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     isolation_param: "${{ params.task.isolation }}",
     write_paths_param: "${{ params.task.write_paths }}",
 };
-/// Child sessions get a concise description that discourages recursive delegation.
-const CHILD_TASK_DESCRIPTION: &str = "\
-Launch a specialist (L3) for an independent sub-task.\n\
-\n\
-An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. \
-L2 does not fill 200k implementing. Compact on that L2 is a product miss when the cause is L2-solo implement tools. \
-L2 may compact (ordinary AUTO compact still fires at 95% of nested 200k). \
-L3 must not compact-and-continue. No L4. \
-Give each L3 a distinct description. One reviewer unless the Operator asked for more. \
-Token Economy effort is not reviewer count.\n\
-\n\
-Usage: specify a short ${{ params.task.description }} and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+/// Task text the spawn path assigns on an L2. The L1 fast path is not in this text.
+pub use xai_grok_tools::implementations::grok_build::task::CHILD_TASK_DESCRIPTION;
 const TASK_MODEL_PARAM: &str = "${{ params.task.model }}";
 fn task_model_guidance(selection: TaskModelSelection, model_slugs: &[String]) -> String {
     if selection == TaskModelSelection::Inherited {

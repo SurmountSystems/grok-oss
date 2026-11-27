@@ -29,8 +29,12 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
     DefaultProductSkillFile {
         relative_path: "skills/polish/SKILL.md",
         content: include_str!("../skills/polish/SKILL.md"),
-        // Tree body before L2s-do-not-work-by-themselves.
-        previous_checksums: &["fcdd85033ff8e097a2fcf250c8c773eb0d9d2761d2c31f9f6ed729d3da716aba"],
+        // Tree body before L2s-do-not-work-by-themselves, then the body
+        // before the L1 sentence and "An L3 does not spawn".
+        previous_checksums: &[
+            "fcdd85033ff8e097a2fcf250c8c773eb0d9d2761d2c31f9f6ed729d3da716aba",
+            "9978d8ef4d2b15f20cccb71bbce829e0f9737b3eab1192b6b13817ad54d53696",
+        ],
     },
     DefaultProductSkillFile {
         relative_path: "skills/polish/references/incident-classes.md",
@@ -41,10 +45,17 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
         relative_path: "skills/subagent/SKILL.md",
         content: include_str!("../skills/subagent/SKILL.md"),
         // Tree body before output_tokens, then the later tree body before
-        // L2s-do-not-work-by-themselves.
+        // L2s-do-not-work-by-themselves. The third hash is that first body
+        // after the grep sentence matches the shipped skill. The fourth hash
+        // is that same fixture after the L0 sentence, "coordinator means L2",
+        // and "specialist means L3". The earlier hashes stay so an installed
+        // copy of an older sentence still refreshes.
         previous_checksums: &[
             "ff6b45403003ad75e67c770ab1240a6c61f14001392e57da220499a9de5129c8",
             "5bdda92e159fd04cb92ec0477ac35d242c2362e647e8eef36ed251ad81a74f21",
+            "59d37c97f4473b0913be401e92b5e623fc3eb2e10533591992e4e1d4aea78fea",
+            "655824857d780ff57c89901c7b829082943b0cf04b55432f7b8806eef313ba4e",
+            "cebd0a66cf4a7152f3bd98984ee6b5d9e854c47342a3b99111b599376bcd489e",
         ],
     },
     DefaultProductSkillFile {
@@ -487,7 +498,7 @@ the user asked for a project override.
    another L2 (or queues same-file). Do not kill a healthy
    in-flight L2.
 6. **Read the report.** L1 reads only the short on-disk L2 report
-   under `~/.agents/reports/`. Do not re-do the L2 greps.
+   under `~/.agents/reports/`. L1 does not re-do the L3 greps.
 7. **Close out.** Complete the board item the same turn the
    substance lands. Cancel only with a recorded reason.
 8. **Stop git.** Never `git add`. Never `git commit`. Never push.
@@ -502,6 +513,8 @@ the user asked for a project override.
 | Skill-body file writes | L3 (L2 must spawn) | Path, wait, read the report |
 
 ## Agent depth (not session-board L0-L2)
+
+L0 is the laptop coordinator, crate surmount-coordinator-gui. L0 queues prompts and is not a nested agent. The word coordinator means L2 only. The word specialist means L3 only. An L3 does not spawn. There is no L4.
 
 | Depth | Does | Does not |
 |-------|------|----------|
@@ -565,7 +578,7 @@ No L4.
             (
                 "skills/subagent/SKILL.md",
                 SUBAGENT_BEFORE_OUTPUT_TOKENS,
-                "ff6b45403003ad75e67c770ab1240a6c61f14001392e57da220499a9de5129c8",
+                "cebd0a66cf4a7152f3bd98984ee6b5d9e854c47342a3b99111b599376bcd489e",
             ),
         ];
         for (rel, old_body, sum) in cases {

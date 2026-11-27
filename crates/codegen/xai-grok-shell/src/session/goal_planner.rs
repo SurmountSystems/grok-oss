@@ -521,26 +521,24 @@ pub(crate) async fn run_goal_planner(
                 && !spawn_error_is_repeating_sentence_stop(message)
                 && !non_empty_plan_file(inputs.plan_file).await
             {
-                if research_role_sampling_window_overflow(message)
-                    && !non_empty_plan_file(&research_file).await
-                {
+                if research_role_sampling_window_overflow(message) {
+                    // Research notes on disk are not a plan. Two failed research
+                    // sessions must not pause the goal for a missing plan.
                     return GoalPlannerOutcome::ResearchSessionReplaced {
                         note: RESEARCH_ROLE_SAMPLING_WINDOW_HOST_NOTE.to_string(),
                     };
                 }
-                if !research_role_sampling_window_overflow(message) {
-                    tracing::warn!(
-                        error = %message,
-                        "goal planner: research role runtime error and the plan file is missing or empty",
-                    );
-                    return record_fail_closed_with_research_runtime(
-                        GoalPlannerFailClosedReason::Runtime,
-                        Some(message.clone()),
-                        inputs.attempt,
-                        started,
-                        emit_event,
-                    );
-                }
+                tracing::warn!(
+                    error = %message,
+                    "goal planner: research role runtime error and the plan file is missing or empty",
+                );
+                return record_fail_closed_with_research_runtime(
+                    GoalPlannerFailClosedReason::Runtime,
+                    Some(message.clone()),
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                );
             }
         } else {
             tracing::warn!(

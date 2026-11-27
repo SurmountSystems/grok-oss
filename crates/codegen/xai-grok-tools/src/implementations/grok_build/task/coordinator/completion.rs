@@ -55,8 +55,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     /// Cancelled counts as gone: nothing will read the buffer.
+    /// A turn that returned without its own report is also not a buffer target.
+    /// That coordinator stays listed. Nested completion uses
+    /// `continue_coordinators_waiting_on`, not this buffer.
     fn is_spawner_live(&self, spawner_session_id: &str) -> bool {
         self.active_child_for_session(spawner_session_id)
-            .is_some_and(|child| !child.cancellation.is_cancelled())
+            .is_some_and(|child| {
+                !child.cancellation.is_cancelled()
+                    && !self
+                        .turn_returned_without_report
+                        .contains(&child.request.id)
+            })
     }
 }

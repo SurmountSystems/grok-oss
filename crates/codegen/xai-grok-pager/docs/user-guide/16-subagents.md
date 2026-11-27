@@ -1,6 +1,6 @@
 # Subagents and Personas
 
-Nested agents are **L1**, **L2**, and **L3**. **L0** is the dashboard, one level above L1 (the `grok-oss gui` window; see [Agent Dashboard](23-dashboard.md)). Speaker labels are **Operator** and **Agent**. Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2. Do not analogize nested agents to OS process trees.
+Nested agents are **L1**, **L2**, and **L3**. **L0** is the laptop coordinator, crate `surmount-coordinator-gui`. L0 queues prompts and is not a nested agent. The call name `grok-oss gui` is informative. It is not pager `/dashboard` (see [Agent Dashboard](23-dashboard.md)). Speaker labels are **Operator** and **Agent**. The word coordinator means L2 only. The word specialist means L3 only. There is no L4. An attached client is not a layer. Do not use kinship words for a layer. Do not compare layers to operating system process trees. The contract is `FORK.md` § *Hierarchical subagents (specification 0016)*. This page is the short guide. It does not copy that contract.
 
 Each nested session has its own context window, so L1 can delegate research, implementation, testing, and review without filling L1. Discarded L2 and L3 contexts do not have to be compacted into L1. They report up to L1. That is why hierarchical subagents are token efficient. All tokens in an L3 contribute to the token costs of the L2. All layers can talk to the layers above and below.
 
@@ -8,12 +8,12 @@ Subagents are enabled by default.
 
 ## Layers
 
-- **L0** is the dashboard, one level above L1. It is the `grok-oss gui` window. It is not this pager `/dashboard` and not `/running`.
-- **L1** is the context where the agent talks to the Operator.
-- **L2** is a coordinator. The Operator can still prompt an L2 they are watching.
-- **L3** implements and reviews. An L3 does not spawn. There is no L4.
+- **L0** is the laptop coordinator. The crate name is `surmount-coordinator-gui`. L0 queues prompts. L0 is not a nested agent. The call name `grok-oss gui` is informative. It is not this pager `/dashboard` and not `/running`.
+- **L1** is the main session, where the agent talks to the Operator.
+- **L2** is the coordinator. The word coordinator means L2 only. The Operator can still prompt an L2 they are watching.
+- **L3** is the specialist. The word specialist means L3 only. An L3 does not coordinate and does not spawn. There is no L4. An attached client is not a layer.
 
-Default flow, almost always: L1 spawns a coordinator L2 to accomplish the task. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. L2 always spawns an L3 for implement, diagnosis, edit, or review.
+Default flow: L1 spawns an L2 to accomplish the task. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. L2 always spawns an L3 for implement, diagnosis, edit, or review. L2 does not do that tool work itself. The two spawn rules that leave easy work on L2, or that spawn an L3 only when the slice is hard, do not conform.
 
 The **Hierarchical fast path** on L1 is the exception: one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path.
 
@@ -148,7 +148,7 @@ When a persona applies, Grok Build resolves the effective model and reasoning ef
 1. Explicit spawn-time override
 2. Role default
 3. Persona default
-4. Parent session
+4. Spawning session
 
 Isolation follows the same order for the first three steps but defaults to `none` (no worktree) rather than inheriting from the session that spawned it.
 
@@ -177,7 +177,7 @@ The `send_subagent_message` tool is off by default. Enable it with `GROK_ACTIVE_
 
 L1 can send a follow-up to an L2 it owns. When the flag is on, a granted nested session also receives the tool:
 
-- `subagent_id: "parent"` is the wire name for the layer above (L2 from an L3, L1 from an L2).
+- `subagent_id: "parent"` is a wire token for the layer above (L2 when the sender is L3, L1 when the sender is L2). That token is not a layer name.
 - A durable agent id targets another local nested session. An eligible completed nested session resumes with the same identity.
 
 An L2 spawned from L1 cannot message L1 through this tool. Curated harness toolsets never receive the tool. A capability mode that excludes this kind also removes it.
@@ -198,7 +198,7 @@ The transcript shows each send as a one-line `Message` row: a verb for the outco
 - `Message queued for Subagent “find callers”` / `Message interjected to Subagent “find callers”`
 - `Message sending to …` with an animated bullet while the send is in flight
 - `Message rejected · Subagent “find callers”` for a refused send, `Message unconfirmed · Subagent “find callers”` for one the shell could not confirm
-- `Message sent to parent` when a nested session messages the layer above (the wire name stays `parent`)
+- The painted row `Message sent to parent` is the product chrome when a nested session messages the layer above. The wire token stays `parent`. That token is not a layer name.
 
 The collapsed row never shows the message or the reason. **Right** (or `l`/`e` in vim mode) expands the row to show the requested delivery, the full message text, and the reason of a rejected or unconfirmed send; **Left** (or `h`) collapses it again. **Enter**, **Ctrl+F**, or a double-click on the row opens that subagent's view, exactly as on its `Subagent` row (Right/Left still fold it). If the subagent was never spawned in this session (a headless `grok export`, or an id from another session), the row names it `subagent …xxxxxxxx` from the last 8 characters of its id, shows the raw `Subagent ID:` when expanded, and cannot open it.
 
@@ -230,7 +230,7 @@ The new subagent inherits the source's transcript, tool state, and model; its sy
 
 ### follow_up (L1 onto a running L2)
 
-The spawn tool's `follow_up` field is L1 enqueue onto a **still-running** nested L2. Pass that L2's subagent ID. Extra prompt text stays in `prompt`. That enqueue is additive: not kill, not respawn, not a wait for exit. It is not Operator overlay typing (open the L2 framed view and type; that is `x.ai/interject` on that L2). It is not `resume_from`, which still continues a **completed** nested L2 only. `resume_from` of a running L2 still fails. The follow-up must not inject into a live L3 unless the Operator explicitly targeted that specialist. Default on. `[subagents] parent_follow_up = false` is the SpaceXAI option (spawn, wait, `resume_from` after exit). Overlay compose stays. No new `[auth]` key.
+The spawn tool's `follow_up` field is L1 enqueue onto a **still-running** nested L2. Pass that L2's subagent ID. Extra prompt text stays in `prompt`. That enqueue is additive: not kill, not respawn, not a wait for exit. It is not Operator overlay typing (open the L2 framed view and type; that is `x.ai/interject` on that L2). It is not `resume_from`, which still continues a **completed** nested L2 only. `resume_from` of a running L2 still fails. The follow-up must not inject into a live L3 unless the Operator explicitly targeted that specialist. Default on. `[subagents] parent_follow_up = false` is the config key for the SpaceXAI option (spawn, wait, `resume_from` after exit). That key is an identifier, not a layer name. Overlay compose stays. No new `[auth]` key.
 
 ### Early exit of an L2
 
@@ -445,7 +445,7 @@ The L1 scrollback keeps showing the nested session's status after you close.
 
 ## Depth Limits
 
-The default nesting limit is two. L1 spawns coordinators (L2). That L2 spawns and manages specialists (L3). An L3 cannot spawn. There is no L4. If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only L1 should spawn. The L1 Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names.
+The default nesting limit is two. L1 spawns L2 coordinators. That L2 spawns and manages L3 specialists. An L3 cannot spawn. There is no L4. If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only L1 should spawn. The L1 Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names. An L2 that exits after only spawning, or without a report, is not finished. Reports live under `~/.agents/reports/` on the host and are not written in the repository. A report states what changed, how it was verified, what remains, and any question for the Operator.
 
 Named tests keep these contracts: `l2_after_compact_still_resumes_its_l3s`, `default_accomplishment_is_l1_spawn_of_l2_not_l1_doing_the_multi_file_job`, `hierarchical_fast_path_exceptions_are_named_command_read_report_or_one_line_edit`, `l3_model_call_tokens_contribute_to_l2_cost`, and `l2_after_compact_still_receives_l3_completion_report`.
 
@@ -453,7 +453,7 @@ Named tests keep these contracts: `l2_after_compact_still_resumes_its_l3s`, `def
 
 Hierarchical subagents are token efficient because discarded L2 and L3 contexts do not have to be compacted into L1. They report up to L1. All tokens in an L3 contribute to the token costs of the L2. All layers can talk to the layers above and below.
 
-Default accomplishment is L1 spawn of an L2, not L1 doing the multi-file job. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 always spawns an L3 for implement, diagnosis, edit, or review. The L2 can restart and compact its L3s when those L3s are doing well. L2 does not fill 200k implementing.
+Default accomplishment is L1 spawn of an L2, not L1 doing the multi-file job. It is hard to estimate complexity early, so do not keep implement work on L1. That L2 always spawns an L3 for implement, diagnosis, edit, or review. The L2 can restart and compact its L3s when those L3s are doing well. Sampling figures in this guide are informative. Specification 0016 does not set them as a cap. L2 does not do the implement tool work itself.
 
 **Hierarchical fast path.** L1 may do these four things without spawning an L2:
 
@@ -470,7 +470,7 @@ That is not a license to diagnose or implement on L1.
 
 | Depth | Does | Does not |
 | ----- | ---- | -------- |
-| **L0 dashboard** | `grok-oss gui` window, one level above L1. | This pager `/dashboard`. Session-board residual. |
+| **L0 laptop coordinator** | `grok-oss gui`, crate `surmount-coordinator-gui`. Queues prompts. Not a nested agent. | This pager `/dashboard`. Session-board residual. |
 | **L1 main** | Status to the Operator. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
 | **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. Can restart and compact L3s that are doing well. Discard context after a report goes up. Operator-facing nested view: the Operator can ask or clarify in that L2 overlay. All tokens in an L3 contribute to this L2 cost. | Grep, diagnose, edit, implement, or review itself. Spawn L4. Show raw edits as if this were L1. |
 | **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except it cannot spawn. | Coordinate. Spawn L4 (forbidden). Operator chat does not barge into a live L3. |
@@ -479,7 +479,7 @@ L3 is not a weaker agent. L3 still does the tools. The hard cap is no L4. L2's e
 
 Spawn an L2 when the job needs isolation from L1: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill L1. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
 
-L2 spawns L3 for greps, reads, and product edits, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. L2 does not fill 200k implementing. L1 reads that L2 report only and talks to the Operator. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
+L2 spawns L3 for greps, reads, and product edits, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. L2 does not do that tool work itself. L1 reads that L2 report only and talks to the Operator. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
 
 The L1 session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact (95% of nested 200k). Nested L3 sampling also stays 200k. An L2 may compact a specialist it spawned when that specialist is near the 200k sampling window. The specialist must not compact itself and continue. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
 

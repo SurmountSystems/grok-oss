@@ -446,6 +446,25 @@ impl<C: 'static> ChildReporter<C> {
         }
         response_rx.await.unwrap_or(SubagentResumeLookup::Missing)
     }
+
+    /// Ask the actor, while this run is still pending, whether a nested agent
+    /// this child spawned is still pending, active, or queued. The shell uses
+    /// the answer to skip session shutdown before the run future returns.
+    /// A closed actor channel reports false so a finished L3 still shuts down.
+    pub async fn spawned_child_still_running(&self) -> bool {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(InternalEvent::SpawnedChildStillRunning {
+                subagent_id: self.subagent_id.clone(),
+                respond_to,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        response_rx.await.unwrap_or(false)
+    }
 }
 
 pub(super) enum InternalEvent<C> {
@@ -476,6 +495,11 @@ pub(super) enum InternalEvent<C> {
     },
     DropSpawnerClaim {
         subagent_id: String,
+    },
+    /// Answered while the coordinator run is still pending, before shutdown.
+    SpawnedChildStillRunning {
+        subagent_id: String,
+        respond_to: oneshot::Sender<bool>,
     },
 }
 

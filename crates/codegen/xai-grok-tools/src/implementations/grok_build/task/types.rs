@@ -1074,6 +1074,21 @@ pub enum SubagentEvent {
     /// L1 follow-up onto a still-running L2, or L2 follow-up onto its running L3.
     /// Not `resume_from`.
     FollowUp(SubagentFollowUpRequest),
+    /// The coordinator wrote its own report. This is the finished decision.
+    /// It is not delivery of a nested completion.
+    RecordOwnReport {
+        subagent_id: String,
+        respond_to: oneshot::Sender<bool>,
+    },
+    /// Nested completions already delivered to a coordinator that is still listed.
+    L2CompletionDeliveries {
+        respond_to: oneshot::Sender<Vec<(String, String)>>,
+    },
+    /// Task text and recorded actions stored for one L2 id.
+    L2RecordedTask {
+        subagent_id: String,
+        respond_to: oneshot::Sender<(Option<String>, Vec<String>)>,
+    },
 }
 
 // Resource types

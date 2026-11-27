@@ -95,14 +95,46 @@ impl ChildControl for ShellChildRuntime {
     }
 
     fn follow_up(&self, text: String) {
-        // Same path overlay `x.ai/interject` uses: child session cmd_tx + Interject
-        // text. Not overlay typing (`id: None`). Not cancel. Not a second spawn.
-        let _ = self.child_cmd_tx.send(SessionCommand::Interject {
+        // The session command loop must still be reading. An Interject that
+        // arrives while the turn is idle queues a fallback prompt and starts
+        // another model turn. After Shutdown the actor has returned, this
+        // send fails, and the error is discarded. Do not shut the coordinator
+        // session down while a nested agent it spawned is still running.
+        let _ = send_coordinator_continuation(&self.child_cmd_tx, text);
+    }
+}
+
+/// Interject payload a live coordinator session accepts as another model turn.
+/// The error is the discarded send after Shutdown.
+pub(crate) fn send_coordinator_continuation(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    text: String,
+) -> Result<(), Box<mpsc::error::SendError<SessionCommand>>> {
+    cmd_tx
+        .send(SessionCommand::Interject {
             text,
             id: None,
             images: Vec::new(),
-        });
+        })
+        .map_err(Box::new)
+}
+
+/// Send Graceful shutdown only when no nested agent is still running.
+/// Returns true when shutdown was sent. A true result means the session
+/// actor will return and a later Interject is discarded.
+pub(crate) fn shutdown_child_session_on_turn_end(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    spawned_child_still_running: bool,
+) -> bool {
+    if !xai_grok_tools::implementations::grok_build::task::coordinator::shutdown_session_on_turn_end(
+        spawned_child_still_running,
+    ) {
+        return false;
     }
+    let _ = cmd_tx.send(SessionCommand::Shutdown(
+        crate::session::ShutdownKind::Graceful,
+    ));
+    true
 }
 
 const SESSION_THREAD_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(10);

@@ -1080,6 +1080,10 @@ mod tests {
             Some(1_650),
             "all L3 tokens contribute to the L2 cost: 1100 + 550 = 1650"
         );
+        assert!(
+            l2_with_l3.input_plus_output.unwrap() >= l3_only.input_plus_output.unwrap(),
+            "the L2 total is at least the sum of its L3 totals"
+        );
         assert_ne!(
             l2_with_l3.input_plus_output, l2_only.input_plus_output,
             "omitting the L3 session drops L3 tokens from the L2 cost"

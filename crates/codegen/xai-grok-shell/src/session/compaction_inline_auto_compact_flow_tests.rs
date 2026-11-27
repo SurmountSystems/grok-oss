@@ -26,7 +26,7 @@ impl AsyncTerminalRunner for DummyTerminal {
         Err(TerminalError::Other("dummy terminal".into()))
     }
 }
-async fn create_test_actor(
+pub(super) async fn create_test_actor(
     total_tokens: u64,
     context_window: u64,
     threshold_percent: u8,
@@ -1444,7 +1444,7 @@ async fn transient_auto_compact_failure_notifies_with_real_error() {
 }
 /// Point the actor's sampling at a mock server that answers every request with `summary`.
 /// Callers keep the returned server bound: dropping it shuts the server down.
-async fn route_compaction_to_mock_server(
+pub(super) async fn route_compaction_to_mock_server(
     actor: &SessionActor,
     summary: String,
 ) -> xai_grok_test_support::MockInferenceServer {

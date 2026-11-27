@@ -2416,3 +2416,6 @@ async fn resume_with_planner_disabled_keeps_infra_recap() {
         })
         .await;
 }
+
+#[path = "goal_two_failed_subagents_pause_tests.rs"]
+mod goal_two_failed_subagents_pause_tests;

@@ -1748,3 +1748,40 @@ fn flake_modules_use_stdenv_host_platform_not_deprecated_stdenv_is_os() {
         "flake modules still need at least one stdenv.hostPlatform.isDarwin (Darwin frameworks)"
     );
 }
+
+/// Specification 0016 clause 4.10. A long build is one job, at nice 19,
+/// and that job is not wrapped in a five-minute timeout.
+#[test]
+fn long_build_is_one_nice_19_job_and_is_not_terminated_early() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    for name in ["check-remote", "test-remote"] {
+        let body = recipe_body(&just, name);
+        let nextest: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#') && line.contains("cargo nextest run"))
+            .collect();
+        assert_eq!(
+            nextest.len(),
+            1,
+            "{name} runs one nextest job, not several copies: {nextest:?}"
+        );
+        assert!(
+            nextest[0].contains("nice -n 19"),
+            "{name} nextest runs at nice 19: {}",
+            nextest[0]
+        );
+        assert!(
+            !nextest[0].contains("timeout"),
+            "{name} nextest line does not terminate the job early: {}",
+            nextest[0]
+        );
+        assert!(
+            !body.contains("timeout 5m") && !body.contains("timeout 300"),
+            "{name} must not kill the remote job at five minutes"
+        );
+    }
+}

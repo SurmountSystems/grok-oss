@@ -3,14 +3,14 @@
 // Survival: .grok/workflows is in import FORK_PATHS + assert-process-pins
 // REQUIRED_DIRS. Must be present on BASE_REF (committed on main) for restore.
 // Dual-pin: host git-recon skill + branch docs/upstream-history.md.
-// Hierarchical subagents (issue 224): L1 spawns L2. L2 spawns L3.
-// L0 is the dashboard, one level above L1. L1 is the Operator interaction context.
-// This workflow is the coordinator L2 that L1 spawned. Each agent() call is L2 spawning an L3.
-// L2 coordinates. L3 implements and reviews. An L3 does not spawn. There is no L4.
-// Default accomplishment is L1 spawning a coordinator L2. Do not keep implement work on L1.
-// L2 can restart and compact L3s that are doing well.
-// Hierarchical fast path on L1 is only one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path.
-// Speaker labels are Operator and Agent. Do not use parent or child as hierarchy labels.
+// Hierarchical subagents (specification 0016): the contract is FORK.md, heading Hierarchical subagents (specification 0016). This workflow does not copy that contract.
+// L0 is the laptop coordinator, crate surmount-coordinator-gui. L0 queues prompts and is not a nested agent. L1 is the main session.
+// This workflow is the L2 that L1 spawned. Each agent() call is that L2 spawning an L3.
+// The word coordinator means L2 only. The word specialist means L3 only. An L3 does not spawn. There is no L4.
+// Default accomplishment is L1 spawning an L2. Do not keep implement work on L1.
+// An L2 can restart and compact its L3s when those L3s are doing well.
+// The hierarchical fast path on L1 is four acts only: one already-named command, one already-named file read, the asked-for short report, or one already-named one-line edit. "Just a quick look" is not that path. That fast path is not this workflow.
+// Speaker labels are Operator and Agent. Do not use kinship words for a layer. Do not compare layers to operating system process trees. Call the on-disk handoff a report. Reports live under ~/.agents/reports/ on this machine and are not part of the git tree.
 
 let meta = #{
     name: "git-recon-status",

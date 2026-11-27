@@ -158,6 +158,77 @@ fn request() -> SubagentRequest {
     }
 }
 
+const CONTINUATION: &str = "A nested agent finished. Continue this coordinator.";
+
+/// The session loop stops on Shutdown, the same way the actor returns.
+/// A later Interject must still be readable when a nested agent is live,
+/// and must fail once a childless turn has shut the session down.
+#[tokio::test(flavor = "current_thread")]
+async fn coordinator_session_is_not_shut_down_before_nested_agent_finishes() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let session = tokio::spawn(async move {
+        let mut saw_shutdown = false;
+        let mut continuation = None;
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                crate::session::SessionCommand::Shutdown(_) => {
+                    saw_shutdown = true;
+                    break;
+                }
+                crate::session::SessionCommand::Interject { text, .. } => {
+                    continuation = Some(text);
+                }
+                _ => {}
+            }
+        }
+        (saw_shutdown, continuation)
+    });
+    let shut_down = shutdown_child_session_on_turn_end(&tx, true);
+    assert!(
+        !shut_down,
+        "must not shut down the coordinator session while a nested agent is still running"
+    );
+    let sent = send_coordinator_continuation(&tx, CONTINUATION.to_owned());
+    assert!(
+        sent.is_ok(),
+        "continuation must not be a discarded Interject after shutdown"
+    );
+    drop(tx);
+    let (saw_shutdown, continuation) = session.await.expect("session loop");
+    assert!(
+        !saw_shutdown,
+        "Shutdown must not reach the session before the nested agent finishes"
+    );
+    assert_eq!(
+        continuation.as_deref(),
+        Some(CONTINUATION),
+        "the same session must receive the continuation Interject"
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let session = tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if matches!(cmd, crate::session::SessionCommand::Shutdown(_)) {
+                break;
+            }
+        }
+    });
+    assert!(
+        shutdown_child_session_on_turn_end(&tx, false),
+        "a coordinator with no live child still shuts down"
+    );
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(2), session).await;
+    assert!(
+        joined.is_ok(),
+        "a coordinator with no live child must shut the session down"
+    );
+    let discarded = send_coordinator_continuation(&tx, CONTINUATION.to_owned());
+    assert!(
+        discarded.is_err(),
+        "Interject after shutdown is discarded because the session stopped reading"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn send_active_message_freezes_parent_turn_before_first_poll() {
     let local = tokio::task::LocalSet::new();

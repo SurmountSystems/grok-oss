@@ -21,7 +21,7 @@ Not the Hierarchical fast path on L1.
 
 Product CLI is `grok-oss`. SuperGrok is a paid product. Never call
 SuperGrok free. Complete American English thoughts. No nicknames.
-Never bare child/children as agent names.
+Never use kinship words as agent names.
 
 This is a default Grok OSS skill. Grok installs it into
 `~/.grok/bundled/skills/subagent/` on startup. The live cache is not
@@ -52,7 +52,7 @@ the user asked for a project override.
    another L2 (or queues same-file). Do not kill a healthy
    in-flight L2.
 6. **Read the report.** L1 reads only the short on-disk L2 report
-   under `~/.agents/reports/`. Do not re-do the L2 greps.
+   under `~/.agents/reports/`. L1 does not re-do the L3 greps.
 7. **Close out.** Complete the board item the same turn the
    substance lands. Cancel only with a recorded reason.
 8. **Stop git.** Never `git add`. Never `git commit`. Never push.
@@ -68,20 +68,22 @@ the user asked for a project override.
 
 ## Agent depth (not session-board L0-L2)
 
-**L0** is the dashboard, one level above L1. It is the `grok-oss gui` window. It is not session-board residual and not document D0.
-**L1** is the context where the agent talks to the Operator.
-**L2** is a coordinator. The Operator can still prompt an L2 they are watching.
-**L3** implements and reviews. An L3 does not spawn. There is no L4.
+The full contract is `FORK.md` § *Hierarchical subagents (specification 0016)*. This skill is a short procedure. It does not copy that contract.
 
-Speaker labels stay Operator and Agent. Nested agents are L1, L2, and L3. Do not call L1 a parent of L2. Do not analogize nested agents to OS process trees. Do not call an L3 a coordinator.
+**L0** is the laptop coordinator. The crate name is `surmount-coordinator-gui`. L0 queues prompts and is not a nested agent. The call name `grok-oss gui` is informative. It is not session-board residual and not document D0.
+**L1** is the main session, where the agent talks to the Operator.
+**L2** is the coordinator. The word coordinator means L2 only. The Operator can still prompt an L2 they are watching.
+**L3** is the specialist. The word specialist means L3 only. An L3 does not spawn. There is no L4. An attached client is not a layer.
 
-Default: L1 spawns a coordinator L2 to accomplish the task. Do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. All layers can talk to the layers above and below. Discarded L2 and L3 contexts report up to L1. They do not compact into L1. All tokens in an L3 contribute to the token costs of the L2. `MAX_SUBAGENT_DEPTH` stays 2 (L3 cannot spawn; there is no L4).
+Speaker labels stay Operator and Agent. Nested agents are L1, L2, and L3. Do not use kinship words for a layer. Do not compare layers to operating system process trees. Do not call an L3 a coordinator. Files that pass work between layers are reports.
+
+Default: L1 spawns an L2 to accomplish the task. Do not keep implement work on L1. That L2 spawns and manages L3s. The L2 can restart and compact its L3s when those L3s are doing well. Layers can talk to the layer above and the layer below. Discarded L2 and L3 contexts report up. They do not compact into L1. Every token counted for an L3 contributes to the token cost of its L2. `MAX_SUBAGENT_DEPTH` stays 2 (L3 cannot spawn; there is no L4).
 
 L2 always spawns an L3 for implement, diagnosis, edit, or review. L2 does not do that work itself.
 
 | Depth | Does | Does not |
 |-------|------|----------|
-| **L0 dashboard** | `grok-oss gui` window, one level above L1 | Session-board residual. Document D0. |
+| **L0 laptop coordinator** | `grok-oss gui`, crate `surmount-coordinator-gui`. Queues prompts. Not a nested agent. | Session-board residual. Document D0. Pager `/dashboard`. |
 | **L1 main** | Status. Board upsert. Spawn one L2. Wait or other tracks. Read the short report. Hierarchical fast path only for named one-liners that are not this job. | Do this job. Diagnose. Implement. Multi-file reads. CI logs |
 | **L2 coordinator** | Coordinates only: spawn L3, wait, read the L3 short report, write one L2 report. Can restart and compact L3s that are doing well. L2s are not to do any kind of work by themselves. Throw context away after. | Grep, diagnose, edit, implement, or review. Call an L3 a coordinator. Spawn L4. Show raw edits as if L1 |
 | **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate, or be called a coordinator. Spawn L4 |
@@ -132,7 +134,7 @@ No L4. All tokens in an L3 contribute to the token costs of the L2.
 
 ## Hard rules
 
-- No em dashes. No unicode ellipsis. Never bare child/children as
+- No em dashes. No unicode ellipsis. Never use kinship words as
   agent nicknames.
 - Wait times of a minute or more in minutes (`15m43s`, `1h2m`).
 - Never assume. Docs can lie. Verify before claiming the job is

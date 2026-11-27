@@ -49,6 +49,23 @@ pub const TASK_TOOL_NAME: &str = "task";
 /// L2. Hierarchical fast path on L1 is not this ceiling.
 pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
+/// Instruction text the spawn path attaches for an L2.
+/// The L1 fast path is not in this text.
+/// `xai-grok-agent` re-exports this as `CHILD_TASK_DESCRIPTION`.
+pub const CHILD_TASK_DESCRIPTION: &str = "\
+The L2 records spawn, wait, read_l3_report, write_l2_report. The L2 does not grep, edit, or review. \
+Launch a specialist (L3) for an independent sub-task.\n\
+\n\
+An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. \
+L2 does not fill 200k implementing. Compact on that L2 is a product miss when the cause is L2-solo implement tools. \
+L2 may compact (ordinary AUTO compact still fires at 95% of nested 200k). \
+L3 must not compact-and-continue. No L4. \
+Give each L3 a distinct description. One reviewer unless the Operator asked for more. \
+Token Economy effort is not reviewer count.\n\
+\n\
+Usage: specify a short ${{ params.task.description }} and a detailed ${{ params.task.prompt }}.\n\
+${{ params.task.run_in_background }}: Returns immediately with a subagent_id.";
+
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources
         .get::<MaxSubagentDepth>()

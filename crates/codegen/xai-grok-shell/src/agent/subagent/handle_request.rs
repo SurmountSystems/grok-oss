@@ -383,6 +383,45 @@ pub(super) fn admit_explicit_tool_model(
         }
     }
 }
+/// Inputs for the turn-end decision inside `run_shell_child_body`.
+pub(crate) struct HandleRequestTurnEnd<'a> {
+    pub cmd_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    pub events: &'a tokio::sync::mpsc::UnboundedSender<
+        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
+    >,
+    pub subagent_id: &'a str,
+    pub parent_depth: u32,
+    pub child_depth: u32,
+    pub output: &'a str,
+    pub cancelled: bool,
+    pub spawned_child_still_running: bool,
+}
+
+/// Returns true when this turn sent Shutdown.
+/// `run_shell_child_body` calls this before `end_local_session`.
+/// An L2 whose output does not name `~/.agents/reports/` stays open.
+/// An L2 that names that path records `RecordOwnReport`, then shuts down.
+/// An L3 still shuts down. A cancelled L2 still shuts down.
+pub(crate) fn apply_handle_request_turn_end(end: HandleRequestTurnEnd<'_>) -> bool {
+    if end.spawned_child_still_running {
+        return false;
+    }
+    let is_l2 = end.parent_depth == 0 && end.child_depth <= 1;
+    if is_l2 && !end.cancelled && !end.output.contains(".agents/reports/") {
+        return false;
+    }
+    if is_l2 && end.output.contains(".agents/reports/") {
+        let (respond_to, _ack) = tokio::sync::oneshot::channel();
+        let event =
+            xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::RecordOwnReport {
+                subagent_id: end.subagent_id.to_owned(),
+                respond_to,
+            };
+        let _ = end.events.send(event);
+    }
+    super::child_runtime::shutdown_child_session_on_turn_end(end.cmd_tx, false)
+}
+
 #[tracing::instrument(
     name = "subagent.handle_request",
     skip_all,
@@ -2462,9 +2501,35 @@ async fn run_shell_child_body(
         }
     }
     crate::waterfall::mark(&request.id, crate::waterfall::stage::FLUSH_DONE);
-    let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
-        crate::session::ShutdownKind::Graceful,
-    ));
+    // Ask while this run is still pending. Shutdown before the answer closes
+    // the command loop, and the later follow-up Interject cannot start a turn.
+    let spawned_child_still_running = reporter.spawned_child_still_running().await;
+    let turn_end_depth = request
+        .runtime_overrides
+        .spawn_depth
+        .unwrap_or(ctx.parent_depth.saturating_add(1));
+    let shut_down = apply_handle_request_turn_end(HandleRequestTurnEnd {
+        cmd_tx: &child_handle.cmd_tx,
+        events: &ctx.subagent_event_tx,
+        subagent_id: &request.id,
+        parent_depth: ctx.parent_depth,
+        child_depth: turn_end_depth,
+        output: result.output.as_ref(),
+        cancelled: result.cancelled,
+        spawned_child_still_running,
+    });
+    if !shut_down {
+        tracing::info!(
+            subagent_id = %request.id,
+            child_session_id = %child_session_id.0,
+            "coordinator turn ended with the session left open"
+        );
+        crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_DONE);
+        // `child_thread` drop detaches the thread. The command loop keeps
+        // reading. `ShellChildRuntime` still holds `cmd_tx`, so follow-up
+        // Interject can start another model turn. Do not end the local session.
+        return child_run_output(result, completion_data, None);
+    }
     drop(child_handle);
     if !await_session_thread_exit(&child_thread, UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT).await {
         tracing::warn!(
@@ -2665,3 +2730,7 @@ pub(crate) async fn dispose_worktree_after_completion(
         worktree_removed,
     }
 }
+
+#[cfg(test)]
+#[path = "handle_request_l2_session_tests.rs"]
+mod handle_request_l2_session_tests;

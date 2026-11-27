@@ -1,13 +1,16 @@
-//! GitHub #222: L2 may compact and still resume its L3s.
-//! GitHub #224 / FORK.md agent-depth: keep these names. Do not weaken.
+//! GitHub #222 / #224 coordinator contracts. Keep these names. Do not weaken.
 //!
-//! After compact, that L2 still:
+//! These tests do not compact a session. `SessionActor::run_compact` is the
+//! shell test `l2_after_compact_still_receives_l3_completion_report`.
+//! A list of ids is not that call.
+//!
+//! Coordinator contracts kept here:
 //! - `follow_up` a running L3 (same L3 id), talk-down
 //! - `resume_from` a completed L3, talk-down
-//! - receive that L3's completion report, talk-up
+//! - an L3 completion report buffers for that L2, talk-up
 //! L3 still cannot spawn. There is no L4. `MAX_SUBAGENT_DEPTH` stays 2.
 //!
-//! Talk-up of an L3 that was not compacted is
+//! Talk-up of an L3 that was not part of a compact call is
 //! `nested_grandchild_completion_buffers_for_spawner_not_root`.
 //! Named tests are contracts. Do not fit tests to code.
 
@@ -17,7 +20,7 @@ use crate::implementations::grok_build::task::types::{
 };
 use tokio::sync::oneshot;
 
-async fn compact_list_active(harness: &Harness, session: &str) -> Vec<String> {
+async fn list_active_ids(harness: &Harness, session: &str) -> Vec<String> {
     let (respond_to, response) = oneshot::channel();
     harness
         .backend
@@ -35,7 +38,7 @@ async fn compact_list_active(harness: &Harness, session: &str) -> Vec<String> {
         .collect()
 }
 
-async fn compact_list_completed(harness: &Harness, session: &str) -> Vec<String> {
+async fn list_completed_ids(harness: &Harness, session: &str) -> Vec<String> {
     let (respond_to, response) = oneshot::channel();
     harness
         .backend
@@ -53,9 +56,9 @@ async fn compact_list_completed(harness: &Harness, session: &str) -> Vec<String>
         .collect()
 }
 
-/// GitHub #222 / #224: compact on L2 does not drop the L3. L2 can follow_up a
-/// running L3 and resume_from a completed L3. L1 follow_up of that L3
-/// stays LiveL3Unbothered (#143). See FORK.md agent-depth.
+/// GitHub #222 / #224: follow_up of a running L3 and resume_from of a
+/// completed L3. This test does not call `run_compact`. L1 follow_up of
+/// that L3 stays LiveL3Unbothered (#143). See FORK.md agent-depth.
 #[tokio::test]
 async fn l2_after_compact_still_resumes_its_l3s() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
@@ -67,11 +70,11 @@ async fn l2_after_compact_still_resumes_its_l3s() {
     let spawn_l3 = spawn_nested(&mut harness, &l2_backend, l3).await;
     assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
 
-    let listed = compact_list_active(&harness, "child").await;
+    let listed = list_active_ids(&harness, "child").await;
     assert_eq!(
         listed,
         ["l3"],
-        "L2 compact ListActive must keep the running L3 id"
+        "ListActive keeps the running L3 id. This list is not run_compact"
     );
 
     let outcome = l2_backend
@@ -82,7 +85,7 @@ async fn l2_after_compact_still_resumes_its_l3s() {
         SubagentFollowUpOutcome::Queued {
             child_session_id: "l3".to_owned(),
         },
-        "after L2 compact, L2 follow_up of its running L3 must enqueue Interject on that L3"
+        "L2 follow_up of its running L3 must enqueue Interject on that L3"
     );
     let delivered = harness
         .follow_ups
@@ -104,11 +107,11 @@ async fn l2_after_compact_still_resumes_its_l3s() {
     let _ = harness.finish_one.send("l3".to_owned());
     assert!(spawn_l3.await.unwrap().unwrap().success);
 
-    let completed = compact_list_completed(&harness, "child").await;
+    let completed = list_completed_ids(&harness, "child").await;
     assert_eq!(
         completed,
         ["l3"],
-        "L2 compact ListCompleted must keep the completed L3 id for resume_from"
+        "ListCompleted keeps the completed L3 id. This list is not run_compact"
     );
 
     let mut resume = request("identity-resume", true);
@@ -116,7 +119,7 @@ async fn l2_after_compact_still_resumes_its_l3s() {
     let _resumed = spawn_nested(&mut harness, &l2_backend, resume).await;
     let SubagentResumeLookup::Completed(source) = harness.resume_sources.recv().await.unwrap()
     else {
-        panic!("after L2 compact, resume_from of the completed L3 must be Completed, not Missing");
+        panic!("resume_from of the completed L3 must be Completed, not Missing");
     };
     assert_eq!(source.subagent_id, "l3");
     assert_eq!(
@@ -126,7 +129,7 @@ async fn l2_after_compact_still_resumes_its_l3s() {
     let inspection = l2_backend
         .inspect("identity-resume")
         .await
-        .expect("L2 reaches resume_from of its completed L3 after compact");
+        .expect("L2 reaches resume_from of its completed L3");
     assert_eq!(inspection.resumed_from.as_deref(), Some("l3"));
 
     harness.actor.abort();
@@ -163,7 +166,7 @@ async fn l2_resume_from_of_running_l3_still_fails_active() {
             .expect("resume_sources open"),
             SubagentResumeLookup::Active
         ),
-        "resume_from of a running L3 after L2 compact stays Active; use follow_up"
+        "resume_from of a running L3 stays Active; use follow_up"
     );
     let resume_result = tokio::time::timeout(std::time::Duration::from_secs(2), resume_spawn)
         .await
@@ -222,11 +225,13 @@ async fn l2_follow_up_of_l3_does_not_spawn_l4() {
     harness.actor.abort();
 }
 
-/// GitHub #224: L2 compact still leaves talk-up. An L3 completion report
-/// buffers for that L2, not for L1. Talk-down is `l2_after_compact_still_resumes_its_l3s`.
-/// See FORK.md agent-depth. Discarded L3 context reports up; it does not compact into L1.
+/// GitHub #224: an L3 completion report buffers for that L2, not for L1.
+/// This function name is a recorded identifier. This test does not compact.
+/// `actor.run_compact().await` is the shell test
+/// `l2_after_compact_still_receives_l3_completion_report`.
+/// See FORK.md agent-depth. Discarded L3 context reports to the L2. It does not land on L1.
 #[tokio::test]
-async fn l2_after_compact_still_receives_l3_completion_report() {
+async fn l2_buffers_l3_completion_without_compacting() {
     let mut harness = harness_with_config(false, buffering());
     let l2_backend = spawn_child(&mut harness, false).await;
     let mut l3 = request("l3", true);
@@ -235,12 +240,21 @@ async fn l2_after_compact_still_receives_l3_completion_report() {
     let spawn_l3 = spawn_nested(&mut harness, &l2_backend, l3).await;
     assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
 
-    let listed = compact_list_active(&harness, "child").await;
+    let outcome = l2_backend.follow_up("l3", "follow_up a running L3").await;
     assert_eq!(
-        listed,
-        ["l3"],
-        "L2 compact ListActive must keep the running L3 id before that L3 reports up"
+        outcome,
+        SubagentFollowUpOutcome::Queued {
+            child_session_id: "l3".to_owned(),
+        },
+        "follow_up of a running L3 stays on that L3"
     );
+    let delivered = harness
+        .follow_ups
+        .recv()
+        .await
+        .expect("follow_up of the running L3");
+    assert_eq!(delivered.child_session_id, "l3");
+    assert_eq!(delivered.text, "follow_up a running L3");
 
     let _ = harness.finish_one.send("l3".to_owned());
     assert!(spawn_l3.await.unwrap().unwrap().success);
@@ -252,13 +266,26 @@ async fn l2_after_compact_still_receives_l3_completion_report() {
     assert_eq!(
         buffered_completion_ids(&harness, Some("child")).await,
         ["l3"],
-        "after L2 compact, the L3 completion report still buffers for that L2"
+        "the L3 completion report buffers for that L2"
     );
     assert!(
         buffered_completion_ids(&harness, Some("parent"))
             .await
             .is_empty(),
-        "discarded L3 context reports to L2. It does not compact into L1."
+        "discarded L3 context reports to the L2. It does not land on L1."
+    );
+
+    let mut resume = request("identity-resume", true);
+    resume.resume_from = Some("l3".to_owned());
+    let _resumed = spawn_nested(&mut harness, &l2_backend, resume).await;
+    let SubagentResumeLookup::Completed(source) = harness.resume_sources.recv().await.unwrap()
+    else {
+        panic!("resume_from of the finished L3 must be Completed");
+    };
+    assert_eq!(source.subagent_id, "l3");
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("identity-resume")
     );
 
     harness.actor.abort();

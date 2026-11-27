@@ -84,11 +84,13 @@ Prompts are self-contained. Each L2 writes a short report under
 
 ## Agent depth (not session-board L0-L2)
 
+The full contract is `FORK.md` § *Hierarchical subagents (specification 0016)*. This skill is a short procedure. It does not copy that contract. L0 is the laptop coordinator, crate `surmount-coordinator-gui`. L0 queues prompts and is not a nested agent. The word coordinator means L2 only. The word specialist means L3 only. There is no L4. An attached client is not a layer. Do not use kinship words for a layer. L1 is the main session, where the agent talks to the Operator. An L3 does not spawn.
+
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
 | **L2 subagent** | Coordinates only. Spawns L3 for the work. Throw context away after the report. | Grep, diagnose, edit, implement, or review. Spawn L4. Show raw edits as if L1. |
-| **L3 specialist** | Implements, researches, or reviews. Same agency as L2 except no spawn. | Coordinate. Spawn L4 |
+| **L3 specialist** | Implements, researches, or reviews. Same agency as L2. An L3 does not spawn. | Coordinate. Spawn L4 |
 
 **Hierarchical fast path** (L1 only): one-command host question; a
 single known-path read already named; read and quote the asked-for
@@ -116,7 +118,7 @@ same-file). Do not kill a healthy in-flight L2.
 
 ## Hard rules
 
-- No em dashes. No unicode ellipsis. Never bare child/children as
+- No em dashes. No unicode ellipsis. Never use kinship words as
   agent nicknames.
 - Wait times of a minute or more in minutes (`15m43s`, `1h2m`).
 - Never assume. Docs can lie. Verify before claiming a slice is fixed.

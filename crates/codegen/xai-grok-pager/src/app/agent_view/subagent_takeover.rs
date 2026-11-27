@@ -1039,8 +1039,12 @@ impl AgentView {
             Some(IdleEnterQuote::ConsumedEmpty) => return Some(InputOutcome::Changed),
             Some(IdleEnterQuote::NotHandled) | None => {}
         }
+        // Paint copies parent-registry L3 rows onto this L2, then drops them.
+        // A click after that drop hit-tests an empty dock and misses `show N more`.
+        let borrowed_specialists = self.mirror_parented_specialists_for_overlay(&child_sid);
         let outcome = {
             let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
+                self.drop_mirrored_overlay_specialists(&child_sid, &borrowed_specialists);
                 return Some(InputOutcome::Unchanged);
             };
             let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
@@ -1048,6 +1052,7 @@ impl AgentView {
             self.pending_effects.append(&mut child_effects);
             outcome
         };
+        self.drop_mirrored_overlay_specialists(&child_sid, &borrowed_specialists);
         if l2_floor {
             let redirected = match &outcome {
                 InputOutcome::Action(Action::SendPrompt(text)) if !text.trim().is_empty() => {

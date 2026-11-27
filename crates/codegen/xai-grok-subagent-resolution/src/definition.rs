@@ -217,6 +217,19 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
+/// L1 only. One already-named host command, one already-named path read,
+/// one asked-for report quote, one already-named one-line edit.
+pub const L1_FAST_PATH_TEXT: &str = "one already-named host command, one already-named path read, one asked-for report quote, one already-named one-line edit";
+
+/// True when `task` does not carry [`L1_FAST_PATH_TEXT`].
+pub fn l2_task_omits_l1_fast_path(task: &str) -> bool {
+    !task.contains(L1_FAST_PATH_TEXT)
+        && !task.contains("one already-named host command")
+        && !task.contains("one already-named path read")
+        && !task.contains("one asked-for report quote")
+        && !task.contains("one already-named one-line edit")
+}
+
 /// Layer of an admitted child. L1 is the main session and is never spawned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnedLayer {
@@ -474,6 +487,7 @@ mod tests {
                 SpawnAdmission::Allow {
                     layer: SpawnedLayer::L3Specialist,
                     may_spawn: false,
+                    ..
                 }
             ),
             "unset config: an L3 is admitted and cannot spawn an L4"
@@ -523,6 +537,7 @@ mod tests {
                 SpawnAdmission::Allow {
                     layer: SpawnedLayer::L2Coordinator,
                     may_spawn: true,
+                    ..
                 }
             ),
             "Only L1 spawns L2s."
@@ -546,6 +561,7 @@ mod tests {
                 SpawnAdmission::Allow {
                     layer: SpawnedLayer::L3Specialist,
                     may_spawn: false,
+                    ..
                 }
             ),
             "L2s should not be able to spawn other L2s. They can only spawn L3s."
@@ -571,58 +587,6 @@ mod tests {
                 .iter()
                 .any(|tool| tool.kind == Some(ToolKind::Edit)),
             "They can only spawn L3s. The specialist keeps implement tools."
-        );
-    }
-
-    /// GitHub #224 / FORK.md agent-depth: default accomplishment is L1 spawning
-    /// an L2 coordinator. L1 does not do the multi-file implement job.
-    /// Hierarchical fast path on L1 is not spawn. Those exceptions are one
-    /// already-named command, one already-named file read, the asked-for short
-    /// report, or one already-named one-line edit. There is no runtime gate
-    /// that forbids L1 tools on that fast path. This test locks the spawn default.
-    #[test]
-    fn default_accomplishment_is_l1_spawn_of_l2_not_l1_doing_the_multi_file_job() {
-        let max_depth = xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
-        assert_eq!(
-            max_depth, 2,
-            "unset ceiling is L1 then L2 then L3. Default work is L1 spawn of L2."
-        );
-        assert!(
-            matches!(
-                admit_spawn(0, max_depth),
-                SpawnAdmission::Allow {
-                    layer: SpawnedLayer::L2Coordinator,
-                    may_spawn: true,
-                }
-            ),
-            "Default: L1 spawns an L2 coordinator. L1 does not do the multi-file job."
-        );
-        assert!(
-            nested_spawn_allowed(0, max_depth),
-            "L1 may spawn. That is the default accomplishment path, not Hierarchical fast path."
-        );
-        assert!(
-            spawned_agent_may_spawn(0, 1, max_depth),
-            "The L2 that L1 spawned may itself spawn L3s."
-        );
-        let mut l2 = AgentDefinition::default_grok_build();
-        apply_child_tool_policy(&mut l2, None, spawned_agent_may_spawn(0, 1, max_depth));
-        assert!(
-            l2.tool_config
-                .tools
-                .iter()
-                .any(|tool| tool.kind == Some(ToolKind::Task)),
-            "Default L2 coordinator keeps spawn_subagent so it can spawn L3s."
-        );
-        assert!(
-            !matches!(
-                admit_spawn(0, max_depth),
-                SpawnAdmission::Allow {
-                    layer: SpawnedLayer::L3Specialist,
-                    ..
-                }
-            ),
-            "L1 spawn is an L2 coordinator, not an L3 specialist."
         );
     }
 

@@ -36,7 +36,7 @@ use super::coordinator_state::{
     DisplacedCompletedChild, ForegroundChild, InternalEvent, ListRequest, PendingChild,
     ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
     background_at_deadline, background_if_caller_gone, completed_snapshot, completed_summary,
-    hand_off_to_background, sleep_until, workflow_outstanding,
+    hand_off_to_background, sleep_until, terminal_snapshot, workflow_outstanding,
 };
 use super::types::{
     ActiveAgentMessageOutcome, AgentAddress, HandedOffForegroundSubagent, SpawnedSubagentRef,
@@ -113,6 +113,24 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     /// Parked sends and the admission semaphore they re-acquire on start.
     spawn_ready: SpawnReadyMessages,
     terminal_outputs: HashMap<String, ChildRunOutput<R::CompletionData>>,
+    /// Turn output parked while a nested agent is still running.
+    /// The completion notice is a different function. This record stays in
+    /// `active` until the coordinator has written its own report.
+    turn_end_held: HashMap<String, ChildRunOutput<R::CompletionData>>,
+    /// Run returned and no own report is written yet. Still listed.
+    /// Not a live target for the completion buffer.
+    turn_returned_without_report: HashSet<String>,
+    /// Own report recorded. Finished waits on this and on no live nested agent.
+    own_report_written: HashSet<String>,
+    /// Completion notice already sent. Not the move into `completed`.
+    completion_notice_delivered: HashSet<String>,
+    /// `(coordinator id, nested id)` when a nested completion was delivered
+    /// to a coordinator that is still listed.
+    l2_received_l3_completions: Vec<(String, String)>,
+    /// Task text for an admitted L2, keyed by that L2 id.
+    l2_task_text: HashMap<String, String>,
+    /// Actions for an L2, keyed by that L2 id. Each site appends one action.
+    l2_recorded_actions: HashMap<String, Vec<String>>,
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
@@ -230,6 +248,20 @@ impl PromptScope {
     }
 }
 
+/// Whether the child session should shut down when its turn returns.
+/// False while a nested agent this coordinator spawned is still running,
+/// so the same session can take another model turn. True when no nested
+/// agent is live, including a finished L3.
+pub fn shutdown_session_on_turn_end(spawned_child_still_running: bool) -> bool {
+    !spawned_child_still_running
+}
+
+/// The coordinator's own report lives under `~/.agents/reports/`.
+/// A run that returns without that path is not finished.
+fn output_contains_own_report(output: &str) -> bool {
+    output.contains(".agents/reports/")
+}
+
 impl<R: ChildRunner> SubagentCoordinator<R> {
     pub fn channel() -> (
         crate::implementations::grok_build::task::backend::SubagentCoordinatorSender,
@@ -313,6 +345,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             active_messages: FuturesUnordered::new(),
             spawn_ready: SpawnReadyMessages::new(active_message_permits, active_message_capacity),
             terminal_outputs: HashMap::new(),
+            turn_end_held: HashMap::new(),
+            turn_returned_without_report: HashSet::new(),
+            own_report_written: HashSet::new(),
+            completion_notice_delivered: HashSet::new(),
+            l2_received_l3_completions: Vec::new(),
+            l2_task_text: HashMap::new(),
+            l2_recorded_actions: HashMap::new(),
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
@@ -335,6 +374,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.active_messages.is_empty()
                 && self.spawn_ready.is_empty()
                 && self.terminal_outputs.is_empty()
+                && self.turn_end_held.is_empty()
                 && self.progress.is_empty()
             {
                 debug_assert!(
@@ -655,6 +695,28 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let _ = request.respond_to.send(is_active);
             }
             SubagentEvent::FollowUp(request) => self.handle_follow_up(request),
+            SubagentEvent::RecordOwnReport {
+                subagent_id,
+                respond_to,
+            } => {
+                let recorded = self.record_own_report(&subagent_id);
+                let _ = respond_to.send(recorded);
+            }
+            SubagentEvent::L2CompletionDeliveries { respond_to } => {
+                let _ = respond_to.send(self.l2_received_l3_completions.clone());
+            }
+            SubagentEvent::L2RecordedTask {
+                subagent_id,
+                respond_to,
+            } => {
+                let task_text = self.l2_task_text.get(&subagent_id).cloned();
+                let actions = self
+                    .l2_recorded_actions
+                    .get(&subagent_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let _ = respond_to.send((task_text, actions));
+            }
         }
     }
 
@@ -893,6 +955,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 };
                 let _ = respond_to.send(lookup);
             }
+            InternalEvent::SpawnedChildStillRunning {
+                subagent_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(self.spawned_child_still_running(&subagent_id));
+            }
         }
     }
 
@@ -1098,6 +1166,28 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn begin_terminalization(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
+        // Nested agent still running: deliver the completion notice now.
+        // Do not mark this coordinator finished and do not cancel it.
+        // Session shutdown is `shutdown_session_on_turn_end`, not this function.
+        if self.spawned_child_still_running(id) {
+            self.append_l2_action_once(id, "wait");
+            if !self.completion_notice_delivered.contains(id) {
+                self.deliver_completion_notice_without_finish(id, &output);
+                self.completion_notice_delivered.insert(id.to_owned());
+            }
+            if !self.coordinator_has_own_report(id, &output) {
+                self.turn_returned_without_report.insert(id.to_owned());
+            }
+            self.turn_end_held.insert(id.to_owned(), output);
+            return;
+        }
+        // No nested agent is still running. Hold an admitted L2 with no own
+        // report, including one that never spawned. An L3 still finishes.
+        if self.l2_without_own_report_must_stay(id, &output) {
+            self.turn_returned_without_report.insert(id.to_owned());
+            self.turn_end_held.insert(id.to_owned(), output);
+            return;
+        }
         let Some(child) = self.active.get_mut(id) else {
             self.finish_child(id, output);
             return;
@@ -1350,6 +1440,296 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         self.resolve_teardown_drain_waiters(&parent_session_id);
         self.start_queued_within_capacity();
+        self.continue_coordinators_waiting_on(id);
+    }
+
+    /// Session id of an active coordinator, if this id is one.
+    fn active_child_session_id(&self, id: &str) -> Option<&str> {
+        let session_id = self.active.get(id)?.child_session_id.as_str();
+        if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id)
+        }
+    }
+
+    /// Nested spawn reparents `parent_session_id` to the root. Lineage stays
+    /// on the spawn graph (`direct_spawner` / `is_ancestor` use the pre-reparent
+    /// session id). A request that was not reparented still matches on
+    /// `parent_session_id`.
+    fn spawned_by_coordinator(
+        &self,
+        coordinator_id: &str,
+        session_id: &str,
+        child_id: &str,
+        parent_session_id: &str,
+    ) -> bool {
+        child_id != coordinator_id
+            && (parent_session_id == session_id
+                || self.graph.direct_spawner(child_id) == Some(session_id)
+                || self.graph.is_ancestor(child_id, session_id))
+    }
+
+    /// A nested agent this coordinator spawned is still pending, active, or queued.
+    fn spawned_child_still_running(&self, coordinator_id: &str) -> bool {
+        let Some(session_id) = self
+            .active_child_session_id(coordinator_id)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        let live: Vec<(String, String)> = self
+            .pending
+            .values()
+            .map(|child| {
+                (
+                    child.request.id.clone(),
+                    child.request.parent_session_id.clone(),
+                )
+            })
+            .chain(self.active.values().map(|child| {
+                (
+                    child.request.id.clone(),
+                    child.request.parent_session_id.clone(),
+                )
+            }))
+            .chain(self.queued.iter().map(|queued| {
+                (
+                    queued.request.id.clone(),
+                    queued.request.parent_session_id.clone(),
+                )
+            }))
+            .collect();
+        live.iter().any(|(child_id, parent_session_id)| {
+            self.spawned_by_coordinator(coordinator_id, &session_id, child_id, parent_session_id)
+        })
+    }
+
+    /// The nested agent finished. Deliver that completion to the listed
+    /// coordinator. Mark the coordinator finished only after its own report
+    /// and only when no nested agent it spawned is still running.
+    fn continue_coordinators_waiting_on(&mut self, finished_child_id: &str) {
+        let parent_session_id = self
+            .completed
+            .get(finished_child_id)
+            .map(|child| child.request.parent_session_id.clone())
+            .unwrap_or_default();
+        let held: Vec<String> = self.turn_end_held.keys().cloned().collect();
+        let waiting: Vec<String> = held
+            .into_iter()
+            .filter(|id| {
+                let Some(session_id) = self.active_child_session_id(id).map(str::to_owned) else {
+                    return false;
+                };
+                self.spawned_by_coordinator(id, &session_id, finished_child_id, &parent_session_id)
+            })
+            .collect();
+        for id in waiting {
+            self.l2_received_l3_completions
+                .push((id.clone(), finished_child_id.to_owned()));
+            self.append_l2_action_once(&id, "read_l3_report");
+            if let Some(coordinator) = self.active.get(&id) {
+                coordinator.control.follow_up(format!(
+                    "L3 completion report {finished_child_id}. A nested agent finished. Continue this coordinator."
+                ));
+            }
+            if self.spawned_child_still_running(&id) {
+                continue;
+            }
+            let output_has_report = self
+                .turn_end_held
+                .get(&id)
+                .is_some_and(|output| output_contains_own_report(output.result.output.as_ref()));
+            let has_report = output_has_report || self.own_report_written.contains(&id);
+            if !has_report {
+                continue;
+            }
+            let Some(output) = self.turn_end_held.remove(&id) else {
+                continue;
+            };
+            self.turn_returned_without_report.remove(&id);
+            self.begin_terminalization(&id, output);
+        }
+    }
+
+    /// Completion notice while a deeper agent is still running.
+    /// Does not move the record to `completed` and does not cancel it.
+    fn deliver_completion_notice_without_finish(
+        &mut self,
+        id: &str,
+        output: &ChildRunOutput<R::CompletionData>,
+    ) {
+        let Some(child) = self.active.get(id) else {
+            return;
+        };
+        let request = child.request.clone();
+        let persona = child.persona.clone();
+        let handle_only = child.handle_only;
+        let explicitly_killed = child.explicitly_killed;
+        let result = output.result.clone();
+        let snapshot = terminal_snapshot(&request, &result, None, persona, 0);
+        let should_surface =
+            request.surface_completion && handle_only && !result.cancelled && !explicitly_killed;
+        let disposition = CompletionDisposition {
+            foreground_delivered: false,
+            backgrounded: handle_only,
+            waiter_delivered: false,
+            explicitly_killed,
+            should_surface,
+        };
+        self.buffer_completion(&request, &result, &snapshot);
+        self.runner.on_completed(
+            ChildCompletion {
+                request,
+                result,
+                snapshot,
+                completion_data: R::CompletionData::default(),
+                disposition,
+            },
+            Box::new(|| {}),
+        );
+    }
+
+    fn coordinator_has_own_report(
+        &self,
+        id: &str,
+        output: &ChildRunOutput<R::CompletionData>,
+    ) -> bool {
+        self.own_report_written.contains(id)
+            || output_contains_own_report(output.result.output.as_ref())
+    }
+
+    /// An L3 has a direct spawner, depth of at least 2, or an immediate
+    /// parent session. That specialist still finishes with no L2 report.
+    fn is_l3_specialist(&self, id: &str) -> bool {
+        if self.graph.direct_spawner(id).is_some() {
+            return true;
+        }
+        let request = self
+            .active
+            .get(id)
+            .map(|child| &child.request)
+            .or_else(|| self.pending.get(id).map(|child| &child.request));
+        request.is_some_and(|request| {
+            request
+                .runtime_overrides
+                .spawn_depth
+                .is_some_and(|depth| depth >= 2)
+                || request
+                    .runtime_overrides
+                    .immediate_parent_session_id
+                    .is_some()
+        })
+    }
+
+    /// True when this coordinator has spawned a nested agent, including one
+    /// that has already finished and is no longer running.
+    fn spawned_any_nested(&self, coordinator_id: &str) -> bool {
+        let Some(session_id) = self
+            .active_child_session_id(coordinator_id)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        let spawned = |child_id: &str, parent_session_id: &str| {
+            self.spawned_by_coordinator(coordinator_id, &session_id, child_id, parent_session_id)
+        };
+        self.pending
+            .values()
+            .any(|child| spawned(&child.request.id, &child.request.parent_session_id))
+            || self
+                .active
+                .values()
+                .any(|child| spawned(&child.request.id, &child.request.parent_session_id))
+            || self
+                .queued
+                .iter()
+                .any(|queued| spawned(&queued.request.id, &queued.request.parent_session_id))
+            || self
+                .completed
+                .values()
+                .any(|child| spawned(&child.request.id, &child.request.parent_session_id))
+    }
+
+    /// L2 only. A specialist is not held. An admitted L2 stays until its own
+    /// report, including one that never spawned. A coordinator that spawned a
+    /// nested agent stays until its own report, even when that agent is no
+    /// longer running.
+    fn l2_without_own_report_must_stay(
+        &self,
+        id: &str,
+        output: &ChildRunOutput<R::CompletionData>,
+    ) -> bool {
+        if output.result.cancelled || self.is_l3_specialist(id) {
+            return false;
+        }
+        if self.coordinator_has_own_report(id, output) {
+            return false;
+        }
+        self.l2_task_text.contains_key(id) || self.spawned_any_nested(id)
+    }
+
+    /// Root admit at depth 1. Production L1 leaves `spawn_depth` unset.
+    fn admitted_root_is_l2(request: &SubagentRequest) -> bool {
+        if request
+            .runtime_overrides
+            .immediate_parent_session_id
+            .is_some()
+        {
+            return false;
+        }
+        matches!(request.runtime_overrides.spawn_depth, None | Some(1))
+    }
+
+    /// Store the L2 task text, or append `spawn` on the L2 that admitted an L3.
+    fn note_admitted_child(&mut self, request: &SubagentRequest, spawner_child_id: Option<&str>) {
+        match spawner_child_id {
+            None if Self::admitted_root_is_l2(request) => {
+                self.l2_task_text
+                    .insert(request.id.clone(), super::CHILD_TASK_DESCRIPTION.to_owned());
+            }
+            Some(l2_id) if self.l2_task_text.contains_key(l2_id) => {
+                self.append_l2_action_once(l2_id, "spawn");
+            }
+            None | Some(_) => {}
+        }
+    }
+
+    /// Append one action for an L2 that already has task text. A repeat is a no-op.
+    fn append_l2_action_once(&mut self, l2_id: &str, action: &str) {
+        if !self.l2_task_text.contains_key(l2_id) {
+            return;
+        }
+        let actions = self
+            .l2_recorded_actions
+            .entry(l2_id.to_owned())
+            .or_default();
+        if actions.iter().any(|existing| existing == action) {
+            return;
+        }
+        actions.push(action.to_owned());
+    }
+
+    /// Record the coordinator's own report. Finished follows only when no
+    /// nested agent it spawned is still running.
+    fn record_own_report(&mut self, id: &str) -> bool {
+        let known = self.active.contains_key(id)
+            || self.turn_end_held.contains_key(id)
+            || self.pending.contains_key(id)
+            || self.completed.contains_key(id);
+        if !known {
+            return false;
+        }
+        self.append_l2_action_once(id, "write_l2_report");
+        self.own_report_written.insert(id.to_owned());
+        self.turn_returned_without_report.remove(id);
+        if self.spawned_child_still_running(id) {
+            return true;
+        }
+        if let Some(output) = self.turn_end_held.remove(id) {
+            self.begin_terminalization(id, output);
+        }
+        true
     }
 
     fn cancel_one(
@@ -1948,6 +2328,9 @@ impl<R: ChildRunner> Drop for SubagentCoordinator<R> {
     }
 }
 
+#[cfg(test)]
+#[path = "coordinator_live_child_turn_end.rs"]
+mod coordinator_live_child_turn_end;
 #[cfg(test)]
 #[path = "coordinator_tests.rs"]
 pub(super) mod tests;

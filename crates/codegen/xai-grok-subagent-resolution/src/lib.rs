@@ -25,11 +25,11 @@ pub mod types;
 pub use config::{PersonaIOField, SubagentPersona, SubagentRole};
 pub use definition::{
     DefinitionResolutionContext, DefinitionValidationContext, HarnessToolsetContext,
-    SpawnAdmission, SpawnedLayer, admit_spawn, apply_child_tool_policy,
+    L1_FAST_PATH_TEXT, SpawnAdmission, SpawnedLayer, admit_spawn, apply_child_tool_policy,
     apply_definition_runtime_defaults, apply_harness_toolset, available_agent_names,
-    discover_agent_definition, gate_agent_definition, nested_spawn_allowed,
-    render_subagent_initial_user_message, render_subagent_system_prompt, resolve_agent_definition,
-    resolve_runtime_config, select_role, spawned_agent_may_spawn,
+    discover_agent_definition, gate_agent_definition, l2_task_omits_l1_fast_path,
+    nested_spawn_allowed, render_subagent_initial_user_message, render_subagent_system_prompt,
+    resolve_agent_definition, resolve_runtime_config, select_role, spawned_agent_may_spawn,
     subagent_harness_flavor_is_representable, validate_agent_name,
 };
 pub use nested_images::{

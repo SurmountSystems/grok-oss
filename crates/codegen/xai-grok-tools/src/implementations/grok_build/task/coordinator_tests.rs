@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "l2_compact_resume_l3_tests.rs"]
 mod l2_compact_resume_l3_tests;
+#[path = "l2_not_finished_until_own_report_tests.rs"]
+mod l2_not_finished_until_own_report_tests;
 #[path = "parent_follow_up_tests.rs"]
 mod parent_follow_up_tests;
 
@@ -119,6 +121,9 @@ pub(in crate::implementations::grok_build::task::coordinator) struct RunnerBehav
     /// Type returned for a resume source that is not in the completed map.
     pub(in crate::implementations::grok_build::task::coordinator) durable_resume_type:
         Option<&'static str>,
+    /// When false, the runner output includes a report path, so an admitted
+    /// L2 is allowed to finish. Tests of the no-report hold set this true.
+    pub(in crate::implementations::grok_build::task::coordinator) omit_own_report: bool,
 }
 
 struct TestRunner {
@@ -158,6 +163,7 @@ impl ChildRunner for TestRunner {
             reject_wake_after_deferred_start,
             wait_after_cancel,
             hold_failed_wake_teardown,
+            omit_own_report,
             ..
         } = self.behavior;
         let mut start = self.start.subscribe();
@@ -333,8 +339,10 @@ impl ChildRunner for TestRunner {
                     }
                     cancelled_result(&request)
                 },
-                _ = finish.recv() => finished_result(&request),
-                _ = finish_one_for(&mut finish_one, &request.id) => finished_result(&request),
+                _ = finish.recv() => finished_result(&request, omit_own_report),
+                _ = finish_one_for(&mut finish_one, &request.id) => {
+                    finished_result(&request, omit_own_report)
+                }
             };
             ChildRunOutput {
                 result,
@@ -391,10 +399,14 @@ impl ChildRunner for TestRunner {
     }
 }
 
-fn finished_result(request: &SubagentRequest) -> SubagentResult {
+fn finished_result(request: &SubagentRequest, omit_own_report: bool) -> SubagentResult {
+    let mut output = request.prompt.clone();
+    if !omit_own_report {
+        output.push_str("\n~/.agents/reports/coordinator.md\n");
+    }
     SubagentResult {
         success: true,
-        output: request.prompt.clone().into(),
+        output: output.into(),
         subagent_id: request.id.clone(),
         child_session_id: request.id.clone(),
         tool_calls: 3,
@@ -500,6 +512,17 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness(
             foreground_budget,
             ..CoordinatorConfig::default()
         },
+    )
+}
+
+pub(in crate::implementations::grok_build::task::coordinator) fn harness_l2_omits_own_report()
+-> Harness {
+    harness_with_options(
+        RunnerBehavior {
+            omit_own_report: true,
+            ..Default::default()
+        },
+        buffering(),
     )
 }
 
@@ -3167,7 +3190,23 @@ async fn running_nested_pair(
     Harness,
     tokio::task::JoinHandle<Result<SubagentResult, xai_tool_runtime::ToolError>>,
 ) {
-    let mut harness = harness_with_config(false, buffering());
+    running_nested_pair_with(nested, false).await
+}
+
+async fn running_nested_pair_with(
+    nested: SubagentRequest,
+    omit_own_report: bool,
+) -> (
+    Harness,
+    tokio::task::JoinHandle<Result<SubagentResult, xai_tool_runtime::ToolError>>,
+) {
+    let mut harness = harness_with_options(
+        RunnerBehavior {
+            omit_own_report,
+            ..Default::default()
+        },
+        buffering(),
+    );
     let child_backend = spawn_child(&mut harness, false).await;
     let grandchild = spawn_nested(&mut harness, &child_backend, nested).await;
     assert_eq!(harness.started.recv().await.as_deref(), Some("grandchild"));
@@ -3197,7 +3236,8 @@ async fn nested_grandchild_completion_buffers_for_spawner_not_root() {
 
 #[tokio::test]
 async fn nested_grandchild_completion_not_buffered_when_spawner_finished_first() {
-    let (mut harness, grandchild) = running_nested_pair(request("grandchild", true)).await;
+    let (mut harness, grandchild) =
+        running_nested_pair_with(request("grandchild", true), true).await;
     let _ = harness.finish_one.send("child".to_owned());
     harness.completions.recv().await.expect("child done");
     let _ = harness.finish_one.send("grandchild".to_owned());

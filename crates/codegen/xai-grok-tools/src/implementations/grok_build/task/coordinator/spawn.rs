@@ -151,6 +151,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         // Capture before `insert_nested` moves `spawner`.
+        let spawner_child_id = spawner.as_ref().map(|nested| nested.child_id.clone());
         let spawner_session_id = spawner.as_ref().map(|nested| nested.session_id.clone());
         // The node must exist before any record that can be looked up by `id`.
         match spawner {
@@ -183,6 +184,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let running = self.session_running_count(&request.parent_session_id);
         match self.admission.admit(&request, running) {
             AdmissionDecision::Start => {
+                self.note_admitted_child(request.as_ref(), spawner_child_id.as_deref());
                 self.start_child(
                     *request,
                     Some(result_tx),
@@ -200,6 +202,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     !request.owner.is_workflow(),
                     "workflow spawns bypass admission and must never queue"
                 );
+                self.note_admitted_child(request.as_ref(), spawner_child_id.as_deref());
                 tracing::info!(
                     subagent_id = %request.id,
                     parent_session_id = %request.parent_session_id,

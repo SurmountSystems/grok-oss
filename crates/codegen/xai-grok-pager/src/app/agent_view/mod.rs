@@ -192,6 +192,8 @@ pub use render::{AppRenderParams, OverlayHeader};
 mod dock_input_tests;
 #[cfg(test)]
 mod header_tests;
+#[cfg(test)]
+mod l2_show_more_click;
 pub(crate) mod l2_token_tracking;
 mod live_prompt_task;
 #[cfg(test)]
