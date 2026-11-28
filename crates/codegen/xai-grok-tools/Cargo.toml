@@ -8,6 +8,18 @@ description = "Grok tools library"
 # also autodiscovered as grok_oss_skill_cli.
 autobins = false
 
+[[bin]]
+name = "cgroup_memory_alloc"
+path = "src/bin/cgroup_memory_alloc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lsp_mock_server"
+path = "src/bin/lsp_mock_server.rs"
+test = false
+doc = false
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

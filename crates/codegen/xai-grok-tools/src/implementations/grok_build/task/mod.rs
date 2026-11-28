@@ -21,6 +21,7 @@ mod agent_message_sender;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
+pub mod repetitive_l2_session_end;
 pub use coordinator_state::{cap_completion_output, completion_summary, terminal_snapshot};
 pub mod model_policy;
 pub use model_policy::TaskParams;

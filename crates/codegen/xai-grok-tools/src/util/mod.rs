@@ -33,6 +33,7 @@ pub mod ulid;
 pub mod unicode_confusables;
 #[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep, test))]
 pub(crate) mod vendor;
+pub mod xlsx_skill;
 
 pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]

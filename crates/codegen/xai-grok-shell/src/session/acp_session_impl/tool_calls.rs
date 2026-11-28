@@ -3510,6 +3510,9 @@ impl SessionActor {
                 is_cursor_for_tool_result,
             )
             .await;
+            for text in std::mem::take(&mut norm_result.recovered_text) {
+                deferred_followups.push(ConversationItem::user(text));
+            }
             if !norm_result.re_encode_fallbacks.is_empty() {
                 tracing::warn!(
                     session_id = %self.session_info.id,

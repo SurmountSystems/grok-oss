@@ -2679,6 +2679,25 @@ fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBu
         .then(|| dir.to_path_buf())
 }
 fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
+    persist_subagent_completion_meta(dir, result, gcs_ctx, true);
+}
+
+/// The start metadata write was skipped. Keep the prior `meta.json` bytes.
+/// Output persistence and the summary `next_trace_turn` advance stay on their own paths.
+fn persist_subagent_completion_keeping_prior_meta(
+    dir: &Path,
+    result: &SubagentResult,
+    gcs_ctx: &GcsUploadContext,
+) {
+    persist_subagent_completion_meta(dir, result, gcs_ctx, false);
+}
+
+fn persist_subagent_completion_meta(
+    dir: &Path,
+    result: &SubagentResult,
+    gcs_ctx: &GcsUploadContext,
+    write_meta: bool,
+) {
     let meta_path = dir.join("meta.json");
     if let Ok(data) = std::fs::read_to_string(&meta_path)
         && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
@@ -2689,7 +2708,9 @@ fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &Gc
         meta.tool_calls = Some(result.tool_calls);
         meta.turns = Some(result.turns);
         meta.error = result.error.clone();
-        write_subagent_meta(dir, &meta);
+        if write_meta {
+            write_subagent_meta(dir, &meta);
+        }
         if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
             let gcs_meta = SubagentSessionMetadata::from_meta(
                 &meta,

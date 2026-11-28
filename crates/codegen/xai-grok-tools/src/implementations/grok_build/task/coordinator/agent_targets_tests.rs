@@ -121,6 +121,7 @@ fn promote_deferred(
             control: TestControl { admissions },
         },
         defer_admission: true,
+        admit_skipped_metadata: false,
         respond_to,
     });
 }

@@ -388,6 +388,12 @@ impl SessionActor {
     ) -> Vec<acp::ImageContent> {
         let mut norm_result =
             crate::session::image_normalize::normalize_images(images, is_cursor).await;
+        for text in std::mem::take(&mut norm_result.recovered_text) {
+            if !text_out.is_empty() && !text_out.ends_with('\n') {
+                text_out.push('\n');
+            }
+            text_out.push_str(&text);
+        }
         let user_images = std::mem::take(&mut norm_result.images);
         use crate::extensions::notification::ImageCompressedEntry;
         if !norm_result.compressed.is_empty() {
@@ -3428,6 +3434,18 @@ impl SessionActor {
                     overflow_compacted = true;
                     auth_retry_schedule.reset_on_success();
                     transient_retry_attempts = 0;
+                    turn_phases.record_sampling_retries(1);
+                    continue;
+                }
+                Ok(SamplerTurnOutcome::StayUpUnfinishedL2) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        "unfinished ordinary L2 repeated the same sentence; session stays up"
+                    );
+                    self.push_system_reminder(&format!(
+                        "{} The owed work is not done. Continue the session.",
+                        xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE
+                    ));
                     turn_phases.record_sampling_retries(1);
                     continue;
                 }

@@ -1088,3 +1088,71 @@ async fn seven_by_eight_is_rejected() {
     assert_eq!(result.dropped.len(), 1);
     assert!(at(&result.dropped, 0).contains("7×8"));
 }
+/// A README.md body is markdown text. It must not be classified as an image,
+/// must not take the image integrity path, and must not be dropped as truncated.
+/// A short incomplete JPEG is still rejected.
+#[tokio::test]
+async fn readme_body_is_not_dropped_as_truncated_image() {
+    const DROP: &str =
+        "Image 1 was dropped before send: integrity check failed: image bytes are truncated.";
+    let body = "# Readme\n\nThis is not an image.\n";
+    let readme = ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(body.as_bytes()),
+        "image/jpeg",
+    )
+    .uri(Some("file:///workspace/README.md".to_string()));
+    let cache = fresh_cache();
+    let result = normalize_images_in(vec![readme], false, &cache).await;
+    let notes = result.dropped.join("\n");
+    assert!(
+        !notes.contains(DROP),
+        "README must not produce the truncated-image drop sentence, got: {notes}"
+    );
+    assert!(
+        result.dropped.is_empty() && result.images.is_empty(),
+        "README must not take the image integrity path, dropped={notes:?} images={}",
+        result.images.len()
+    );
+    assert!(
+        result.recovered_text.iter().any(|text| text == body),
+        "README text must stay available to the turn, got: {:?}",
+        result.recovered_text
+    );
+
+    let mut jpeg = {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(32, 32, |x, y| Rgb([(x ^ y) as u8, x as u8, y as u8]));
+        let mut buf = Vec::new();
+        JpegEncoder::new_with_quality(&mut buf, 80)
+            .encode_image(&DynamicImage::ImageRgb8(img))
+            .unwrap();
+        buf
+    };
+    jpeg.truncate(24);
+    assert!(
+        jpeg.len() <= 24,
+        "precondition: truncated JPEG is a short byte string, len {}",
+        jpeg.len()
+    );
+    assert!(
+        !xai_grok_tools::util::image_validate::jpeg_reaches_eoi(&jpeg),
+        "precondition: short JPEG has no EOI"
+    );
+    let truncated = ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(&jpeg),
+        "image/jpeg",
+    );
+    match normalize_one_in(truncated, 1, false, &fresh_cache()).await {
+        Outcome::Failed { error, .. } => {
+            assert!(
+                error.contains("validate")
+                    || error.contains("decode")
+                    || error.contains("truncated")
+                    || error.contains("integrity check failed"),
+                "truncated JPEG must still fail the image integrity check, got: {error}"
+            );
+        }
+        other => panic!("truncated JPEG must still be rejected, got {other:?}"),
+    }
+}

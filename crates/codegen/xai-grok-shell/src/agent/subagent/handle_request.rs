@@ -31,7 +31,11 @@ static SUBAGENTS_ACTIVE: xai_grok_telemetry::activity::ActivityGauge =
         xai_grok_telemetry::activity::SUBAGENTS_ACTIVE_KEY,
     );
 /// Bounds each parent-side await in the child completion path. The parent's biased select polls its event channels ahead of `cmd_rx`, so a busy turn can starve `cmd_rx` and park a completed child (leaking its session thread, fs watchers, and fds) forever.
+/// Test builds use a shorter bound. Four sequential sites at 30s cannot finish inside the wake tests' 45s watchdog when the parent does not answer.
+#[cfg(not(test))]
 pub(super) const PARENT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+pub(super) const PARENT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// `PARENT_ACK_TIMEOUT`-bounded acks in the completion path: usage fold,
 /// not-applied mark, list_tasks snapshot, notification reparent.
 const PARENT_ACK_SITES: u128 = 4;
@@ -49,7 +53,11 @@ const _: () = assert!(
 );
 /// Bounds each read of the child session's own actors (chat state, signals) in the completion path. They are spawned on the child session's current-thread runtime, so a tool synchronously blocking that thread freezes them together with the session actor; teardown must still reach
 /// Shutdown on the cheap fallbacks.
+#[cfg(not(test))]
 pub(super) const CHILD_ACTOR_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Several child-actor misses at 10s each overrun the wake tests' 45s watchdog.
+#[cfg(test)]
+pub(super) const CHILD_ACTOR_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// One bounded query against a child-session actor, degrading to `fallback`
 /// when the actor never answers.
 pub(super) async fn child_actor_query<T>(
@@ -77,6 +85,10 @@ pub(super) async fn mark_child_usage_not_applied_with_fallback(
     parent_session_id: &str,
     parent_prompt_id: Option<String>,
 ) {
+    // One site in `PARENT_ACK_SITES`: the parent mark and the coordinator
+    // fallback share this deadline. The coordinator ack used to be a bare
+    // `ack.await`, so a reply that never came parked the child forever.
+    let ack_deadline = tokio::time::Instant::now() + PARENT_ACK_TIMEOUT;
     let marked_by_parent = if let Some(cmd_tx) = parent_cmd_tx {
         let (respond_to, ack) = oneshot::channel();
         if cmd_tx
@@ -86,10 +98,7 @@ pub(super) async fn mark_child_usage_not_applied_with_fallback(
             })
             .is_ok()
         {
-            matches!(
-                tokio::time::timeout(PARENT_ACK_TIMEOUT, ack).await,
-                Ok(Ok(()))
-            )
+            matches!(tokio::time::timeout_at(ack_deadline, ack).await, Ok(Ok(())))
         } else {
             false
         }
@@ -108,7 +117,7 @@ pub(super) async fn mark_child_usage_not_applied_with_fallback(
             ))
             .is_ok()
         {
-            let _ = ack.await;
+            let _ = tokio::time::timeout_at(ack_deadline, ack).await;
         }
     }
 }
@@ -247,7 +256,11 @@ pub(super) async fn reparent_surviving_child_tasks(
         );
     }
 }
+#[cfg(not(test))]
 const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Wake tests admit on a mock server. A 30s miss plus later parent acks overruns the 45s watchdog.
+#[cfg(test)]
+const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WAKE_START_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const WAKE_START_HOLD_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
@@ -399,14 +412,17 @@ pub(crate) struct HandleRequestTurnEnd<'a> {
 
 /// Returns true when this turn sent Shutdown.
 /// `run_shell_child_body` calls this before `end_local_session`.
-/// An L2 whose output does not name `~/.agents/reports/` stays open.
+/// An L2 that is not cancelled, and whose output does not name `.agents/reports/`,
+/// returns false and does not shut down.
 /// An L2 that names that path records `RecordOwnReport`, then shuts down.
 /// An L3 still shuts down. A cancelled L2 still shuts down.
+/// A still-running nested agent also stays, without Shutdown.
 pub(crate) fn apply_handle_request_turn_end(end: HandleRequestTurnEnd<'_>) -> bool {
     if end.spawned_child_still_running {
         return false;
     }
     let is_l2 = end.parent_depth == 0 && end.child_depth <= 1;
+    // Stay: L2, not cancelled, output does not name `.agents/reports/`.
     if is_l2 && !end.cancelled && !end.output.contains(".agents/reports/") {
         return false;
     }
@@ -420,6 +436,18 @@ pub(crate) fn apply_handle_request_turn_end(end: HandleRequestTurnEnd<'_>) -> bo
         let _ = end.events.send(event);
     }
     super::child_runtime::shutdown_child_session_on_turn_end(end.cmd_tx, false)
+}
+
+fn shell_child_thread_failed(reason: &str) -> ChildRunOutput<ShellCompletionData> {
+    ChildRunOutput {
+        result: SubagentResult {
+            success: false,
+            error: Some(reason.to_owned()),
+            ..Default::default()
+        },
+        completion_data: ShellCompletionData::default(),
+        snapshot_ref: None,
+    }
 }
 
 #[tracing::instrument(
@@ -438,16 +466,39 @@ pub(crate) async fn run_shell_child(
     gateway: GatewaySender,
     spawn_root: Option<tracing::Span>,
 ) -> ChildRunOutput<ShellCompletionData> {
-    // Callers, including the wake tests, await this wrapper. Its frame holds
-    // the next box, not the shell-child state machine.
-    Box::pin(run_shell_child_body(
-        run,
-        ctx,
-        completion_data,
-        gateway,
-        spawn_root,
-    ))
-    .await
+    // The shell-child poll frame overflows the 2 MiB test-thread stack (the
+    // wake ABRTs) and, on that same current_thread runtime, keeps the
+    // coordinator from finishing spawn inside 45s. Drive the body on a worker
+    // stack. This task only awaits the oneshot, so the test runtime can poll.
+    const SHELL_CHILD_STACK: usize = 16 * 1024 * 1024;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("shell-child-run".into())
+        .stack_size(SHELL_CHILD_STACK)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            let local = tokio::task::LocalSet::new();
+            let output = local.block_on(
+                &runtime,
+                run_shell_child_body(run, ctx, completion_data, gateway, spawn_root),
+            );
+            let _ = tx.send(output);
+        });
+    if spawned.is_err() {
+        return shell_child_thread_failed("shell child run thread did not start");
+    }
+    // Do not join the worker here. A join on this current_thread runtime would
+    // block the scheduler the same way an unbounded recv would.
+    match rx.await {
+        Ok(output) => output,
+        Err(_) => shell_child_thread_failed("shell child run thread exited before returning"),
+    }
 }
 
 async fn run_shell_child_body(
@@ -478,6 +529,13 @@ async fn run_shell_child_body(
         Some(origin) => (Some(origin.source), Some(origin.message_id)),
         None => (None, None),
     };
+    // The parked continue is already on the coordinator. Answer it before
+    // setup can reject the oneshot. A later note is a no-op if this one
+    // already admitted the same id.
+    #[cfg(test)]
+    if is_wake && ctx.fail_start_metadata_write {
+        reporter.note_skipped_metadata_wake().await;
+    }
     let Some(agent_id) = xai_message_delivery_core::AgentId::from_uuid_v7(request.id.clone())
     else {
         let completion_data = ShellCompletionData {
@@ -1212,6 +1270,9 @@ async fn run_shell_child_body(
         reporter.clone(),
         &ctx,
     );
+    if is_wake && start_artifacts.metadata_write_skipped() {
+        reporter.note_skipped_metadata_wake().await;
+    }
     start_artifacts.publish_at(PublicationBoundary::Prepared);
     if !is_wake {
         completion_data.mark_spawned_notification_emitted();
@@ -1863,7 +1924,10 @@ async fn run_shell_child_body(
     let (child_init, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
-            if restore_wake_after_teardown {
+            // A skipped metadata write already persisted the new attempt.
+            // Aborting here puts the prior summary back and the continue is
+            // not a failed start.
+            if restore_wake_after_teardown && !start_artifacts.metadata_write_skipped() {
                 if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
                     wake_persistence
                         .abort(
@@ -1964,6 +2028,7 @@ async fn run_shell_child_body(
     .await;
     let unpromoted_disposition = readiness.unpromoted_disposition();
     let mut completed_before_ack = None;
+    let mut skipped_metadata_admitted = false;
     let promoted = match readiness {
         InitialChildPromptReadiness::Admitted(release) => {
             let child = StartedChild {
@@ -1993,7 +2058,16 @@ async fn run_shell_child_body(
                         .clone(),
                 },
             };
-            let promoted = if is_wake {
+            // A skipped metadata write must admit the parked continue now.
+            // Deferred settle returns false when there is no parked wake record,
+            // and the following settle(false) rejects the continue.
+            let promoted = if is_wake && start_artifacts.metadata_write_skipped() {
+                let admitted = reporter.started_admit_skipped_metadata(child).await;
+                if admitted {
+                    skipped_metadata_admitted = true;
+                }
+                admitted
+            } else if is_wake {
                 reporter.started_deferred(child).await
             } else {
                 reporter.started(child).await
@@ -2009,28 +2083,90 @@ async fn run_shell_child_body(
                     .is_some_and(|harness| harness.reject_deferred_start_commit);
                 #[cfg(not(test))]
                 let reject_deferred_start_commit = false;
-                let is_committed = !is_wake
-                    || (!reject_deferred_start_commit
-                        && reporter.settle_deferred_start(true).await);
-                if !is_committed {
+                // Rejected settle must not publish. A committed wake publishes
+                // first, then admits the parked continue. A skipped metadata
+                // write still counts as published so the continue is Accepted
+                // and the prior meta.json bytes stay.
+                if is_wake && reject_deferred_start_commit {
                     drop(release);
                     wake_start_abort.cancel();
                     let _ = reporter.settle_deferred_start(false).await;
                     start_artifacts.forbid_terminal_persistence();
                     false
-                } else {
-                    if start_artifacts.publish_at(PublicationBoundary::Started) {
+                } else if is_wake {
+                    let published = start_artifacts.publish_at(PublicationBoundary::Started);
+                    if !published && !start_artifacts.metadata_write_skipped() {
+                        drop(release);
+                        wake_start_abort.cancel();
+                        let _ = reporter.settle_deferred_start(false).await;
+                        start_artifacts.forbid_terminal_persistence();
+                        false
+                    } else {
                         completion_data.mark_spawned_notification_emitted();
+                        let settled = reporter.settle_deferred_start(true).await;
+                        if !settled && !start_artifacts.metadata_write_skipped() {
+                            drop(release);
+                            wake_start_abort.cancel();
+                            let _ = reporter.settle_deferred_start(false).await;
+                            start_artifacts.forbid_terminal_persistence();
+                            false
+                        } else {
+                            let _ = release.send(());
+                            true
+                        }
                     }
+                } else {
                     let _ = release.send(());
                     true
                 }
             }
         }
         InitialChildPromptReadiness::AttemptCompleted(outcome) => {
-            drop(receipt_sink);
             completed_before_ack = Some(outcome);
-            false
+            // The turn finished before the readiness ack. A skipped metadata
+            // write still has to admit the parked continue. finish_child
+            // rejects that continue when this arm stays unpromoted.
+            if is_wake && start_artifacts.metadata_write_skipped() {
+                let child = StartedChild {
+                    child_session_id: child_session_id.0.to_string(),
+                    persona: effective_runtime.persona.clone(),
+                    resumed_from: request.resume_from.clone(),
+                    child_cwd: tracker_child_cwd.clone(),
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    effective_model_id: tracker_model_id.clone(),
+                    definition_background,
+                    control: ShellChildRuntime {
+                        child_cmd_tx: child_handle.cmd_tx.clone(),
+                        message_delivery: child_handle.message_delivery(),
+                        active_message_target_session_id: child_session_id.0.to_string(),
+                        active_message_target_agent_id: agent_id.clone(),
+                        active_message_target_generation: target_generation,
+                        child_signals: child_handle.signals_handle.clone(),
+                        _child_thread: None,
+                        receipt_sink,
+                        #[cfg(test)]
+                        force_queue_envelope: false,
+                        active_message_parent_session_id: ctx.parent_session_id.clone(),
+                        active_message_parent_prompt_index: ctx
+                            .active_message_parent_prompt_index
+                            .clone(),
+                    },
+                };
+                let admitted = reporter.started_admit_skipped_metadata(child).await;
+                if admitted {
+                    skipped_metadata_admitted = true;
+                    let _ = start_artifacts.publish_at(PublicationBoundary::Started);
+                    completion_data.mark_spawned_notification_emitted();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                drop(receipt_sink);
+                false
+            }
         }
         InitialChildPromptReadiness::Cancelled | InitialChildPromptReadiness::TimedOut => {
             drop(receipt_sink);
@@ -2063,7 +2199,10 @@ async fn run_shell_child_body(
     } else {
         None
     };
-    if !promoted && restore_wake_after_teardown {
+    if !promoted
+        && restore_wake_after_teardown
+        && !start_artifacts.metadata_write_skipped()
+    {
         if let Some(wake_persistence_tx) = wake_persistence_tx.as_ref() {
             wake_persistence
                 .abort(
@@ -2074,7 +2213,10 @@ async fn run_shell_child_body(
                 )
                 .await;
         }
-        let _ = reporter.settle_deferred_start(false).await;
+        // An admitted skipped-metadata wake must not be rejected here.
+        if !skipped_metadata_admitted {
+            let _ = reporter.settle_deferred_start(false).await;
+        }
     }
     if let Some(result) = unpromoted_teardown {
         return child_run_output(result, completion_data, None);
@@ -2370,9 +2512,22 @@ async fn run_shell_child_body(
     }
     let terminal_persistence_allowed = start_artifacts.terminal_persistence_allowed();
     if terminal_persistence_allowed {
-        completion_data
-            .set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
-        persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+        // A wake that skipped the start meta write keeps the prior output
+        // bytes. An ordinary spawn has no prior file, so the output is written
+        // while start publication still skips the metadata write.
+        if !is_wake || !start_artifacts.metadata_write_skipped() {
+            completion_data
+                .set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
+        }
+        if is_wake && start_artifacts.metadata_write_skipped() {
+            persist_subagent_completion_keeping_prior_meta(
+                &subagent_meta_dir,
+                &result,
+                &gcs_upload_ctx,
+            );
+        } else {
+            persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+        }
     }
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled =
@@ -2525,10 +2680,33 @@ async fn run_shell_child_body(
             "coordinator turn ended with the session left open"
         );
         crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_DONE);
-        // `child_thread` drop detaches the thread. The command loop keeps
-        // reading. `ShellChildRuntime` still holds `cmd_tx`, so follow-up
-        // Interject can start another model turn. Do not end the local session.
-        return child_run_output(result, completion_data, None);
+        // The session stays up, but the snapshot gate still runs. An L2 stay
+        // used to return before dispose, so a remote
+        // `subagent_worktree_snapshot_enabled` never reached this gate and a
+        // failed metadata write left the worktree on disk. The output file
+        // lives under the meta dir and is not this directory.
+        let mut disposed_snapshot_ref = None;
+        if snapshot_dispose_enabled && let Some(ref wt_path) = worktree_path {
+            let disposal = dispose_worktree_after_completion(
+                wt_path,
+                &resolve_subagent_source_repo(&ctx),
+                &subagent_meta_dir,
+                &final_status,
+                &request.id,
+            )
+            .await;
+            if disposal.worktree_removed() {
+                result.worktree_path = None;
+            }
+            disposed_snapshot_ref = disposal.snapshot_ref().map(str::to_owned);
+        }
+        // `child_thread` drop detaches the thread. The command loop and
+        // follow-up Interject stay. `ShellChildRuntime` still holds `cmd_tx`,
+        // so a later Interject can start another model turn. The
+        // workspace-session binding is released when this finished spawn returns.
+        ctx.workspace_ops
+            .end_local_session(child_session_id.0.as_ref());
+        return child_run_output(result, completion_data, disposed_snapshot_ref);
     }
     drop(child_handle);
     if !await_session_thread_exit(&child_thread, UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT).await {

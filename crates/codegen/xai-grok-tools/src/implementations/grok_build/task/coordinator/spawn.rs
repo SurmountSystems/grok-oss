@@ -405,6 +405,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 agent_address: None,
                 spawner_session_id: None,
                 wake_of: None,
+                admit_continue_on_finish: false,
                 request,
             },
         );

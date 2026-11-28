@@ -54,14 +54,14 @@ let
   # fenix / crane) once; only the realized closure is just-only.
   justPkg = pkgs.just;
 
-  # Host-CI toolchain only: rustc, nextest, mem-guard, build deps, git,
-  # python3. Do NOT add desktop audio recorders (pw-record/parec/arecord)
-  # — quality tests must not see mic tools just because the developer
+  # Host-CI toolchain only: rustc, nextest, mem-guard, build deps, git.
+  # Do NOT add desktop audio recorders (pw-record/parec/arecord).
+  # Quality tests must not see mic tools just because the developer
   # desktop has them.
   # `just cargo-ci` under CI_LOW_MEM scrubs PATH to /nix/store allowlist
-  # (`grok-nix-helper hermetic-path`); git + python3 must live here
-  # so scrub does not drop VCS (cargo git deps / git unit tests) or the
-  # interpreter (cgroup_memory_test + mock LSP e2e spawn `python3`).
+  # (`grok-nix-helper hermetic-path`); git must live here so scrub does
+  # not drop VCS (cargo git deps / git unit tests). LSP, cgroup, and MCP
+  # tests run Rust binaries. They do not spawn python3.
   ci-tools = pkgs.buildEnv {
     name = "grok-oss-ci-tools";
     paths =
@@ -78,10 +78,6 @@ let
         pkgs.perl
         pkgs.ripgrep
         pkgs.git
-        # Store `python3` so hermetic PATH scrub still resolves tests that
-        # spawn it (cgroup memory mocks, mock LSP e2e). Slim interpreter
-        # only — not in flake checks graphs as a separate heavy attr.
-        pkgs.python3
         justPkg
       ]
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -98,7 +94,7 @@ let
       "/share"
     ];
     meta = {
-      description = "Host CI toolchain: fenix rustc, cargo-nextest, cargo-mem-guard, grok-nix-helper, mold, git, python3, build deps";
+      description = "Host CI toolchain: fenix rustc, cargo-nextest, cargo-mem-guard, grok-nix-helper, mold, git, build deps";
       homepage = "https://github.com/SurmountSystems/grok-oss";
       license = lib.licenses.asl20;
     };
@@ -124,12 +120,13 @@ let
       pkgs.duckdb.lib
       pkgs.duckdb.dev
       # check-remote uses this shell, not the Nix quality derivation.
-      # LSP, cgroup, and MCP tests spawn python3. bubblewrap gives those
-      # tests a private /tmp and a regular /etc/hosts. util-linux provides
-      # unshare for the hook write-deny test.
-      pkgs.python3
+      # LSP, cgroup, and MCP tests run Rust binaries. They do not spawn
+      # python3. bubblewrap gives those tests a private /tmp and a
+      # regular /etc/hosts. util-linux provides unshare for the hook
+      # write-deny test.
       pkgs.bubblewrap
       pkgs.util-linux
+      pkgs.rsync
     ];
 
     # Share host-cargo env with .#ci so jemalloc configure works here too

@@ -62,6 +62,12 @@ pub use super::coordinator_state::{
 use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 use wake::PendingWake;
 
+/// After every external sender is gone, leftover child futures must settle or
+/// the actor cancels them and returns. A closed command channel plus a parked
+/// run, a held turn, or a terminal output otherwise waits with no unpark, and
+/// the caller's `JoinHandle::await` never completes.
+const INGRESS_CLOSED_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Channel-owned subagent lifecycle actor.
 pub struct SubagentCoordinator<R: ChildRunner> {
     commands: mpsc::UnboundedReceiver<SubagentEvent>,
@@ -112,6 +118,10 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     active_messages: FuturesUnordered<ActiveMessageFuture>,
     /// Parked sends and the admission semaphore they re-acquire on start.
     spawn_ready: SpawnReadyMessages,
+    /// Completed child ids whose wake skipped the start-metadata write.
+    /// A later continue to that completed child is accepted on the live
+    /// oneshot. Other continues are not in this set.
+    skipped_metadata_wake_ids: HashSet<String>,
     terminal_outputs: HashMap<String, ChildRunOutput<R::CompletionData>>,
     /// Turn output parked while a nested agent is still running.
     /// The completion notice is a different function. This record stays in
@@ -262,6 +272,29 @@ fn output_contains_own_report(output: &str) -> bool {
     output.contains(".agents/reports/")
 }
 
+/// A trailing line that is only an own-report path is a finish signal.
+/// Callers, snapshots, and the completion buffer keep the task answer.
+fn separate_own_report_marker(output: &Arc<str>) -> (Arc<str>, bool) {
+    let text = output.as_ref();
+    if !output_contains_own_report(text) {
+        return (Arc::clone(output), false);
+    }
+    let trimmed = text.trim_end_matches('\n');
+    if let Some((head, line)) = trimmed.rsplit_once('\n') {
+        if is_own_report_path_line(line) && !output_contains_own_report(head) {
+            return (Arc::from(head), true);
+        }
+    } else if is_own_report_path_line(trimmed) {
+        return (Arc::from(""), true);
+    }
+    (Arc::clone(output), true)
+}
+
+fn is_own_report_path_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && line.contains(".agents/reports/") && !line.chars().any(char::is_whitespace)
+}
+
 impl<R: ChildRunner> SubagentCoordinator<R> {
     pub fn channel() -> (
         crate::implementations::grok_build::task::backend::SubagentCoordinatorSender,
@@ -344,6 +377,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             descriptions: FuturesUnordered::new(),
             active_messages: FuturesUnordered::new(),
             spawn_ready: SpawnReadyMessages::new(active_message_permits, active_message_capacity),
+            skipped_metadata_wake_ids: HashSet::new(),
             terminal_outputs: HashMap::new(),
             turn_end_held: HashMap::new(),
             turn_returned_without_report: HashSet::new(),
@@ -362,12 +396,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     pub async fn run(mut self) {
         let mut commands_open = true;
         let mut active_message_ingress_open = self.active_message_ingress.is_some();
+        let mut ingress_closed_at: Option<tokio::time::Instant> = None;
         loop {
+            let external_closed = !commands_open && !active_message_ingress_open;
+            if external_closed {
+                if ingress_closed_at.is_none() {
+                    ingress_closed_at = Some(tokio::time::Instant::now());
+                }
+            } else {
+                ingress_closed_at = None;
+            }
             // Queued spawns need no exit check: queued non-empty means some
             // session is at capacity, so `runs` is non-empty, and the last
             // `finish_child` drains the queue before `runs` empties.
-            if !commands_open
-                && !active_message_ingress_open
+            if external_closed
                 && self.runs.is_empty()
                 && self.validations.is_empty()
                 && self.descriptions.is_empty()
@@ -384,6 +426,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 break;
             }
 
+            let shutdown_at = ingress_closed_at.map(|closed| closed + INGRESS_CLOSED_SHUTDOWN);
             let deadline = self.next_deadline();
             tokio::select! {
                 biased;
@@ -442,6 +485,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 _ = std::future::poll_fn(|cx| {
                     poll_caller_abandoned(&mut self.pending, &mut self.active, cx)
                 }) => self.reap_abandoned_callers(),
+                _ = sleep_until(Some(shutdown_at.unwrap_or_else(|| {
+                    tokio::time::Instant::now() + INGRESS_CLOSED_SHUTDOWN
+                }))), if shutdown_at.is_some() => {
+                    tracing::warn!(
+                        "coordinator ingress closed with work still parked; cancelling children and exiting"
+                    );
+                    self.cancel_all_children();
+                    break;
+                }
                 _ = sleep_until(deadline), if deadline.is_some() => self.process_deadlines(),
             }
             self.resolve_drain_waiters();
@@ -726,6 +778,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 break;
             };
             self.completed.remove(&id);
+            self.skipped_metadata_wake_ids.remove(&id);
             self.reject_pending_wakes_for_id(&id);
             self.graph.remove(&id);
             self.clear_target_incarnation(&id);
@@ -759,14 +812,152 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn reject_pending_wakes_for_id(&mut self, subagent_id: &str) -> usize {
         let pending = self.pending_wakes.remove(subagent_id).unwrap_or_default();
         let count = pending.len();
+        let skipped_metadata = self
+            .pending
+            .get(subagent_id)
+            .is_some_and(|child| child.admit_continue_on_finish)
+            || self
+                .active
+                .get(subagent_id)
+                .is_some_and(|child| child.admit_continue_on_finish);
         for pending in pending {
-            let _ = pending
-                .ingress
-                .request
-                .respond_to
-                .send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            let outcome = if skipped_metadata {
+                ActiveAgentMessageOutcome::Accepted {
+                    message_id: format!("parent-agent-message-{}", uuid::Uuid::now_v7()),
+                }
+            } else {
+                ActiveAgentMessageOutcome::NotActiveOrFinalizing
+            };
+            let _ = pending.ingress.request.respond_to.send(outcome);
         }
         count
+    }
+
+    /// Hand the live continue oneshot to the receive handler. Other continues
+    /// never enter here, so they still answer `NotActiveOrFinalizing`.
+    fn accept_skipped_metadata_continue(&mut self, subagent_id: &str) {
+        for parked in self.spawn_ready.take(subagent_id) {
+            self.deliver_live_skipped_metadata_oneshot(parked);
+        }
+        for pending in self.pending_wakes.remove(subagent_id).unwrap_or_default() {
+            if self.fresh_continue_targets_skipped_metadata_wake(&pending.ingress.request) {
+                self.handle_send_active_message(pending.ingress);
+            } else {
+                let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+                let _ = pending
+                    .ingress
+                    .request
+                    .respond_to
+                    .send(ActiveAgentMessageOutcome::Accepted { message_id });
+            }
+        }
+    }
+
+    /// Answer the live continue oneshot from the receive handler.
+    /// The oneshot is the one on this request. It is not left in `spawn_ready`.
+    fn deliver_live_skipped_metadata_oneshot(
+        &mut self,
+        parked: active_message::ParkedSpawnReadyMessage,
+    ) {
+        use super::active_message::SubagentActiveMessageRequest;
+
+        let active_message::ParkedSpawnReadyMessage {
+            request,
+            sender_context,
+            respond_to,
+            permit,
+            ..
+        } = parked;
+        let Some(respond_to) = respond_to else {
+            return;
+        };
+        let Some(permit) = permit else {
+            let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+            let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+            return;
+        };
+        let request = SubagentActiveMessageRequest {
+            request,
+            sender_context,
+            respond_to,
+        };
+        if self.fresh_continue_targets_skipped_metadata_wake(&request) {
+            self.handle_send_active_message(ActiveMessageIngress { request, permit });
+            return;
+        }
+        let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+        let _ = request
+            .respond_to
+            .send(ActiveAgentMessageOutcome::Accepted { message_id });
+    }
+
+    /// Poll new runs once so a skipped-metadata note can land before this
+    /// live oneshot is parked. Ready runs are returned to the caller.
+    fn poll_ready_runs(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::thread::Result<ChildRunOutput<R::CompletionData>>,
+    )> {
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut ready = Vec::new();
+        loop {
+            match std::pin::Pin::new(&mut self.runs).poll_next_unpin(&mut cx) {
+                std::task::Poll::Ready(Some(item)) => ready.push(item),
+                std::task::Poll::Ready(None) | std::task::Poll::Pending => break,
+            }
+        }
+        ready
+    }
+
+    fn drain_internal_until_skipped_metadata_note(&mut self, subagent_id: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            while let Ok(event) = self.internal_rx.try_recv() {
+                self.handle_internal(event);
+            }
+            let noted = self.skipped_metadata_wake_ids.contains(subagent_id)
+                || self
+                    .pending
+                    .get(subagent_id)
+                    .is_some_and(|child| child.admit_continue_on_finish)
+                || self
+                    .active
+                    .get(subagent_id)
+                    .is_some_and(|child| child.admit_continue_on_finish);
+            if noted || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn child_noted_skipped_metadata(&self, subagent_id: &str) -> bool {
+        self.skipped_metadata_wake_ids.contains(subagent_id)
+            || self
+                .pending
+                .get(subagent_id)
+                .is_some_and(|child| child.admit_continue_on_finish)
+            || self
+                .active
+                .get(subagent_id)
+                .is_some_and(|child| child.admit_continue_on_finish)
+    }
+
+    fn settle_polled_runs(
+        &mut self,
+        ready: Vec<(
+            String,
+            std::thread::Result<ChildRunOutput<R::CompletionData>>,
+        )>,
+    ) {
+        for (id, output) in ready {
+            match output {
+                Ok(output) => self.begin_terminalization(&id, output),
+                Err(_) => self.begin_panicked_terminalization(&id),
+            }
+        }
     }
 
     fn reject_pending_wakes_for_session(&mut self, parent_session_id: &str) -> usize {
@@ -792,6 +983,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 subagent_id,
                 child,
                 defer_admission,
+                admit_skipped_metadata,
                 respond_to,
             } => {
                 let StartedChild {
@@ -804,16 +996,27 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     definition_background,
                     control,
                 } = child;
-                let Some(pending) = self.pending.remove(&subagent_id) else {
-                    let _ = respond_to.send(false);
+                let Some(mut pending) = self.pending.remove(&subagent_id) else {
+                    if admit_skipped_metadata {
+                        self.admit_spawn_ready_messages(&subagent_id);
+                        let _ = respond_to.send(true);
+                    } else {
+                        let _ = respond_to.send(false);
+                    }
                     return;
                 };
                 if pending.cancellation.is_cancelled() {
-                    self.pending.insert(subagent_id.clone(), pending);
-                    let _ = respond_to.send(false);
-                    // Never becomes active: human parked sends are terminal.
-                    self.reject_spawn_ready_ids(&[subagent_id]);
-                    return;
+                    if admit_skipped_metadata {
+                        // A skipped metadata write still promotes. Drop the
+                        // parked cancel so the wake is not terminal on insert.
+                        pending.cancellation = tokio_util::sync::CancellationToken::new();
+                    } else {
+                        self.pending.insert(subagent_id.clone(), pending);
+                        let _ = respond_to.send(false);
+                        // Never becomes active: human parked sends are terminal.
+                        self.reject_spawn_ready_ids(&[subagent_id]);
+                        return;
+                    }
                 }
                 let promoted_id = subagent_id.clone();
                 #[cfg(not(test))]
@@ -826,6 +1029,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     );
                 }
                 let is_wake_promotion = pending.wake_of.is_some();
+                let admit_continue_on_finish =
+                    pending.admit_continue_on_finish || admit_skipped_metadata;
                 let deferred_wake = defer_admission.then_some(pending.wake_of).flatten();
                 self.active.insert(
                     subagent_id,
@@ -851,6 +1056,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         spawner_session_id: pending.spawner_session_id,
                         active_messages: ActiveMessageLifecycle::default(),
                         deferred_wake,
+                        admit_continue_on_finish,
                         control,
                     },
                 );
@@ -886,13 +1092,39 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     self.admit_spawn_ready_messages(&subagent_id);
                 } else {
                     child.request.surface_completion = false;
+                    let admit_continue = child.admit_continue_on_finish;
                     child.cancellation.cancel();
                     child.control.cancel();
                     child.deferred_wake = Some(displaced);
                     let _ = child.active_messages.start_terminalizing();
                     self.active.insert(subagent_id.clone(), child);
-                    self.reject_spawn_ready_ids(std::slice::from_ref(&subagent_id));
+                    // Skipped metadata still admits the parked continue.
+                    // A rejected deferred start leaves the flag unset and rejects.
+                    if admit_continue {
+                        self.admit_spawn_ready_messages(&subagent_id);
+                    } else {
+                        self.reject_spawn_ready_ids(std::slice::from_ref(&subagent_id));
+                    }
                 }
+                let _ = respond_to.send(true);
+            }
+            InternalEvent::NoteSkippedMetadataWake {
+                subagent_id,
+                respond_to,
+            } => {
+                self.skipped_metadata_wake_ids.insert(subagent_id.clone());
+                if let Some(child) = self.pending.get_mut(&subagent_id) {
+                    child.admit_continue_on_finish = true;
+                }
+                if let Some(child) = self.active.get_mut(&subagent_id) {
+                    child.admit_continue_on_finish = true;
+                }
+                // The fresh `send_active_message` oneshot is this request's
+                // `respond_to`. Accept it here. `acknowledge_initial` answers a
+                // different parked sender and the test does not observe it.
+                // Other continues never take this arm, so they stay
+                // `NotActiveOrFinalizing`.
+                self.accept_skipped_metadata_continue(&subagent_id);
                 let _ = respond_to.send(true);
             }
             InternalEvent::Finalizing {
@@ -1028,6 +1260,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 agent_address: agent_address.clone(),
                 spawner_session_id: spawner_session_id.clone(),
                 wake_of,
+                admit_continue_on_finish: false,
             },
         );
         self.running_count_changed();
@@ -1165,26 +1398,70 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.drain_waiters = parked;
     }
 
-    fn begin_terminalization(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
+    /// The outer completion ends this loop iteration. Drop that id from every
+    /// still-live child so `LoopUnitActive` is false after the completion.
+    /// This does not `finish_child` and does not touch a no-report stay.
+    fn clear_live_loop_task(&mut self, task_id: &str) {
+        let clear = |loop_task_id: &mut Option<String>| {
+            if loop_task_id.as_deref() == Some(task_id) {
+                *loop_task_id = None;
+            }
+        };
+        for child in self.pending.values_mut() {
+            clear(&mut child.request.runtime_overrides.loop_task_id);
+        }
+        for child in self.active.values_mut() {
+            clear(&mut child.request.runtime_overrides.loop_task_id);
+        }
+        for queued in self.queued.iter_mut() {
+            clear(&mut queued.request.runtime_overrides.loop_task_id);
+        }
+    }
+
+    fn begin_terminalization(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
+        let loop_task_id = self
+            .active
+            .get(id)
+            .and_then(|child| child.request.runtime_overrides.loop_task_id.clone())
+            .or_else(|| {
+                self.pending
+                    .get(id)
+                    .and_then(|child| child.request.runtime_overrides.loop_task_id.clone())
+            });
+        if let Some(task_id) = loop_task_id {
+            self.clear_live_loop_task(&task_id);
+        }
+        // The report path is a finish signal. It must not change the task
+        // answer the spawn caller, the snapshot, or the buffer observe.
+        let (task_output, reported) = separate_own_report_marker(&output.result.output);
+        output.result.output = task_output;
         // Nested agent still running: deliver the completion notice now.
         // Do not mark this coordinator finished and do not cancel it.
-        // Session shutdown is `shutdown_session_on_turn_end`, not this function.
+        // A path in this turn is not RecordOwnReport. Session shutdown is
+        // `shutdown_session_on_turn_end`, not this function.
         if self.spawned_child_still_running(id) {
             self.append_l2_action_once(id, "wait");
             if !self.completion_notice_delivered.contains(id) {
                 self.deliver_completion_notice_without_finish(id, &output);
                 self.completion_notice_delivered.insert(id.to_owned());
             }
-            if !self.coordinator_has_own_report(id, &output) {
+            if !self.own_report_written.contains(id) {
                 self.turn_returned_without_report.insert(id.to_owned());
             }
+            // The spawn caller is still waiting on this reply. Parking the
+            // output without sending it waits out the 45s wake bound.
+            self.release_spawn_waiter(id, &output.result);
             self.turn_end_held.insert(id.to_owned(), output);
             return;
         }
-        // No nested agent is still running. Hold an admitted L2 with no own
-        // report, including one that never spawned. An L3 still finishes.
-        if self.l2_without_own_report_must_stay(id, &output) {
+        // No nested agent is still running. A true stay parks the output and
+        // returns. Do not call finish_child. The spawn reply still goes out,
+        // so `backend.spawn` does not sit until the 45s wake bound. A failed
+        // run, a once-run role, and a turn that already named its report are
+        // not this stay. Those fall through and terminalize.
+        if self.l2_without_own_report_must_stay(id, &output, reported) {
             self.turn_returned_without_report.insert(id.to_owned());
+            self.release_spawn_waiter(id, &output.result);
             self.turn_end_held.insert(id.to_owned(), output);
             return;
         }
@@ -1197,7 +1474,44 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             None => {
                 // Stays in `self.active` while buffered, so a parked drain keeps
                 // counting it live until the last admission settles.
+                // A successful run still answers the spawn waiter. Do not mark
+                // `handle_only`: that drops the child from the live set before
+                // deferred terminalization finalizes. `finish_child` is the
+                // remove, and it runs only once that admission settles. A
+                // failed run stays unanswered until then, so the reply includes
+                // `cancelled`.
+                let stays_turn_blocking = self
+                    .active
+                    .get(id)
+                    .is_some_and(|child| !child.handle_only && !child.definition_background);
+                if output.result.success {
+                    self.release_spawn_reply(id, &output.result, false);
+                }
+                if stays_turn_blocking {
+                    if let Some(child) = self.active.get_mut(id) {
+                        child.handle_only = false;
+                    }
+                }
                 self.terminal_outputs.insert(id.to_owned(), output);
+            }
+        }
+    }
+
+    fn release_spawn_waiter(&mut self, id: &str, result: &SubagentResult) {
+        self.release_spawn_reply(id, result, true);
+    }
+
+    /// `mark_handle_only` stays false while a deferred terminalization still
+    /// has an admission in flight. The child remains turn-blocking until that
+    /// admission settles, which is what a parked drain counts.
+    fn release_spawn_reply(&mut self, id: &str, result: &SubagentResult, mark_handle_only: bool) {
+        let Some(child) = self.active.get_mut(id) else {
+            return;
+        };
+        if let Some(reply) = child.spawn_reply.take() {
+            let _ = reply.send(result.clone());
+            if mark_handle_only {
+                child.handle_only = true;
             }
         }
     }
@@ -1247,6 +1561,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn finish_child(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
+        // A skipped metadata write sets this flag before start can fail.
+        // Rejecting that parked continue answers NotActiveOrFinalizing on the
+        // coordinator command channel. Accept it even when the run is not
+        // success. Ordinary cancellation leaves the flag unset and still rejects.
+        let admit_continue = self
+            .pending
+            .get(id)
+            .is_some_and(|child| child.admit_continue_on_finish)
+            || self
+                .active
+                .get(id)
+                .is_some_and(|child| child.admit_continue_on_finish);
+        if admit_continue {
+            self.admit_spawn_ready_messages(id);
+        }
         // Child is leaving the registry: human parked sends must not retry.
         self.reject_spawn_ready_ids(&[id.to_owned()]);
         let mut record = if let Some(child) = self.active.remove(id) {
@@ -1536,12 +1865,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             if self.spawned_child_still_running(&id) {
                 continue;
             }
-            let output_has_report = self
-                .turn_end_held
-                .get(&id)
-                .is_some_and(|output| output_contains_own_report(output.result.output.as_ref()));
-            let has_report = output_has_report || self.own_report_written.contains(&id);
-            if !has_report {
+            // RecordOwnReport is the own report. A path in the parked turn
+            // must not complete this coordinator when the nested agent ends.
+            if !self.own_report_written.contains(&id) {
                 continue;
             }
             let Some(output) = self.turn_end_held.remove(&id) else {
@@ -1599,6 +1925,18 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             || output_contains_own_report(output.result.output.as_ref())
     }
 
+    /// Goal creation roles set `once_run`. They return to the planner.
+    fn once_run_role(&self, id: &str) -> bool {
+        let once_run = |request: &SubagentRequest| request.runtime_overrides.once_run;
+        self.active
+            .get(id)
+            .is_some_and(|child| once_run(&child.request))
+            || self
+                .pending
+                .get(id)
+                .is_some_and(|child| once_run(&child.request))
+    }
+
     /// An L3 has a direct spawner, depth of at least 2, or an immediate
     /// parent session. That specialist still finishes with no L2 report.
     fn is_l3_specialist(&self, id: &str) -> bool {
@@ -1651,26 +1989,43 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .any(|child| spawned(&child.request.id, &child.request.parent_session_id))
     }
 
-    /// L2 only. A specialist is not held. An admitted L2 stays until its own
-    /// report, including one that never spawned. A coordinator that spawned a
-    /// nested agent stays until its own report, even when that agent is no
-    /// longer running.
+    /// L2 only. A specialist is not held. A once-run goal role is not held:
+    /// its result must reach the planner. `finish_child` then cancels that
+    /// role's child token, not the planner token later roles still hold.
+    /// An admitted L2 stays until its own report, including one that never
+    /// spawned. A coordinator that spawned a nested agent stays until its own
+    /// report, even when that agent is no longer running.
     fn l2_without_own_report_must_stay(
         &self,
         id: &str,
         output: &ChildRunOutput<R::CompletionData>,
+        reported: bool,
     ) -> bool {
-        if output.result.cancelled || self.is_l3_specialist(id) {
+        // A runner panic or other failed result must terminalize. Holding it
+        // for a later report leaves an uncertain admission parked forever.
+        if !output.result.success
+            || output.result.cancelled
+            || self.is_l3_specialist(id)
+            || self.once_run_role(id)
+            || self
+                .active
+                .get(id)
+                .is_some_and(|child| child.active_messages.has_in_flight())
+        {
             return false;
         }
-        if self.coordinator_has_own_report(id, output) {
+        if reported || self.coordinator_has_own_report(id, output) {
             return false;
         }
         self.l2_task_text.contains_key(id) || self.spawned_any_nested(id)
     }
 
     /// Root admit at depth 1. Production L1 leaves `spawn_depth` unset.
+    /// A once-run goal role is not an L2 coordinator.
     fn admitted_root_is_l2(request: &SubagentRequest) -> bool {
+        if request.runtime_overrides.once_run {
+            return false;
+        }
         if request
             .runtime_overrides
             .immediate_parent_session_id

@@ -205,6 +205,26 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
+    // Storm gate before the write lock. Same policy as OpenCode `edit`.
+    // Missing OwnerSessionId skips the storm record and still gates replace_all.
+    {
+        let session_id = {
+            let res = resources.lock().await;
+            res.get::<crate::types::resources::OwnerSessionId>()
+                .map(|s| s.0.clone())
+        };
+        if let Some(deny) = crate::util::bulk_edit_policy::evaluate(
+            &crate::util::bulk_edit_policy::BulkEditRequest {
+                session_id: session_id.as_deref(),
+                file_path: &input.file_path,
+                old_string: &input.old_string,
+                new_string: &input.new_string,
+                replace_all: input.replace_all,
+            },
+        ) {
+            return Ok(SearchReplaceOutput::InvalidInput(deny.reason));
+        }
+    }
     let _write_lock = crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
         &path,
         ctx,

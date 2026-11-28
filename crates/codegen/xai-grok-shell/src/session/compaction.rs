@@ -2987,8 +2987,8 @@ impl SessionActor {
     }
 }
 #[cfg(test)]
-#[path = "compaction_inline_auto_compact_flow_tests.rs"]
-mod inline_auto_compact_flow_tests;
-#[cfg(test)]
 #[path = "compaction_run_compact_l3_delivery_tests.rs"]
 mod compaction_run_compact_l3_delivery_tests;
+#[cfg(test)]
+#[path = "compaction_inline_auto_compact_flow_tests.rs"]
+mod inline_auto_compact_flow_tests;

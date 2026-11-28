@@ -174,6 +174,10 @@ async fn test_under_limit_exits_normally() {
     eprintln!("✅ PASSED: under_limit_exits_normally");
 }
 
+fn cgroup_alloc_cmd(mode: &str) -> String {
+    format!("'{}' {mode}", env!("CARGO_BIN_EXE_cgroup_memory_alloc"))
+}
+
 /// Test 2: A command that allocates way more than the limit is killed with 137/oom.
 #[tokio::test]
 #[ignore = "requires Linux cgroupv2 with delegation"]
@@ -187,16 +191,11 @@ async fn test_over_limit_gets_oom_killed() {
     let backend = LocalTerminalBackend::with_memory_limit(test_memory_config());
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Allocate 128 MiB in Python — well above the 32 MiB high / 64 MiB max limits.
-    let alloc_cmd = r#"python3 -c "
-import sys
-print('Allocating 128 MiB...', flush=True)
-data = bytearray(128 * 1024 * 1024)
-print('Allocation succeeded (should not reach here)', flush=True)
-""#;
+    // Allocate 128 MiB. Well above the 32 MiB high / 64 MiB max limits.
+    let alloc_cmd = cgroup_alloc_cmd("burst");
 
     let result = backend
-        .run(make_request(alloc_cmd, 30))
+        .run(make_request(alloc_cmd.as_str(), 30))
         .await
         .expect("command should return a result (even if killed)");
 
@@ -240,9 +239,9 @@ async fn test_session_survives_oom() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // First: trigger an OOM
-    let oom_cmd = r#"python3 -c "data = bytearray(128 * 1024 * 1024)""#;
+    let oom_cmd = cgroup_alloc_cmd("silent");
     let oom_result = backend
-        .run(make_request(oom_cmd, 30))
+        .run(make_request(oom_cmd.as_str(), 30))
         .await
         .expect("should return result even on OOM");
 
@@ -286,17 +285,10 @@ async fn test_background_task_oom() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Start a background command that will OOM
-    let alloc_cmd = r#"python3 -c "
-import time
-print('BG: allocating...', flush=True)
-time.sleep(0.5)
-data = bytearray(128 * 1024 * 1024)
-print('BG: done (should not reach here)', flush=True)
-time.sleep(60)
-""#;
+    let alloc_cmd = cgroup_alloc_cmd("background");
 
     let handle = backend
-        .run_background(make_request(alloc_cmd, 60))
+        .run_background(make_request(alloc_cmd.as_str(), 60))
         .await
         .expect("background spawn should succeed");
 
@@ -347,19 +339,11 @@ async fn test_gradual_allocation_oom() {
     let backend = LocalTerminalBackend::with_memory_limit(test_memory_config());
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Allocate in 1 MiB chunks with a small delay — slowly ramps past 32 MiB.
-    let gradual_cmd = r#"python3 -c "
-import time, sys
-chunks = []
-for i in range(128):
-    chunks.append(bytearray(1024 * 1024))  # 1 MiB per chunk
-    print(f'Allocated {i+1} MiB', flush=True)
-    time.sleep(0.05)
-print('Finished all allocations (should not reach here)', flush=True)
-""#;
+    // Allocate in 1 MiB chunks with a small delay. Slowly ramps past 32 MiB.
+    let gradual_cmd = cgroup_alloc_cmd("gradual");
 
     let result = backend
-        .run(make_request(gradual_cmd, 30))
+        .run(make_request(gradual_cmd.as_str(), 30))
         .await
         .expect("should return result");
 
@@ -403,14 +387,11 @@ async fn test_no_config_no_enforcement() {
     let backend = LocalTerminalBackend::new();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Allocate 64 MiB — would be killed with a 32 MiB limit, but should succeed here
-    let alloc_cmd = r#"python3 -c "
-data = bytearray(64 * 1024 * 1024)
-print('Allocated 64 MiB without limits')
-""#;
+    // Allocate 64 MiB. Would be killed with a 32 MiB limit, but should succeed here.
+    let alloc_cmd = cgroup_alloc_cmd("plain");
 
     let result = backend
-        .run(make_request(alloc_cmd, 10))
+        .run(make_request(alloc_cmd.as_str(), 10))
         .await
         .expect("command should succeed without limits");
 

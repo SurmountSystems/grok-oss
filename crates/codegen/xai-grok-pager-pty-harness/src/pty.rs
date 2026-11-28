@@ -425,26 +425,120 @@ impl PtyController {
         }
     }
 
-    /// Send SIGTERM to the child's process group when this child leads it.
-    /// A positive-pid SIGTERM leaves foreground `sleep` running, and the
-    /// shell defers its TERM trap until that command finishes, so the grace
-    /// expires and SIGKILL wins. Returns whether a signal was delivered (so
-    /// Drop only spends its grace period when a graceful exit is possible).
+    /// One group SIGTERM so a foreground `sleep` that already exists can die,
+    /// and the shell can run its TERM trap during the grace. READY is written
+    /// before `sleep` is forked, so this signal can also hit only the shell.
+    /// The shell then starts `sleep` and defers the trap. That later `sleep`
+    /// is stopped in the grace wait, not here. Shell SIGKILL stays in Drop,
+    /// after that grace. Returns whether a graceful signal was delivered
+    /// (Drop spends the grace only then). Does not call `tree.terminate()`
+    /// on that path, and does not signal the group a second time.
     fn terminate_tree_best_effort(&self) -> bool {
         #[cfg(unix)]
-        if self.signal_leader_group(libc::SIGTERM) {
-            // Group delivery is the catchable signal. Do not also call
-            // tree.terminate() here; the hard kill stays after the grace.
-            return true;
+        {
+            // Both captures are before SIGTERM. A later child can be the
+            // trap's `echo` and must not be killed from this snapshot.
+            let blockers = self.term_trap_blocker_pids();
+            let foreign_foreground = self.foreign_foreground_pgid();
+            let mut signaled = self.signal_leader_group(libc::SIGTERM);
+            // Job-control sleep is its own group. SIGTERM ends it. SIGKILL of
+            // that group stays off this path so a mis-read cannot kill the shell.
+            if signal_pgid(foreign_foreground, libc::SIGTERM) {
+                signaled = true;
+            }
+            if !signaled {
+                signaled = self.signal_direct_child(libc::SIGTERM);
+            }
+            if signaled {
+                // A stopped process keeps SIGTERM pending until SIGCONT.
+                // The shell pid and the pre-SIGTERM blocker pids only.
+                // kill(-pgid, SIGCONT) would also hit a trap child forked since.
+                let _ = self.signal_direct_child(libc::SIGCONT);
+                sigcont_pids(&blockers);
+            }
+            // A pre-signal child that is `sleep` may have SIGTERM blocked.
+            // SIGKILL that pid only. Echo is not in this snapshot, and a
+            // pid that is no longer sleep is not killed.
+            let killed_blockers = sigkill_sleeper_pids(&blockers);
+            if signaled || killed_blockers {
+                // Graceful SIGTERM already went out, or the existing sleeper
+                // was SIGKILL'd. Do not call tree.terminate() in this same
+                // step. The grace wait keeps looking for a sleep forked
+                // after this return. Drop SIGKILLs the shell only after
+                // PTY_DROP_TERM_GRACE.
+                return true;
+            }
         }
         self.process_tree
             .as_ref()
             .is_some_and(|tree| tree.terminate().is_ok())
     }
 
+    /// SIGKILL a direct child only when it is `sleep`. Does not signal the
+    /// group. The shell stays alive while its TERM trap runs, and that trap's
+    /// `echo` is a direct child that must keep running.
+    #[cfg(unix)]
+    fn sigkill_sleeper_children(&self) {
+        let Some(pid) = self.child_pid() else {
+            return;
+        };
+        let pid = pid as libc::pid_t;
+        if pid <= 1 {
+            return;
+        }
+        sigkill_sleeper_pids(&direct_child_pids(pid));
+    }
+
+    /// Direct children of the trapping process, snapshotted before SIGTERM.
+    #[cfg(unix)]
+    fn term_trap_blocker_pids(&self) -> Vec<libc::pid_t> {
+        let Some(pid) = self.child_pid() else {
+            return Vec::new();
+        };
+        direct_child_pids(pid as libc::pid_t)
+    }
+
+    /// SIGTERM or SIGCONT to the direct child when it is not the group leader.
+    /// No-op for pid 0 or 1, so this cannot broadcast.
+    #[cfg(unix)]
+    fn signal_direct_child(&self, signal: i32) -> bool {
+        let Some(pid) = self.child_pid() else {
+            return false;
+        };
+        let pid = pid as libc::pid_t;
+        if pid <= 1 {
+            return false;
+        }
+        // SAFETY: pid is the live direct child and is greater than 1.
+        unsafe { libc::kill(pid, signal) == 0 }
+    }
+
+    /// Foreground pgid from `tcgetpgrp`, or `None` when that group is the
+    /// shell, the shell's process group, or the caller's group.
+    /// Call only before SIGTERM. A later `tcgetpgrp` can be the trap command.
+    #[cfg(unix)]
+    fn foreign_foreground_pgid(&self) -> Option<libc::pid_t> {
+        let shell = self.child_pid()? as libc::pid_t;
+        let foreground = self.master.process_group_leader()?;
+        if foreground <= 1 || foreground == shell {
+            return None;
+        }
+        // SAFETY: getpgrp and getpgid do not signal.
+        let own = unsafe { libc::getpgrp() };
+        if foreground == own {
+            return None;
+        }
+        let shell_pgid = unsafe { libc::getpgid(shell) };
+        if shell_pgid > 1 && foreground == shell_pgid {
+            return None;
+        }
+        Some(foreground)
+    }
+
     /// SIGTERM or another signal to the direct child's process group.
-    /// No-op unless that child is the group leader (`pgid == pid`), so this
-    /// cannot target the caller's group.
+    /// No-op for pgid <= 1 or the caller's group. The shell does not have to
+    /// be the leader: foreground `sleep` shares that group, and a positive-pid
+    /// SIGTERM leaves `sleep` running so the trap never starts.
     #[cfg(unix)]
     fn signal_leader_group(&self, signal: i32) -> bool {
         let Some(pid) = self.child_pid() else {
@@ -454,13 +548,14 @@ impl PtyController {
         if pid <= 1 {
             return false;
         }
-        // SAFETY: getpgid does not signal. pid is the live direct child, not 0 or -1.
+        // SAFETY: getpgid and getpgrp do not signal. pid is the live direct child, not 0 or -1.
         let pgid = unsafe { libc::getpgid(pid) };
-        if pgid <= 1 || pgid != pid {
+        let own = unsafe { libc::getpgrp() };
+        if pgid <= 1 || pgid == own {
             return false;
         }
-        // SAFETY: pgid is this child's own group and is greater than 1, so
-        // this is not kill(0), kill(-1), or the caller's group.
+        // SAFETY: pgid is this child's group, greater than 1, and not the caller's group.
+        // This is not kill(0) or kill(-1).
         unsafe { libc::kill(-pgid, signal) == 0 }
     }
 
@@ -479,6 +574,31 @@ impl PtyController {
     fn cleanup_descendants(&mut self) {
         self.kill_tree_best_effort();
         self.release_process_tree();
+    }
+
+    /// Drop's one grace wait. Same deadline as `wait_child_bounded(grace)`.
+    /// Every poll looks for a direct child named `sleep` and SIGKILLs only
+    /// that pid, so a `sleep` forked after the group SIGTERM still dies
+    /// inside this grace and the shell can run its trap. `echo` is not
+    /// sleep, so it is not killed, and the group is not signaled again.
+    /// This is not a second grace: Drop does not wait again afterward.
+    /// One `PTY_REAP_POLL` past the deadline matches `wait_child_bounded`.
+    fn wait_grace_stopping_sleeper(&mut self, grace: Duration) -> Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            #[cfg(unix)]
+            self.sigkill_sleeper_children();
+            if let Some(status) = self.poll_exit_status()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                if self.exit_observed {
+                    anyhow::bail!(PENDING_STATUS_ERROR);
+                }
+                return Ok(None);
+            }
+            std::thread::sleep(PTY_REAP_POLL);
+        }
     }
 
     fn wait_child_bounded(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
@@ -500,10 +620,12 @@ impl PtyController {
 
 impl Drop for PtyController {
     fn drop(&mut self) {
-        // Graceful first: SIGTERM the whole group so a responsive child gets
-        // one grace period to run its own TERM cleanup before the hard kill.
+        // Graceful first: one group SIGTERM, then during this same
+        // PTY_DROP_TERM_GRACE keep stopping a direct child named sleep so
+        // the shell can run its TERM trap. Echo is not signaled again.
+        // Shell SIGKILL is only after this grace returns.
         if self.exit_status.is_none() && !self.exit_observed && self.terminate_tree_best_effort() {
-            let _ = self.wait_child_bounded(PTY_DROP_TERM_GRACE);
+            let _ = self.wait_grace_stopping_sleeper(PTY_DROP_TERM_GRACE);
         }
         // Hard stop: SIGKILL the group, kill the direct child, reap bounded.
         if self.exit_status.is_none() {
@@ -545,6 +667,118 @@ fn observe_exit_before_reap(
 #[cfg(unix)]
 fn recover_consumed_status(status: io::Result<Option<ExitStatus>>) -> io::Result<ExitStatus> {
     status?.ok_or_else(|| io::Error::other("PTY child status was consumed without being cached"))
+}
+
+/// SIGCONT specific pids captured before SIGTERM. Skips 0 and 1.
+#[cfg(unix)]
+fn sigcont_pids(pids: &[libc::pid_t]) {
+    for pid in pids {
+        if *pid <= 1 {
+            continue;
+        }
+        // SAFETY: pid is a positive non-init pid, not kill(0) or kill(-1).
+        unsafe { libc::kill(*pid, libc::SIGCONT) };
+    }
+}
+
+/// Signal one process group captured before SIGTERM. `None` and pgid <= 1 are no-ops.
+#[cfg(unix)]
+fn signal_pgid(pgid: Option<libc::pid_t>, signal: i32) -> bool {
+    let Some(pgid) = pgid else {
+        return false;
+    };
+    if pgid <= 1 {
+        return false;
+    }
+    // SAFETY: pgid was refused when it was the shell, the shell's group, or the caller.
+    unsafe { libc::kill(-pgid, signal) == 0 }
+}
+
+/// True only when this pid is the foreground `sleep`, not the trap's `echo`.
+/// The shell stays alive while the trap runs, so a live parent is not proof.
+/// `echo` does not catch TERM and does not survive SIGKILL.
+#[cfg(all(unix, target_os = "linux"))]
+fn is_foreground_sleeper(pid: libc::pid_t) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+        return false;
+    };
+    let comm = comm.trim();
+    if comm == "echo" || comm == "sh" || comm == "dash" || comm == "bash" || comm == "ash" {
+        return false;
+    }
+    if comm == "sleep" {
+        return true;
+    }
+    // busybox applets keep comm as "busybox" and put the applet in argv0.
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let Some(first) = bytes.split(|byte| *byte == 0).next() else {
+        return false;
+    };
+    if first.is_empty() {
+        return false;
+    }
+    let arg = String::from_utf8_lossy(first);
+    arg.rsplit('/').next() == Some("sleep")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_foreground_sleeper(_pid: libc::pid_t) -> bool {
+    false
+}
+
+/// SIGKILL only pids that are `sleep`. Other children, including `echo`, stay.
+#[cfg(unix)]
+fn sigkill_sleeper_pids(pids: &[libc::pid_t]) -> bool {
+    let mut killed = false;
+    for pid in pids {
+        if is_foreground_sleeper(*pid) && sigkill_pids(&[*pid]) {
+            killed = true;
+        }
+    }
+    killed
+}
+
+/// SIGKILL specific pids. Skips 0, 1, and negatives so this cannot broadcast.
+#[cfg(unix)]
+fn sigkill_pids(pids: &[libc::pid_t]) -> bool {
+    let mut killed = false;
+    for pid in pids {
+        if *pid <= 1 {
+            continue;
+        }
+        // SAFETY: pid is a positive non-init pid, not kill(0) or kill(-1).
+        if unsafe { libc::kill(*pid, libc::SIGKILL) == 0 } {
+            killed = true;
+        }
+    }
+    killed
+}
+
+/// Direct children listed in `/proc/<pid>/task/<pid>/children`.
+/// Empty when that file is missing or the child has not forked yet.
+#[cfg(all(unix, target_os = "linux"))]
+fn direct_child_pids(parent: libc::pid_t) -> Vec<libc::pid_t> {
+    if parent <= 1 {
+        return Vec::new();
+    }
+    let path = format!("/proc/{parent}/task/{parent}/children");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.split_whitespace()
+        .filter_map(|token| token.parse().ok())
+        .filter(|pid| *pid > 1 && *pid != parent)
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn direct_child_pids(_parent: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
 }
 
 /// Only [`Self::Running`] is live. [`Self::PendingStatus`] has already exited and cleaned descendants; portable-pty has not yielded status yet.

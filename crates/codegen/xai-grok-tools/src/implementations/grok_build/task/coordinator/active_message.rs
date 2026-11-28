@@ -77,6 +77,14 @@ impl ActiveMessageLifecycle {
         matches!(self, Self::Finalizing { .. })
     }
 
+    /// An admission the child has entered and not finished. Deferred
+    /// terminalization must keep that child in the live set.
+    pub(super) fn has_in_flight(&self) -> bool {
+        match self {
+            Self::Open { in_flight, .. } | Self::Finalizing { in_flight, .. } => *in_flight > 0,
+        }
+    }
+
     pub(super) fn begin_admission(&mut self) -> BeginAdmission {
         let Self::Open { in_flight, .. } = self else {
             return BeginAdmission::Finalizing;
@@ -384,6 +392,8 @@ impl SpawnReadyMessages {
     )> {
         let mut admitted = Vec::new();
         for mut parked in self.take(subagent_id) {
+            // The wake's first send is the child prompt. Answer that oneshot
+            // here. Pushing it delivers a second message the session rejects.
             if parked.acknowledge_initial() {
                 continue;
             }
@@ -445,12 +455,19 @@ impl SpawnReadyMessages {
 }
 
 impl ParkedSpawnReadyMessage {
+    /// Answer the parked oneshot with the wake message id. A fresh id, or a
+    /// session round trip, is not this continue.
     fn acknowledge_initial(&mut self) -> bool {
         let Some(message_id) = self.initial_message_id.take() else {
             return false;
         };
         if let Some(respond_to) = self.respond_to.take() {
-            let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+            let outcome = protocol_outcome_from_completion(
+                ActiveMessageCompletionOutcome::Admission(ActiveMessageAdmission::Admitted),
+                true,
+                &message_id,
+            );
+            let _ = respond_to.send(outcome);
         }
         self.quota_admission.take();
         self.permit.take();
@@ -486,6 +503,18 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             let _ = ingress.request.respond_to.send(outcome);
             return;
         }
+        // This is the live `send_active_message` oneshot. It is not an older
+        // sender stored in `spawn_ready` or `pending_wakes`. Accept it here
+        // when the target is the skipped-metadata wake, including a child
+        // that is still completed. Do not park that request.
+        if self.fresh_continue_targets_skipped_metadata_wake(&ingress.request) {
+            let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+            let _ = ingress
+                .request
+                .respond_to
+                .send(ActiveAgentMessageOutcome::Accepted { message_id });
+            return;
+        }
         if let Err(outcome) = self
             .agent_message_quotas
             .admit_outbound(&ingress.request.sender_context)
@@ -495,6 +524,54 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         let (decision, route) = self.resolve_active_message_target(&ingress.request, None);
         self.handle_resolved_send(decision, route, None, ingress);
+    }
+
+    /// The child already noted a skipped start-metadata write. Only that
+    /// wake accepts a later continue. Other finalizing children still reject.
+    fn fresh_continue_targets_skipped_metadata_wake(
+        &self,
+        request: &SubagentActiveMessageRequest,
+    ) -> bool {
+        let admits = |id: &str| {
+            self.pending
+                .get(id)
+                .is_some_and(|child| child.admit_continue_on_finish)
+                || self
+                    .active
+                    .get(id)
+                    .is_some_and(|child| child.admit_continue_on_finish)
+                || (self.completed.contains_key(id) && self.skipped_metadata_wake_ids.contains(id))
+        };
+        match request.request.target() {
+            ActiveMessageTarget::ChildId(id) => admits(id),
+            ActiveMessageTarget::Address(address) => {
+                let presented = address.as_str();
+                let address_hit = |stored: &Option<
+                    crate::implementations::grok_build::task::types::AgentAddress,
+                >| {
+                    stored
+                        .as_ref()
+                        .is_some_and(|value| value.as_str() == presented)
+                };
+                self.pending.values().any(|child| {
+                    child.admit_continue_on_finish && address_hit(&child.agent_address)
+                }) || self.active.values().any(|child| {
+                    child.admit_continue_on_finish
+                        && (address_hit(&child.agent_address)
+                            || child.request.id == presented
+                            || child.child_session_id == presented)
+                }) || self.completed.iter().any(|(id, child)| {
+                    self.skipped_metadata_wake_ids.contains(id)
+                        && (address_hit(&child.agent_address)
+                            || child.request.id == presented
+                            || child.child_session_id == presented)
+                })
+            }
+            ActiveMessageTarget::Agent { agent_id } => {
+                admits(&agent_id.to_string()) || admits(agent_id.as_str())
+            }
+            ActiveMessageTarget::Parent => false,
+        }
     }
 
     pub(super) fn resolve_active_message_target(
@@ -903,6 +980,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     pub(super) fn reject_spawn_ready_ids(&mut self, ids: &[String]) {
         for id in ids {
+            // A skipped metadata write already asked for this continue.
+            // `reject_terminal` would answer NotActiveOrFinalizing on the
+            // oneshot `send_active_message` is awaiting.
+            let skipped_metadata = self
+                .pending
+                .get(id)
+                .is_some_and(|child| child.admit_continue_on_finish)
+                || self
+                    .active
+                    .get(id)
+                    .is_some_and(|child| child.admit_continue_on_finish);
+            if skipped_metadata {
+                self.admit_spawn_ready_messages(id);
+                continue;
+            }
             // Cancelled pending children never become active. Human parked
             // sends are terminal; agent sends stay retryable not_active.
             self.spawn_ready.reject_terminal(id);
@@ -936,7 +1028,18 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             Self::message_sender_session(&sender_context),
         );
         let Some(child) = self.active.get_mut(&canonical_subagent_id) else {
-            let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            // The skipped-metadata note runs while the wake is still pending.
+            // Refusing here is the oneshot `send_active_message` is awaiting.
+            let skipped_metadata = self
+                .pending
+                .get(&canonical_subagent_id)
+                .is_some_and(|child| child.admit_continue_on_finish);
+            if skipped_metadata {
+                let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+                let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+            } else {
+                let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            }
             return;
         };
         if !owned {
@@ -951,19 +1054,35 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
             return;
         }
-        match child.active_messages.begin_admission() {
-            BeginAdmission::Started => {}
-            BeginAdmission::Finalizing => {
-                let _ = respond_to.send(refused_active_outcome(source));
-                return;
+        let admit_continue = child.admit_continue_on_finish;
+        let admission = child.active_messages.begin_admission();
+        if !matches!(admission, BeginAdmission::Started) {
+            match admission {
+                BeginAdmission::Finalizing if admit_continue => {
+                    let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+                    let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+                }
+                BeginAdmission::Finalizing => {
+                    let _ = respond_to.send(refused_active_outcome(source));
+                }
+                BeginAdmission::Saturated => {
+                    let _ = respond_to.send(ActiveAgentMessageOutcome::Saturated {
+                        max_in_flight: MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD,
+                    });
+                }
+                BeginAdmission::Started => unreachable!("handled below"),
             }
-            BeginAdmission::Saturated => {
-                let _ = respond_to.send(ActiveAgentMessageOutcome::Saturated {
-                    max_in_flight: MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD,
-                });
-                return;
-            }
+            return;
         }
+        let Some(child) = self.active.get_mut(&canonical_subagent_id) else {
+            if admit_continue {
+                let message_id = format!("parent-agent-message-{}", uuid::Uuid::now_v7());
+                let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+            } else {
+                let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            }
+            return;
+        };
 
         let message_id = uuid::Uuid::now_v7().to_string();
         let lease = ActiveMessageAdmissionLease::new();
@@ -1015,7 +1134,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     ));
                     return;
                 };
-                let _ = respond_to.send(protocol_outcome);
+                let skipped_metadata = child.admit_continue_on_finish;
+                let outcome = if skipped_metadata
+                    && matches!(
+                        protocol_outcome,
+                        ActiveAgentMessageOutcome::NotActiveOrFinalizing
+                    ) {
+                    ActiveAgentMessageOutcome::Accepted {
+                        message_id: completion.message_id.clone(),
+                    }
+                } else {
+                    protocol_outcome
+                };
+                let _ = respond_to.send(outcome);
                 let terminal_disposition = child
                     .active_messages
                     .finish_admission(completion.is_settled);

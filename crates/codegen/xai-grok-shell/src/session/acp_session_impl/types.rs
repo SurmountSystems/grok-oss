@@ -65,6 +65,10 @@ pub(crate) enum SamplerFailureRecovery {
         kind: xai_grok_sampler::SamplingErrorKind,
         status_code: Option<u16>,
     },
+    /// Repetitive generation on an unfinished ordinary L2.
+    /// Do not end the session. The turn stays up and can continue.
+    /// Detection of the repeated sentence stays.
+    StayUpUnfinishedL2,
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -96,6 +100,8 @@ pub(crate) enum SamplerTurnOutcome {
         kind: xai_grok_sampler::SamplingErrorKind,
         status_code: Option<u16>,
     },
+    /// Mirrors [`SamplerFailureRecovery::StayUpUnfinishedL2`].
+    StayUpUnfinishedL2,
 }
 
 /// How a completed turn stopped, mapped 1:1 to `acp::StopReason`.

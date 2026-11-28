@@ -1634,29 +1634,58 @@ pub(crate) mod tests {
 
     /// A stdio MCP server standing in for the computer-use helper: it appends every message it
     /// reads to `log`, answers `initialize` and `tools/call fast`, and never answers
-    /// `tools/call slow`.
-    const RECORDING_STDIO_SERVER: &str = r#"
-import json, sys
-log = open(sys.argv[1], "a")
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    msg = json.loads(line)
-    log.write(line + "\n")
-    log.flush()
-    method = msg.get("method")
-    reply = None
-    if method == "initialize":
-        reply = {"protocolVersion": msg["params"]["protocolVersion"],
-                 "capabilities": {"tools": {}},
-                 "serverInfo": {"name": "recording", "version": "0"}}
-    elif method == "tools/call" and msg["params"]["name"] == "fast":
-        reply = {"content": [{"type": "text", "text": "done"}], "isError": False}
-    if reply is not None:
-        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": reply}) + "\n")
-        sys.stdout.flush()
-"#;
+    /// `tools/call slow`. The binary is the `recording_mcp_server` package bin.
+    fn recording_server_bin() -> std::path::PathBuf {
+        const NAME: &str = "recording_mcp_server";
+        // Set for integration tests. Unit tests under `cargo test` do not get it.
+        // Nextest also publishes `NEXTEST_BIN_EXE_<name>` for those same tests.
+        for key in [
+            "CARGO_BIN_EXE_recording_mcp_server",
+            "NEXTEST_BIN_EXE_recording_mcp_server",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                let path = std::path::PathBuf::from(value);
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+        let exe = std::env::current_exe().expect("current test executable");
+        let mut legacy = exe.parent().expect("exe dir").to_path_buf();
+        if legacy.file_name().and_then(|name| name.to_str()) == Some("deps") {
+            legacy.pop();
+        }
+        legacy.push(NAME);
+        if legacy.is_file() {
+            return legacy;
+        }
+        // Cargo 1.100 leaves the package bin in the profile directory and places the
+        // unit-test executable under `build/<package>/<hash>/out/`. The profile directory
+        // is an ancestor of that executable. A split build directory is not, so the
+        // `CARGO_TARGET_DIR` check below covers the check-remote export.
+        let mut dir = exe.parent().map(|parent| parent.to_path_buf());
+        for _ in 0..8 {
+            let Some(current) = dir else {
+                break;
+            };
+            let candidate = current.join(NAME);
+            if candidate.is_file() {
+                return candidate;
+            }
+            dir = current.parent().map(|parent| parent.to_path_buf());
+        }
+        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+            for profile in ["debug", "release"] {
+                let candidate = std::path::PathBuf::from(&target_dir)
+                    .join(profile)
+                    .join(NAME);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        legacy
+    }
 
     fn child_messages(log: &std::path::Path, method: &str, pointer: &str) -> Vec<Value> {
         std::fs::read_to_string(log)
@@ -1674,20 +1703,25 @@ for line in sys.stdin:
         dir: &std::path::Path,
         gate: Option<Arc<dyn McpCallGate>>,
     ) -> (McpClientTransportAdapter, std::path::PathBuf) {
-        let script = dir.join("server.py");
-        std::fs::write(&script, RECORDING_STDIO_SERVER).expect("write script");
         let log = dir.join("received.jsonl");
+        let bin = recording_server_bin();
         let config = agent_client_protocol::McpServer::Stdio(
-            agent_client_protocol::McpServerStdio::new("recording", "python3").args(vec![
-                script.display().to_string(),
-                log.display().to_string(),
-            ]),
+            agent_client_protocol::McpServerStdio::new(
+                "recording",
+                bin.to_string_lossy().into_owned(),
+            )
+            .args(vec![log.display().to_string()]),
         );
         let event_writer = xai_grok_session_events::EventWriter::noop();
         let ctx = McpSpawnCtx::standalone(&event_writer);
         let client = xai_grok_mcp::servers::start_mcp_server(config, None, None, None, &ctx)
             .await
-            .expect("spawn the recording stdio server (needs python3 on PATH)");
+            .unwrap_or_else(|err| {
+                panic!(
+                    "spawn the recording stdio server at {}: {err}",
+                    bin.display()
+                )
+            });
         let adapter = McpClientTransportAdapter::new(Arc::new(client), gate);
         adapter.initialize().await.expect("handshake");
         (adapter, log)

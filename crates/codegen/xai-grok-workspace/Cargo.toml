@@ -130,6 +130,10 @@ path = "src/bin/workspace_server.rs"
 name = "workspace-server-probe"
 path = "src/bin/workspace_server_probe.rs"
 
+[[bin]]
+name = "recording_mcp_server"
+path = "src/bin/recording_mcp_server.rs"
+
 [features]
 default = ["sandbox-enforce"]
 compression = []

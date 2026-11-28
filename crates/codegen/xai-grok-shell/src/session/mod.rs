@@ -601,6 +601,10 @@ pub mod worktree;
 pub(crate) mod worktree_cleanup;
 pub mod worktree_pool;
 
+#[cfg(test)]
+#[path = "repetitive_l2_session_end_tests.rs"]
+mod repetitive_l2_session_end_tests;
+
 pub mod nested_output {
     //! Session-owned output tokens for a nested agent.
     //!

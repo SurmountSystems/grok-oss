@@ -1,5 +1,8 @@
 use super::*;
 
+/// Wake-test wait bound. Same 45 seconds the coordinator join in this module already uses.
+const WAKE_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(45);
+
 #[derive(Clone)]
 struct RunShellChildTestRunner {
     contexts: std::sync::Arc<parking_lot::Mutex<std::collections::VecDeque<SubagentSpawnContext>>>,
@@ -65,10 +68,21 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
                 snapshot_ref: Some("refs/grok/subagents/prior".to_owned()),
             }));
         }
-        let ctx = self.contexts.lock().pop_front().expect("run context");
+        let ctx = self
+            .contexts
+            .try_lock_for(WAKE_WAIT_BOUND)
+            .expect("run context lock within the 45s wake bound")
+            .pop_front()
+            .expect("run context");
         let gateway = self.gateway.clone();
         let completion_data = ShellCompletionData::from_context(&ctx, run.attempt_id.clone(), None);
-        Box::pin(async move { run_shell_child(run, ctx, completion_data, gateway, None).await })
+        Box::pin(async move {
+            within_wake_bound(
+                "shell child",
+                run_shell_child(run, ctx, completion_data, gateway, None),
+            )
+            .await
+        })
     }
 
     fn validate_type(
@@ -161,22 +175,30 @@ async fn assert_wake_setup_failure_preserves_prior_durable_state(
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
         crate::util::grok_home::grok_home(),
     );
-    storage
-        .init_session(&child_info, acp::ModelId::new("test"))
-        .await
-        .expect("session");
-    storage
-        .append_chat_message(&child_info, &ConversationItem::system("prior system"))
-        .await
-        .expect("system message");
-    storage
-        .append_chat_message(&child_info, &ConversationItem::assistant("prior work"))
-        .await
-        .expect("assistant message");
-    storage
-        .update_current_model(&child_info, &acp::ModelId::new("prior-model"))
-        .await
-        .expect("prior model");
+    within_wake_bound(
+        "session init",
+        storage.init_session(&child_info, acp::ModelId::new("test")),
+    )
+    .await
+    .expect("session");
+    within_wake_bound(
+        "system message",
+        storage.append_chat_message(&child_info, &ConversationItem::system("prior system")),
+    )
+    .await
+    .expect("system message");
+    within_wake_bound(
+        "assistant message",
+        storage.append_chat_message(&child_info, &ConversationItem::assistant("prior work")),
+    )
+    .await
+    .expect("assistant message");
+    within_wake_bound(
+        "prior model",
+        storage.update_current_model(&child_info, &acp::ModelId::new("prior-model")),
+    )
+    .await
+    .expect("prior model");
     ctx.model_id = acp::ModelId::new("rejected-wake-model");
     ctx.sampling_config.model = "rejected-wake-model".to_owned();
     let child_session_dir = crate::session::persistence::session_dir(&child_info);
@@ -200,24 +222,27 @@ async fn assert_wake_setup_failure_preserves_prior_durable_state(
     );
     let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
     assert!(
-        backend
-            .spawn(auto_wake_test_request(&id), None)
-            .await
-            .expect("prior spawn")
-            .success
+        within_wake_bound(
+            "prior spawn",
+            backend.spawn(auto_wake_test_request(&id), None),
+        )
+        .await
+        .expect("prior spawn")
+        .success
     );
     while parent_cmd_rx.try_recv().is_ok() {}
     while gateway_rx.try_recv().is_ok() {}
     assert_eq!(
-        backend
-            .send_active_message(
-                ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request")
-            )
-            .await,
+        within_wake_bound(
+            "wake send",
+            backend.send_active_message(
+                ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request"),
+            ),
+        )
+        .await,
         ActiveAgentMessageOutcome::NotActiveOrFinalizing
     );
-    let restored = backend
-        .query(&id, false, None)
+    let restored = within_wake_bound("prior snapshot query", backend.query(&id, false, None))
         .await
         .expect("restored prior snapshot");
     assert!(matches!(
@@ -225,7 +250,9 @@ async fn assert_wake_setup_failure_preserves_prior_durable_state(
         SubagentSnapshotStatus::Completed { ref output, .. } if output == "prior output"
     ));
     drop(backend);
-    coordinator.await.expect("coordinator");
+    within_wake_bound("coordinator", coordinator)
+        .await
+        .expect("coordinator");
 
     let restored_meta: SubagentMeta = serde_json::from_str(
         &std::fs::read_to_string(meta_dir.path().join("meta.json")).expect("meta"),
@@ -267,17 +294,23 @@ async fn assert_wake_setup_failure_preserves_prior_durable_state(
 async fn wake_setup_failures_preserve_prior_durable_state_and_lifecycle() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            assert_wake_setup_failure_preserves_prior_durable_state(|meta_dir| {
-                SubagentSetupFailure::SamplingClient { meta_dir }
-            })
+            within_wake_bound(
+                "sampling client setup failure",
+                assert_wake_setup_failure_preserves_prior_durable_state(|meta_dir| {
+                    SubagentSetupFailure::SamplingClient { meta_dir }
+                }),
+            )
             .await;
             let blocker = tempfile::NamedTempFile::new().expect("blocker");
-            assert_wake_setup_failure_preserves_prior_durable_state(|meta_dir| {
-                SubagentSetupFailure::Persistence {
-                    meta_dir,
-                    persistence_dir: blocker.path().to_path_buf(),
-                }
-            })
+            within_wake_bound(
+                "persistence setup failure",
+                assert_wake_setup_failure_preserves_prior_durable_state(|meta_dir| {
+                    SubagentSetupFailure::Persistence {
+                        meta_dir,
+                        persistence_dir: blocker.path().to_path_buf(),
+                    }
+                }),
+            )
             .await;
         })
         .await;
@@ -296,10 +329,141 @@ fn configure_completion_harness(
     ctx.model_id = acp::ModelId::new("test-model");
 }
 
-async fn acknowledge_parent_usage(mut parent_cmd_rx: mpsc::UnboundedReceiver<SessionCommand>) {
-    while let Some(command) = parent_cmd_rx.recv().await {
-        if let SessionCommand::RecordSubagentUsage { respond_to, .. } = command {
-            let _ = respond_to.send(());
+/// Ends the test if this guard is still alive after [`WAKE_WAIT_BOUND`].
+/// The deadline is `recv_timeout` on another OS thread, so it fires even
+/// when the test's `current_thread` runtime is blocked and cannot poll.
+struct WakeBoundGuard {
+    done_tx: Option<std::sync::mpsc::Sender<()>>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WakeBoundGuard {
+    fn drop(&mut self) {
+        if let Some(done_tx) = self.done_tx.take() {
+            let _ = done_tx.send(());
+        }
+        // Detach. The watchdog waits only in `recv_timeout`, and this send wakes that wait.
+        // Joining here would sit on the test's `current_thread` runtime.
+        drop(self.watchdog.take());
+    }
+}
+
+fn arm_wake_bound(what: &'static str) -> WakeBoundGuard {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let watchdog = std::thread::Builder::new()
+        .name("wake-wait-bound".into())
+        .spawn(move || {
+            if done_rx.recv_timeout(WAKE_WAIT_BOUND).is_err() {
+                eprintln!("{what} exceeded the 45s wake bound");
+                std::process::exit(101);
+            }
+        })
+        .expect("spawn wake wait bound");
+    WakeBoundGuard {
+        done_tx: Some(done_tx),
+        watchdog: Some(watchdog),
+    }
+}
+
+async fn within_wake_bound<T>(what: &'static str, fut: impl std::future::Future<Output = T>) -> T {
+    let _bound = arm_wake_bound(what);
+    match tokio::time::timeout(WAKE_WAIT_BOUND, fut).await {
+        Ok(value) => value,
+        Err(_) => panic!("{what} exceeded the 45s wake bound"),
+    }
+}
+
+fn within_wake_bound_sync<T>(what: &'static str, body: impl FnOnce() -> T) -> T {
+    let _bound = arm_wake_bound(what);
+    body()
+}
+
+struct ParentUsageAck {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    outcome_rx: std::sync::mpsc::Receiver<Result<(), &'static str>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ParentUsageAck {
+    /// Stops the ack thread. A stuck stop wait fails the test via `recv_timeout`.
+    fn finish(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let outcome = self.outcome_rx.recv_timeout(WAKE_WAIT_BOUND);
+        // Detach. Joining here could sit on the test thread if the ack thread were still inside a wait.
+        drop(self.thread.take());
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => panic!("{reason}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("parent usage ack did not finish within the 45s wake bound");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("parent usage ack thread dropped its outcome");
+            }
+        }
+    }
+}
+
+impl Drop for ParentUsageAck {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+/// Acks `RecordSubagentUsage` on another OS thread. The test's `current_thread`
+/// runtime never blocks in `recv().await` for these commands.
+fn spawn_parent_usage_ack(
+    parent_cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+) -> ParentUsageAck {
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("wake-parent-usage-ack".into())
+        .spawn(move || {
+            let outcome = drive_parent_usage_ack(parent_cmd_rx, stop_rx);
+            let _ = outcome_tx.send(outcome);
+        })
+        .expect("spawn parent usage ack thread");
+    ParentUsageAck {
+        stop: Some(stop_tx),
+        outcome_rx,
+        thread: Some(thread),
+    }
+}
+
+fn drive_parent_usage_ack(
+    mut parent_cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    stop: std::sync::mpsc::Receiver<()>,
+) -> Result<(), &'static str> {
+    loop {
+        let idle_started = std::time::Instant::now();
+        loop {
+            match parent_cmd_rx.try_recv() {
+                Ok(command) => {
+                    if let SessionCommand::RecordSubagentUsage { respond_to, .. } = command {
+                        let _ = respond_to.send(());
+                    }
+                    break;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    let left = WAKE_WAIT_BOUND.saturating_sub(idle_started.elapsed());
+                    if left.is_zero() {
+                        return Err("parent usage ack receive exceeded the 45s wake bound");
+                    }
+                    let slice = left.min(std::time::Duration::from_millis(50));
+                    match stop.recv_timeout(slice) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Ok(());
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            }
         }
     }
 }
@@ -320,20 +484,26 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
     local
         .run_until(async {
             let temp = tempfile::TempDir::new().expect("tempdir");
-            let (repo, _remote) = seed_repo_with_remote(temp.path());
+            let (repo, _remote) =
+                within_wake_bound_sync("seed repo", || seed_repo_with_remote(temp.path()));
             let id = uuid::Uuid::now_v7().to_string();
             let worktree = temp.path().join("wake-worktree");
-            xai_fast_worktree::WorktreeBuilder::new(&repo, &worktree)
-                .create()
-                .expect("worktree");
+            within_wake_bound_sync("wake worktree", || {
+                xai_fast_worktree::WorktreeBuilder::new(&repo, &worktree)
+                    .create()
+                    .expect("worktree");
+            });
             let meta_dir = temp.path().join("meta");
             let mut prior_meta = prior_wake_meta(&id, "test-model");
             prior_meta.child_cwd = Some(worktree.to_string_lossy().into_owned());
             prior_meta.worktree_path = Some(worktree.to_string_lossy().into_owned());
             prior_meta.snapshot_ref = Some("refs/grok/subagents/prior".to_owned());
-            let prior_head = run_git(&repo, &["rev-parse", "HEAD"]);
+            let prior_head =
+                within_wake_bound_sync("prior head", || run_git(&repo, &["rev-parse", "HEAD"]));
             let prior_ref = prior_meta.snapshot_ref.as_deref().expect("snapshot ref");
-            run_git(&repo, &["update-ref", prior_ref, &prior_head]);
+            within_wake_bound_sync("prior ref", || {
+                run_git(&repo, &["update-ref", prior_ref, &prior_head]);
+            });
             assert!(write_subagent_meta(&meta_dir, &prior_meta));
             assert!(write_subagent_output(&meta_dir, "prior output"));
 
@@ -344,32 +514,41 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
             let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
                 crate::util::grok_home::grok_home(),
             );
-            storage
-                .init_session(&child_info, acp::ModelId::new("test-model"))
-                .await
-                .expect("session");
-            storage
-                .append_chat_message(
+            within_wake_bound(
+                "session init",
+                storage.init_session(&child_info, acp::ModelId::new("test-model")),
+            )
+            .await
+            .expect("session");
+            within_wake_bound(
+                "system message",
+                storage.append_chat_message(
                     &child_info,
                     &xai_grok_sampling_types::conversation::ConversationItem::system(
                         "prior system",
                     ),
-                )
-                .await
-                .expect("system message");
-            storage
-                .append_chat_message(
+                ),
+            )
+            .await
+            .expect("system message");
+            within_wake_bound(
+                "assistant message",
+                storage.append_chat_message(
                     &child_info,
                     &xai_grok_sampling_types::conversation::ConversationItem::assistant(
                         "prior work",
                     ),
-                )
-                .await
-                .expect("assistant message");
+                ),
+            )
+            .await
+            .expect("assistant message");
 
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             let mut ctx = ctx_with_toggle(HashMap::new());
             let completion_harness = RunShellChildHarnessConfig::new(
                 meta_dir.clone(),
@@ -385,7 +564,7 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
             ctx.agent_config = Some(config);
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ctx.parent_cmd_tx = Some(parent_cmd_tx);
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let (gateway, mut gateway_rx) = test_gateway_with_receiver();
             let (command_tx, command_rx) =
                 SubagentCoordinator::<RunShellChildTestRunner>::channel();
@@ -399,34 +578,40 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
             );
             let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
             assert!(
-                backend
-                    .spawn(auto_wake_test_request(&id), None)
-                    .await
-                    .expect("prior spawn")
-                    .success
+                within_wake_bound(
+                    "prior spawn",
+                    backend.spawn(auto_wake_test_request(&id), None),
+                )
+                .await
+                .expect("prior spawn")
+                .success
             );
             while gateway_rx.try_recv().is_ok() {}
 
             assert_eq!(
-                backend
-                    .send_active_message(
-                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request")
-                    )
-                    .await,
+                within_wake_bound(
+                    "wake send",
+                    backend.send_active_message(
+                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request"),
+                    ),
+                )
+                .await,
                 ActiveAgentMessageOutcome::NotActiveOrFinalizing
             );
-            let restored = backend
-                .query(&id, false, None)
-                .await
-                .expect("restored prior snapshot");
+            let restored =
+                within_wake_bound("prior snapshot query", backend.query(&id, false, None))
+                    .await
+                    .expect("restored prior snapshot");
             assert!(matches!(
                 restored.status,
                 SubagentSnapshotStatus::Completed { ref output, .. }
                     if output == "prior output"
             ));
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
 
             let restored_meta: SubagentMeta = serde_json::from_str(
                 &std::fs::read_to_string(meta_dir.join("meta.json")).expect("meta"),
@@ -436,7 +621,13 @@ async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree(
             assert_eq!(restored_meta.status, prior_meta.status);
             assert_eq!(restored_meta.completed_at, prior_meta.completed_at);
             assert_eq!(restored_meta.snapshot_ref, prior_meta.snapshot_ref);
-            assert_eq!(run_git(&repo, &["rev-parse", prior_ref]), prior_head);
+            assert_eq!(
+                within_wake_bound_sync("restored ref", || run_git(
+                    &repo,
+                    &["rev-parse", prior_ref]
+                )),
+                prior_head
+            );
             assert_eq!(
                 read_subagent_output(&meta_dir).as_deref(),
                 Some("prior output")
@@ -471,11 +662,15 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
     local
         .run_until(async {
             let temp = tempfile::TempDir::new().expect("tempdir");
-            let (repo, _remote) = seed_repo_with_remote(temp.path());
+            let (repo, _remote) =
+                within_wake_bound_sync("seed repo", || seed_repo_with_remote(temp.path()));
             let meta_dir = temp.path().join("meta");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("ordinary output");
             let id = uuid::Uuid::now_v7().to_string();
             let mut ctx = ctx_with_toggle(HashMap::new());
@@ -494,7 +689,7 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             ctx.agent_config = Some(config);
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ctx.parent_cmd_tx = Some(parent_cmd_tx);
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let (gateway, _gateway_rx) = test_gateway_with_receiver();
             let (command_tx, command_rx) =
                 SubagentCoordinator::<RunShellChildTestRunner>::channel();
@@ -510,7 +705,9 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             let mut request = auto_wake_test_request(&id);
             request.runtime_overrides.isolation =
                 Some(xai_tool_types::SubagentIsolationMode::Worktree);
-            let result = backend.spawn(request, None).await.expect("ordinary spawn");
+            let result = within_wake_bound("ordinary spawn", backend.spawn(request, None))
+                .await
+                .expect("ordinary spawn");
             assert!(result.success);
             let output = result.output.to_string();
             assert_eq!(
@@ -527,8 +724,10 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             assert!(persisted.snapshot_ref.is_some());
 
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }
@@ -548,11 +747,15 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
     local
         .run_until(async {
             let temp = tempfile::TempDir::new().expect("tempdir");
-            let (repo, _remote) = seed_repo_with_remote(temp.path());
+            let (repo, _remote) =
+                within_wake_bound_sync("seed repo", || seed_repo_with_remote(temp.path()));
             let meta_dir = temp.path().join("meta");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("ordinary output");
             let id = uuid::Uuid::now_v7().to_string();
             let mut ctx = ctx_with_toggle(HashMap::new());
@@ -568,7 +771,7 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
             });
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ctx.parent_cmd_tx = Some(parent_cmd_tx);
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let (gateway, _gateway_rx) = test_gateway_with_receiver();
             let (command_tx, command_rx) =
                 SubagentCoordinator::<RunShellChildTestRunner>::channel();
@@ -584,7 +787,9 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
             let mut request = auto_wake_test_request(&id);
             request.runtime_overrides.isolation =
                 Some(xai_tool_types::SubagentIsolationMode::Worktree);
-            let result = backend.spawn(request, None).await.expect("ordinary spawn");
+            let result = within_wake_bound("ordinary spawn", backend.spawn(request, None))
+                .await
+                .expect("ordinary spawn");
             assert!(result.success);
             let persisted: SubagentMeta = serde_json::from_str(
                 &std::fs::read_to_string(meta_dir.join("meta.json")).expect("completion meta"),
@@ -599,8 +804,10 @@ async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snaps
             assert!(persisted.snapshot_ref.is_some());
 
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }
@@ -621,9 +828,12 @@ async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn(
         .run_until(async {
             let temp = tempfile::TempDir::new().expect("tempdir");
             let meta_dir = temp.path().join("meta");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("bound output");
             // Park the child's first turn at the model so its binding is observable mid-turn.
             server.hold_agent_completions();
@@ -638,7 +848,7 @@ async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn(
             let workspace_ops = ctx.workspace_ops.clone();
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ctx.parent_cmd_tx = Some(parent_cmd_tx);
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let (gateway, _gateway_rx) = test_gateway_with_receiver();
             let (command_tx, command_rx) =
                 SubagentCoordinator::<RunShellChildTestRunner>::channel();
@@ -670,15 +880,20 @@ async fn ordinary_spawn_binds_the_child_workspace_session_before_its_first_turn(
                 "the child's toolset is bound before its first turn dispatches"
             );
             server.release_agent_completions();
-            let result = spawned.await.expect("spawn task").expect("ordinary spawn");
+            let result = within_wake_bound("ordinary spawn", spawned)
+                .await
+                .expect("spawn task")
+                .expect("ordinary spawn");
             assert!(result.success);
             assert!(
                 workspace.session(&id).is_none(),
                 "teardown releases the child's binding"
             );
 
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }
@@ -696,9 +911,12 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
     local
         .run_until(async {
             let meta_dir = tempfile::tempdir().expect("meta dir");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("completed output");
             let id = uuid::Uuid::now_v7().to_string();
             let mut ordinary_ctx = ctx_with_toggle(HashMap::new());
@@ -712,7 +930,7 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
             );
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ordinary_ctx.parent_cmd_tx = Some(parent_cmd_tx.clone());
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let mut wake_ctx = ctx_with_toggle(HashMap::new());
             configure_completion_harness(
                 &mut wake_ctx,
@@ -737,10 +955,12 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
                 .run(),
             );
             let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
-            let ordinary = backend
-                .spawn(auto_wake_test_request(&id), None)
-                .await
-                .expect("ordinary spawn");
+            let ordinary = within_wake_bound(
+                "ordinary spawn",
+                backend.spawn(auto_wake_test_request(&id), None),
+            )
+            .await
+            .expect("ordinary spawn");
             assert!(
                 ordinary.success,
                 "ordinary spawn failed: {:?}",
@@ -761,16 +981,20 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
                 std::fs::read(meta_dir.path().join("meta.json")).expect("prior metadata");
             while gateway_rx.try_recv().is_ok() {}
 
-            let wake = backend
-                .send_active_message(
+            let wake = within_wake_bound(
+                "wake send",
+                backend.send_active_message(
                     ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request"),
-                )
-                .await;
+                ),
+            )
+            .await;
             assert_eq!(wake, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
-            let restored = backend
-                .query(&id, true, Some(5_000))
-                .await
-                .expect("restored prior snapshot");
+            let restored = within_wake_bound(
+                "prior snapshot query",
+                backend.query(&id, true, Some(5_000)),
+            )
+            .await
+            .expect("restored prior snapshot");
             assert!(matches!(
                 restored.status,
                 SubagentSnapshotStatus::Completed { ref output, .. }
@@ -807,8 +1031,10 @@ async fn unacked_wake_start_and_abort_fail_closed_without_parking_runner() {
             );
 
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }
@@ -825,9 +1051,12 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let meta_dir = tempfile::tempdir().expect("meta dir");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("completed output");
             let id = uuid::Uuid::now_v7().to_string();
             let mut ordinary_ctx = ctx_with_toggle(HashMap::new());
@@ -841,7 +1070,7 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
             );
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ordinary_ctx.parent_cmd_tx = Some(parent_cmd_tx.clone());
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let child_cwd = ordinary_ctx.parent_cwd.to_string_lossy().into_owned();
             let mut wake_ctx = ctx_with_toggle(HashMap::new());
             configure_completion_harness(
@@ -866,10 +1095,12 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
                 .run(),
             );
             let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
-            let ordinary = backend
-                .spawn(auto_wake_test_request(&id), None)
-                .await
-                .expect("ordinary spawn");
+            let ordinary = within_wake_bound(
+                "ordinary spawn",
+                backend.spawn(auto_wake_test_request(&id), None),
+            )
+            .await
+            .expect("ordinary spawn");
             assert!(
                 ordinary.success,
                 "ordinary spawn failed: {:?}",
@@ -891,17 +1122,21 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
             while gateway_rx.try_recv().is_ok() {}
 
             assert_eq!(
-                backend
-                    .send_active_message(
-                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request")
-                    )
-                    .await,
+                within_wake_bound(
+                    "wake send",
+                    backend.send_active_message(
+                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request"),
+                    ),
+                )
+                .await,
                 ActiveAgentMessageOutcome::NotActiveOrFinalizing
             );
-            let restored = backend
-                .query(&id, true, Some(5_000))
-                .await
-                .expect("restored prior completion");
+            let restored = within_wake_bound(
+                "restored prior completion",
+                backend.query(&id, true, Some(5_000)),
+            )
+            .await
+            .expect("restored prior completion");
             assert!(
                 matches!(restored.status, SubagentSnapshotStatus::Completed { .. }),
                 "expected restored completion, got {:?}",
@@ -931,8 +1166,10 @@ async fn rejected_deferred_start_restores_prior_without_publication() {
             );
 
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }
@@ -950,9 +1187,12 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
     local
         .run_until(async {
             let meta_dir = tempfile::tempdir().expect("meta dir");
-            let server = xai_grok_test_support::MockInferenceServer::start()
-                .await
-                .expect("mock server");
+            let server = within_wake_bound(
+                "mock inference server",
+                xai_grok_test_support::MockInferenceServer::start(),
+            )
+            .await
+            .expect("mock server");
             server.set_response("completed output");
             let id = uuid::Uuid::now_v7().to_string();
             let mut ordinary_ctx = ctx_with_toggle(HashMap::new());
@@ -966,7 +1206,7 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
             );
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ordinary_ctx.parent_cmd_tx = Some(parent_cmd_tx.clone());
-            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let usage_ack = spawn_parent_usage_ack(parent_cmd_rx);
             let mut wake_ctx = ctx_with_toggle(HashMap::new());
             configure_completion_harness(
                 &mut wake_ctx,
@@ -991,10 +1231,12 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
                 .run(),
             );
             let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
-            let ordinary = backend
-                .spawn(auto_wake_test_request(&id), None)
-                .await
-                .expect("ordinary spawn");
+            let ordinary = within_wake_bound(
+                "ordinary spawn",
+                backend.spawn(auto_wake_test_request(&id), None),
+            )
+            .await
+            .expect("ordinary spawn");
             assert!(
                 ordinary.success,
                 "ordinary spawn failed: {:?}",
@@ -1018,15 +1260,16 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
             while gateway_rx.try_recv().is_ok() {}
 
             assert!(matches!(
-                backend
-                    .send_active_message(
-                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request")
-                    )
-                    .await,
+                within_wake_bound(
+                    "wake send",
+                    backend.send_active_message(
+                        ActiveAgentMessageRequest::try_new(&id, "continue").expect("wake request"),
+                    ),
+                )
+                .await,
                 ActiveAgentMessageOutcome::Accepted { .. }
             ));
-            let wake = backend
-                .query(&id, true, Some(5_000))
+            let wake = within_wake_bound("wake completion", backend.query(&id, true, Some(5_000)))
                 .await
                 .expect("wake completion");
             assert!(matches!(
@@ -1060,8 +1303,10 @@ async fn started_wake_with_failed_metadata_write_preserves_prior_durable_artifac
             );
 
             drop(backend);
-            coordinator.await.expect("coordinator");
-            usage_ack.abort();
+            within_wake_bound("coordinator", coordinator)
+                .await
+                .expect("coordinator");
+            usage_ack.finish();
         })
         .await;
 }

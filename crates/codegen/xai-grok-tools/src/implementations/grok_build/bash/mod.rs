@@ -2128,6 +2128,10 @@ impl xai_tool_runtime::Tool for BashTool {
         {
             let h = crate::util::session_reader::execute_intercept(&hit, &cwd);
             Some((h.stdout, h.stderr, h.exit_code))
+        } else if let Some(hit) = crate::util::xlsx_skill::try_parse_xlsx_intercept(&input.command)
+        {
+            let h = crate::util::xlsx_skill::execute_intercept(&hit, &cwd);
+            Some((h.stdout, h.stderr, h.exit_code))
         } else {
             None
         };

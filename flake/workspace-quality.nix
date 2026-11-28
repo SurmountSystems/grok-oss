@@ -172,7 +172,6 @@ let
       nativeBuildInputs = nativeBuildInputs ++ [
         pkgs.cargo-nextest
         pkgs.git
-        pkgs.python3
         pkgs.ripgrep
       ];
       # One workspace Cargo.lock (cargo-mem-guard and grok-nix-helper

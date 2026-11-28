@@ -55,6 +55,11 @@ pub const ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT: std::time::Duration =
 pub const ACTIVE_MESSAGE_FINALIZATION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(6);
 
+/// Maximum wait for the actor to answer a child reporter oneshot.
+/// The actor reply is in-process. If it has not arrived, the select parked
+/// the internal event and the child must fail closed instead of waiting.
+pub const ACTOR_REPLY_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
@@ -298,6 +303,15 @@ impl std::fmt::Debug for CoordinatorConfig {
     }
 }
 
+/// Oneshot reply from the actor, or `fallback` if the actor drops the sender
+/// or does not answer within [`ACTOR_REPLY_BOUND`].
+async fn actor_reply_or<T>(rx: oneshot::Receiver<T>, fallback: T) -> T {
+    match tokio::time::timeout(ACTOR_REPLY_BOUND, rx).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) | Err(_) => fallback,
+    }
+}
+
 /// Runner-side channel back into the actor.
 pub struct ChildReporter<C> {
     pub(super) subagent_id: String,
@@ -318,19 +332,29 @@ impl<C: 'static> ChildReporter<C> {
     /// cancel-at-promote race: `false` means cancellation won and the adapter
     /// must tear down the half-initialized runtime.
     pub async fn started(&self, child: StartedChild<C>) -> bool {
-        self.started_with_deferred_admission(child, false).await
+        self.started_with_deferred_admission(child, false, false)
+            .await
+    }
+
+    /// Promote a wake whose start metadata write was skipped. Admission is not
+    /// deferred. A parked cancel must not reject this promote.
+    pub async fn started_admit_skipped_metadata(&self, child: StartedChild<C>) -> bool {
+        self.started_with_deferred_admission(child, false, true)
+            .await
     }
 
     /// Promote a wake while keeping its initial message parked until durable
     /// start publication succeeds.
     pub async fn started_deferred(&self, child: StartedChild<C>) -> bool {
-        self.started_with_deferred_admission(child, true).await
+        self.started_with_deferred_admission(child, true, false)
+            .await
     }
 
     async fn started_with_deferred_admission(
         &self,
         child: StartedChild<C>,
         defer_admission: bool,
+        admit_skipped_metadata: bool,
     ) -> bool {
         let (respond_to, response_rx) = oneshot::channel();
         if self
@@ -339,13 +363,31 @@ impl<C: 'static> ChildReporter<C> {
                 subagent_id: self.subagent_id.clone(),
                 child,
                 defer_admission,
+                admit_skipped_metadata,
                 respond_to,
             })
             .is_err()
         {
             return false;
         }
-        response_rx.await.unwrap_or(false)
+        actor_reply_or(response_rx, false).await
+    }
+
+    /// Remember that this wake skipped its metadata write, so finish accepts
+    /// the parked continue instead of rejecting it.
+    pub async fn note_skipped_metadata_wake(&self) -> bool {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(InternalEvent::NoteSkippedMetadataWake {
+                subagent_id: self.subagent_id.clone(),
+                respond_to,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        actor_reply_or(response_rx, false).await
     }
 
     /// Commit or reject a wake whose active promotion deferred message admission.
@@ -362,7 +404,7 @@ impl<C: 'static> ChildReporter<C> {
         {
             return false;
         }
-        response_rx.await.unwrap_or(false)
+        actor_reply_or(response_rx, false).await
     }
 
     /// Close admission and wait a bounded interval for selected sends to settle.
@@ -423,7 +465,7 @@ impl<C: 'static> ChildReporter<C> {
         {
             return false;
         }
-        response_rx.await.unwrap_or(false)
+        actor_reply_or(response_rx, false).await
     }
 
     /// Resolve an in-memory resume source without sharing coordinator state.
@@ -444,7 +486,7 @@ impl<C: 'static> ChildReporter<C> {
         {
             return SubagentResumeLookup::Missing;
         }
-        response_rx.await.unwrap_or(SubagentResumeLookup::Missing)
+        actor_reply_or(response_rx, SubagentResumeLookup::Missing).await
     }
 
     /// Ask the actor, while this run is still pending, whether a nested agent
@@ -463,7 +505,7 @@ impl<C: 'static> ChildReporter<C> {
         {
             return false;
         }
-        response_rx.await.unwrap_or(false)
+        actor_reply_or(response_rx, false).await
     }
 }
 
@@ -472,11 +514,17 @@ pub(super) enum InternalEvent<C> {
         subagent_id: String,
         child: StartedChild<C>,
         defer_admission: bool,
+        admit_skipped_metadata: bool,
         respond_to: oneshot::Sender<bool>,
     },
     SettleDeferredStart {
         subagent_id: String,
         is_committed: bool,
+        respond_to: oneshot::Sender<bool>,
+    },
+    /// Pending or active wake whose start metadata write was skipped.
+    NoteSkippedMetadataWake {
+        subagent_id: String,
         respond_to: oneshot::Sender<bool>,
     },
     Finalizing {
@@ -538,6 +586,8 @@ pub(super) struct PendingChild {
     /// stay owned only while that session can be given the live address.
     pub(super) spawner_session_id: Option<String>,
     pub(super) wake_of: Option<DisplacedCompletedChild>,
+    /// Skipped start-metadata write: finish must accept the parked continue.
+    pub(super) admit_continue_on_finish: bool,
 }
 
 pub(super) struct ActiveChild<C> {
@@ -565,6 +615,9 @@ pub(super) struct ActiveChild<C> {
     pub(super) spawner_session_id: Option<String>,
     pub(super) active_messages: ActiveMessageLifecycle,
     pub(super) deferred_wake: Option<DisplacedCompletedChild>,
+    /// Copied from the pending wake when a skipped metadata write must still
+    /// accept the parked continue at finish.
+    pub(super) admit_continue_on_finish: bool,
     pub(super) control: C,
 }
 

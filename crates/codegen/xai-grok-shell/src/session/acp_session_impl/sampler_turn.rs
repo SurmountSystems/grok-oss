@@ -1527,6 +1527,64 @@ impl SessionActor {
     /// Classify a terminal sampler failure and decide recovery.
     /// `transient`: turn-loop retry state (the loop owns the counters).
     /// `park`: already parked — a still-credential-less 401 re-parks without a recovery dispatch.
+    /// Tools recorded this session, plus assistant and tool-result text.
+    /// User prompt text is not a blocker report.
+    async fn owed_l2_work_now(
+        &self,
+    ) -> xai_grok_tools::implementations::grok_build::task::repetitive_l2_session_end::OwedL2Work
+    {
+        use xai_grok_sampling_types::ConversationItem;
+        use xai_grok_tools::implementations::grok_build::task::repetitive_l2_session_end::owed_l2_work_from_session_record;
+
+        let mut names = self
+            .signals_handle()
+            .snapshot()
+            .await
+            .map(|signals| signals.tools_used)
+            .unwrap_or_default();
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let mut transcript = String::new();
+        for item in &conversation {
+            match item {
+                ConversationItem::Assistant(assistant) => {
+                    if !assistant.content.is_empty() {
+                        transcript.push_str(&assistant.content);
+                        transcript.push('\n');
+                    }
+                    for call in &assistant.tool_calls {
+                        names.push(call.name.clone());
+                    }
+                }
+                ConversationItem::ToolResult(result) if !result.content.is_empty() => {
+                    transcript.push_str(&result.content);
+                    transcript.push('\n');
+                }
+                _ => {}
+            }
+        }
+        owed_l2_work_from_session_record(&names, &transcript)
+    }
+
+    /// Unfinished ordinary L2 (depth 1, not once-run) must not end on this stop.
+    /// Other depths stay on the fatal internal-error path.
+    async fn unfinished_ordinary_l2_must_stay_up(
+        &self,
+        error: &xai_grok_sampler::SamplingErrorInfo,
+    ) -> bool {
+        use xai_grok_tools::implementations::grok_build::task::repetitive_l2_session_end::{
+            RepetitiveGenerationSessionEnd, repetitive_generation_session_end,
+        };
+
+        if error.kind != xai_grok_sampler::SamplingErrorKind::RepetitiveGeneration {
+            return false;
+        }
+        if !self.is_ordinary_l2_coordinator() {
+            return false;
+        }
+        let owed = self.owed_l2_work_now().await;
+        repetitive_generation_session_end(true, owed) == RepetitiveGenerationSessionEnd::StayUp
+    }
+
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: xai_grok_sampler::SamplingErrorInfo,
@@ -2130,6 +2188,13 @@ impl SessionActor {
             } else {
                 detailed_message
             };
+        if self.unfinished_ordinary_l2_must_stay_up(&error).await {
+            tracing::info!(
+                session_id = %self.session_info.id,
+                "unfinished ordinary L2 repeated the same sentence; session stays up"
+            );
+            return Ok(SamplerFailureRecovery::StayUpUnfinishedL2);
+        }
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -2459,6 +2524,9 @@ impl SessionActor {
             }
             SamplerFailureRecovery::RetryTransient { kind, status_code } => {
                 Ok(SamplerTurnOutcome::RetryTransient { kind, status_code })
+            }
+            SamplerFailureRecovery::StayUpUnfinishedL2 => {
+                Ok(SamplerTurnOutcome::StayUpUnfinishedL2)
             }
         }
     }

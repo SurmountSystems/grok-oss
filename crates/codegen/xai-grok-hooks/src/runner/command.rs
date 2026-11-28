@@ -115,6 +115,10 @@ pub async fn run_command_hook(
             None,
         );
     };
+    // This hook only. The storm gate stays in Rust. Do not spawn its python script.
+    if command_is_block_bulk_replace_edit_py(command) {
+        return evaluate_block_bulk_replace_edit_hook(spec, envelope, start);
+    }
     let command_str = command.to_string_lossy();
 
     let stdin_json = match serde_json::to_string(&envelope.to_hook_json()) {
@@ -665,6 +669,92 @@ fn find_local_shell_assignments(command_str: &str) -> std::collections::HashSet<
         }
     }
     names
+}
+
+fn command_is_block_bulk_replace_edit_py(command: &std::path::Path) -> bool {
+    command.file_name().and_then(|name| name.to_str()) == Some("block-bulk-replace-edit.py")
+}
+
+fn evaluate_block_bulk_replace_edit_hook(
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    start: Instant,
+) -> (HookRunnerResult, Duration, Option<String>) {
+    let crate::event::HookPayload::PreToolUse { tool_input, .. } = &envelope.payload else {
+        return allow_bulk_edit_hook(start);
+    };
+    let Some(tool_input) = tool_input.as_object() else {
+        return allow_bulk_edit_hook(start);
+    };
+    let file_path = first_json_str(tool_input, &["file_path", "filePath"]);
+    let old_string = first_json_str(tool_input, &["old_string", "oldString"]);
+    let new_string = first_json_str(tool_input, &["new_string", "newString"]);
+    let session = envelope.session_id.trim();
+    let session_id = if session.is_empty() {
+        None
+    } else {
+        Some(session)
+    };
+    if let Some(deny) = xai_grok_tools::util::bulk_edit_policy::evaluate(
+        &xai_grok_tools::util::bulk_edit_policy::BulkEditRequest {
+            session_id,
+            file_path: &file_path,
+            old_string: &old_string,
+            new_string: &new_string,
+            replace_all: json_replace_all(tool_input),
+        },
+    ) {
+        return (
+            HookRunnerResult::Deny {
+                reason: clip_reason(&deny.reason),
+                hook_name: spec.name.clone(),
+            },
+            start.elapsed(),
+            None,
+        );
+    }
+    allow_bulk_edit_hook(start)
+}
+
+fn allow_bulk_edit_hook(start: Instant) -> (HookRunnerResult, Duration, Option<String>) {
+    (
+        HookRunnerResult::Allow {
+            updated_input: None,
+            additional_context: None,
+        },
+        start.elapsed(),
+        None,
+    )
+}
+
+fn first_json_str(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(text) = map.get(*key).and_then(|value| value.as_str())
+            && !text.is_empty()
+        {
+            return text.to_owned();
+        }
+    }
+    for key in keys {
+        if let Some(text) = map.get(*key).and_then(|value| value.as_str()) {
+            return text.to_owned();
+        }
+    }
+    String::new()
+}
+
+fn json_replace_all(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(value) = map.get("replace_all").or_else(|| map.get("replaceAll")) else {
+        return false;
+    };
+    match value {
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::String(text) => {
+            matches!(text.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+        }
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        _ => false,
+    }
 }
 
 fn stderr_first_line(stderr: &str) -> Option<&str> {

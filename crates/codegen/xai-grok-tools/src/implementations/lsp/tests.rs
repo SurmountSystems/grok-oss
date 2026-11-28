@@ -65,12 +65,57 @@ async fn drain_until_reported(mgr: &tokio::sync::Mutex<LspManager>, needle: &str
     panic!("no summary mentioning {needle:?} within the deadline");
 }
 
+fn lsp_mock_launcher() -> String {
+    // The handshake uses the first of these that is a real file.
+    // OUT_DIR/lsp_mock_server is the path the last check spawned and missed.
+    // The profile copy and the nested target sit outside that directory.
+    let mut candidates = Vec::new();
+    candidates.push(std::path::PathBuf::from(env!("OUT_DIR")).join("lsp_mock_server"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let mut beside = parent.to_path_buf();
+            if beside.file_name().and_then(|name| name.to_str()) == Some("deps") {
+                beside.pop();
+            }
+            candidates.push(beside.join("lsp_mock_server"));
+            let mut cursor = parent.to_path_buf();
+            loop {
+                if cursor.file_name().and_then(|name| name.to_str()) == Some("build") {
+                    if let Some(profile) = cursor.parent() {
+                        candidates.push(profile.join("lsp_mock_server"));
+                        candidates.push(
+                            profile
+                                .join("lsp-mock-target")
+                                .join("debug")
+                                .join("lsp_mock_server"),
+                        );
+                    }
+                    break;
+                }
+                if !cursor.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    for path in &candidates {
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    candidates
+        .into_iter()
+        .next()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "lsp_mock_server".to_string())
+}
+
 fn mock_server_config(script_path: &Path) -> LspServerConfig {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: lsp_mock_launcher(),
+        args: vec![script_path.to_string_lossy().into_owned()],
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()
@@ -597,8 +642,8 @@ async fn e2e_multi_server_routing() {
     servers.insert(
         "mock-ts".to_string(),
         LspServerConfig {
-            command: "python3".to_string(),
-            args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+            command: lsp_mock_launcher(),
+            args: vec![script_path.to_string_lossy().into_owned()],
             extensions: ts_ext,
             startup_timeout: Some(10_000),
             ..Default::default()
@@ -607,8 +652,8 @@ async fn e2e_multi_server_routing() {
     servers.insert(
         "mock-py".to_string(),
         LspServerConfig {
-            command: "python3".to_string(),
-            args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+            command: lsp_mock_launcher(),
+            args: vec![script_path.to_string_lossy().into_owned()],
             extensions: py_ext,
             startup_timeout: Some(10_000),
             ..Default::default()
@@ -1053,8 +1098,8 @@ async fn e2e_finalize_no_longer_blocks_on_slow_lsp_startup() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: lsp_mock_launcher(),
+        args: vec![script_path.to_string_lossy().into_owned()],
         extensions: ext_map,
         startup_timeout: Some(5_000),
         ..Default::default()
@@ -1108,8 +1153,8 @@ async fn e2e_first_dispatch_waits_for_background_startup() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: lsp_mock_launcher(),
+        args: vec![script_path.to_string_lossy().into_owned()],
         extensions: ext_map,
         startup_timeout: Some(5_000),
         ..Default::default()
@@ -1172,13 +1217,13 @@ async fn e2e_restart_monitor_emits_failed_on_restart_init_error() {
                 counter_path.to_string_lossy().into_owned(),
             );
             let server_config = LspServerConfig {
-                command: "python3".to_string(),
-                args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+                command: lsp_mock_launcher(),
+                args: vec![script_path.to_string_lossy().into_owned()],
                 env,
                 extensions: ext_map,
                 // Generous startup window: the init-failure server responds to `initialize` (and bumps the on-disk counter) essentially instantly, so a large
-                // timeout adds no latency on the happy path. It only removes a cold-start race — with a tight 500ms window a slow python3 spawn under load is
-                // killed *before* it increments the counter, so `attempts` (deterministically 3) and the on-disk counter (2) diverge and the test flakes.
+                // timeout adds no latency on the happy path. It only removes a cold-start race. With a tight 500ms window a slow spawn under load is
+                // killed before it increments the counter, so `attempts` (deterministically 3) and the on-disk counter (2) diverge and the test flakes.
                 startup_timeout: Some(10_000),
                 restart_on_crash: Some(true),
                 max_restarts: Some(3),
@@ -1260,8 +1305,8 @@ async fn e2e_drain_timeout_preserves_pending_diagnostics() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: lsp_mock_launcher(),
+        args: vec![script_path.to_string_lossy().into_owned()],
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()
@@ -1944,8 +1989,8 @@ async fn e2e_restart_replay_requeues_pending_diagnostics() {
     let mut ext_map = HashMap::new();
     ext_map.insert(".ts".to_string(), "typescript".to_string());
     let server_config = LspServerConfig {
-        command: "python3".to_string(),
-        args: vec!["-u".to_string(), script_path.to_string_lossy().into_owned()],
+        command: lsp_mock_launcher(),
+        args: vec![script_path.to_string_lossy().into_owned()],
         extensions: ext_map,
         startup_timeout: Some(10_000),
         ..Default::default()

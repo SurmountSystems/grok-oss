@@ -415,14 +415,22 @@ fn finished_result(request: &SubagentRequest, omit_own_report: bool) -> Subagent
     }
 }
 
-/// Parks forever once the gate is closed.
+/// Fails within 45 seconds once the gate is closed, instead of parking.
+/// While that bound is pending, the caller's other `select` arms can still win.
 async fn finish_one_for(gate: &mut tokio::sync::broadcast::Receiver<String>, id: &str) {
     use tokio::sync::broadcast::error::RecvError;
     loop {
         match gate.recv().await {
             Ok(finished) if finished == id => return,
             Ok(_) | Err(RecvError::Lagged(_)) => {}
-            Err(RecvError::Closed) => std::future::pending::<()>().await,
+            Err(RecvError::Closed) => {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(45),
+                    std::future::pending::<()>(),
+                )
+                .await
+                .expect("finish-one broadcast closed before the id finished");
+            }
         }
     }
 }
@@ -500,6 +508,20 @@ pub(in crate::implementations::grok_build::task::coordinator) struct Harness {
     pub(in crate::implementations::grok_build::task::coordinator) tokens:
         mpsc::UnboundedReceiver<CancellationToken>,
     pub(in crate::implementations::grok_build::task::coordinator) actor: tokio::task::JoinHandle<()>,
+}
+
+const HARNESS_OBSERVE_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Harness channels have no sender until the runner is polled. A bare
+/// `recv().await` parks for the life of the actor when that poll never comes.
+async fn observe<T>(
+    what: &'static str,
+    wait: impl std::future::Future<Output = Option<T>>,
+) -> Option<T> {
+    match tokio::time::timeout(HARNESS_OBSERVE_BOUND, wait).await {
+        Ok(value) => value,
+        Err(_) => panic!("{what} did not finish within {HARNESS_OBSERVE_BOUND:?}"),
+    }
 }
 
 pub(in crate::implementations::grok_build::task::coordinator) fn harness(
@@ -2720,16 +2742,19 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
         async move { backend.spawn(wf_parent, None).await }
     });
     assert_eq!(
-        harness
-            .requests
-            .recv()
+        observe("wf-child request", harness.requests.recv())
             .await
             .as_ref()
             .map(|r| r.id.as_str()),
         Some("wf-child")
     );
     let _ = harness.start.send(());
-    assert_eq!(harness.started.recv().await.as_deref(), Some("wf-child"));
+    assert_eq!(
+        observe("wf-child started", harness.started.recv())
+            .await
+            .as_deref(),
+        Some("wf-child")
+    );
 
     // Nested spawns use a backend bound to the workflow child's session id
     // (production binds ChannelBackend::for_session to the child session).
@@ -2747,9 +2772,7 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
         let backend = child_backend.clone();
         async move { backend.spawn(nested_active, None).await }
     });
-    let observed = harness
-        .requests
-        .recv()
+    let observed = observe("nested active observed", harness.requests.recv())
         .await
         .expect("nested active observed");
     assert_eq!(observed.parent_session_id, "parent");
@@ -2762,7 +2785,9 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
     assert!(child_backend.inspect("nested-active").await.is_some());
     let _ = harness.start.send(());
     assert_eq!(
-        harness.started.recv().await.as_deref(),
+        observe("nested-active started", harness.started.recv())
+            .await
+            .as_deref(),
         Some("nested-active")
     );
 
@@ -2772,9 +2797,7 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
         let backend = child_backend.clone();
         async move { backend.spawn(nested_pending, None).await }
     });
-    let observed_pending = harness
-        .requests
-        .recv()
+    let observed_pending = observe("nested pending observed", harness.requests.recv())
         .await
         .expect("nested pending observed");
     assert_eq!(observed_pending.owner.workflow_run_id(), Some("run-1"));
@@ -2788,7 +2811,9 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
     // subscribed on finish; broadcast does not buffer for late receivers).
     let _ = harness.start.send(());
     assert_eq!(
-        harness.started.recv().await.as_deref(),
+        observe("nested-pending started", harness.started.recv())
+            .await
+            .as_deref(),
         Some("nested-pending")
     );
     let _ = harness.finish.send(());
@@ -2817,12 +2842,19 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
         let backend = harness.backend.clone();
         async move { backend.spawn(outer_request, None).await }
     });
-    let observed_outer = harness.requests.recv().await.unwrap();
+    let observed_outer = observe("outer request", harness.requests.recv())
+        .await
+        .expect("outer request finished or failed within the observe bound");
     assert_eq!(observed_outer.parent_session_id, "parent");
     assert!(loop_unit_active(&harness.backend, "loop-task").await);
 
     let _ = harness.start.send(());
-    assert_eq!(harness.started.recv().await.as_deref(), Some("outer"));
+    assert_eq!(
+        observe("outer started", harness.started.recv())
+            .await
+            .as_deref(),
+        Some("outer")
+    );
     let refs = harness
         .backend
         .spawned_refs_for_prompt("parent", "prompt")
@@ -2836,7 +2868,9 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     nested_request.parent_session_id = "outer".to_owned();
     let (nested_registered, _nested_spawn) =
         spawn_noting_registration(harness.backend.clone(), nested_request);
-    let observed_nested = harness.requests.recv().await.unwrap();
+    let observed_nested = observe("nested request", harness.requests.recv())
+        .await
+        .expect("nested request finished or failed within the observe bound");
     assert_eq!(observed_nested.parent_session_id, "parent");
     assert!(!observed_nested.surface_completion);
     assert_eq!(
@@ -2856,11 +2890,18 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     );
 
     let _ = harness.start.send(());
-    assert_eq!(harness.started.recv().await.as_deref(), Some("nested"));
+    assert_eq!(
+        observe("nested started", harness.started.recv())
+            .await
+            .as_deref(),
+        Some("nested")
+    );
     let _ = harness.finish.send(());
     let outer_result = outer_spawn.await.unwrap().unwrap();
     assert!(outer_result.success && !outer_result.backgrounded);
-    let _ = harness.completions.recv().await;
+    observe("outer completion", harness.completions.recv())
+        .await
+        .expect("outer completion finished or failed within the observe bound");
     assert!(!loop_unit_active(&harness.backend, "loop-task").await);
     harness.actor.abort();
 }
@@ -2920,11 +2961,18 @@ async fn spawn_child_with(
     let backend = parent_backend(harness);
     // Background: resolves at completion, which no caller of this helper awaits.
     let _child = tokio::spawn(async move { backend.spawn(child, None).await });
-    harness.requests.recv().await.expect("child observed");
+    observe("child observed", harness.requests.recv())
+        .await
+        .expect("child observed");
     if wait_before_start {
         let _ = harness.start.send(());
     }
-    assert_eq!(harness.started.recv().await.as_deref(), Some("child"));
+    assert_eq!(
+        observe("child started", harness.started.recv())
+            .await
+            .as_deref(),
+        Some("child")
+    );
     session_backend(harness, "child")
 }
 
@@ -2937,7 +2985,9 @@ async fn spawn_nested(
         let backend = backend.clone();
         async move { backend.spawn(nested, None).await }
     });
-    let observed = harness.requests.recv().await.expect("nested observed");
+    let observed = observe("nested observed", harness.requests.recv())
+        .await
+        .expect("nested observed");
     assert_eq!(observed.parent_session_id, "parent");
     assert!(!observed.surface_completion);
     join
@@ -2971,7 +3021,14 @@ async fn nested_spawner_can_query_inspect_and_cancel_background_grandchild() {
         child_backend.cancel("grandchild").await,
         SubagentCancelOutcome::Cancelled
     ));
-    assert!(grandchild.await.unwrap().unwrap().cancelled);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .cancelled
+    );
     for backend in [&child_backend, &root] {
         let snapshot = backend
             .query("grandchild", false, None)
@@ -3037,7 +3094,14 @@ async fn nested_spawner_can_query_and_cancel_queued_grandchild() {
         child_backend.cancel("grandchild").await,
         SubagentCancelOutcome::Cancelled
     ));
-    assert!(grandchild.await.unwrap().unwrap().cancelled);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .cancelled
+    );
     harness.actor.abort();
 }
 
@@ -3115,7 +3179,14 @@ async fn nested_spawner_resume_of_grandchild_is_reparented_and_reachable() {
         child_backend.cancel("grandchild").await,
         SubagentCancelOutcome::Cancelled
     ));
-    assert!(grandchild.await.unwrap().unwrap().cancelled);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .cancelled
+    );
 
     let mut resume = request("g2", true);
     resume.resume_from = Some("grandchild".to_owned());
@@ -3209,7 +3280,12 @@ async fn running_nested_pair_with(
     );
     let child_backend = spawn_child(&mut harness, false).await;
     let grandchild = spawn_nested(&mut harness, &child_backend, nested).await;
-    assert_eq!(harness.started.recv().await.as_deref(), Some("grandchild"));
+    assert_eq!(
+        observe("grandchild started", harness.started.recv())
+            .await
+            .as_deref(),
+        Some("grandchild")
+    );
     (harness, grandchild)
 }
 
@@ -3219,7 +3295,14 @@ async fn running_nested_pair_with(
 async fn nested_grandchild_completion_buffers_for_spawner_not_root() {
     let (mut harness, grandchild) = running_nested_pair(request("grandchild", true)).await;
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
     let disposition = harness.completions.recv().await.expect("grandchild done");
     assert!(!disposition.should_surface, "the root is not woken");
     assert_eq!(
@@ -3239,10 +3322,21 @@ async fn nested_grandchild_completion_not_buffered_when_spawner_finished_first()
     let (mut harness, grandchild) =
         running_nested_pair_with(request("grandchild", true), true).await;
     let _ = harness.finish_one.send("child".to_owned());
-    harness.completions.recv().await.expect("child done");
+    observe("child done", harness.completions.recv())
+        .await
+        .expect("child done");
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
-    harness.completions.recv().await.expect("grandchild done");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
+    observe("grandchild done", harness.completions.recv())
+        .await
+        .expect("grandchild done");
     assert!(
         buffered_completion_ids(&harness, Some("child"))
             .await
@@ -3257,7 +3351,14 @@ async fn nested_grandchild_completion_not_buffered_when_spawner_finished_first()
 async fn spawner_finish_purges_buffered_grandchild_completion() {
     let (mut harness, grandchild) = running_nested_pair(request("grandchild", true)).await;
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
     harness.completions.recv().await.expect("grandchild done");
     let _ = harness.finish_one.send("child".to_owned());
     harness.completions.recv().await.expect("child done");
@@ -3289,7 +3390,14 @@ async fn cancelled_spawner_does_not_receive_grandchild_completion() {
     ));
 
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
     harness.completions.recv().await.expect("grandchild done");
     assert!(
         buffered_completion_ids(&harness, Some("child"))
@@ -3308,7 +3416,14 @@ async fn harness_internal_nested_spawn_does_not_surface_to_spawner() {
     quiet.surface_completion = false;
     let (mut harness, grandchild) = running_nested_pair(quiet).await;
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
     harness.completions.recv().await.expect("grandchild done");
     assert!(buffered_completion_ids(&harness, None).await.is_empty());
     harness.actor.abort();
@@ -3332,7 +3447,14 @@ async fn workflow_nested_grandchild_completion_still_buffers_for_spawner() {
     assert_eq!(harness.started.recv().await.as_deref(), Some("grandchild"));
 
     let _ = harness.finish_one.send("grandchild".to_owned());
-    assert!(grandchild.await.unwrap().unwrap().success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(45), grandchild)
+            .await
+            .expect("grandchild finished or failed within 45s")
+            .unwrap()
+            .unwrap()
+            .success
+    );
     harness.completions.recv().await.expect("grandchild done");
     assert_eq!(
         buffered_completion_ids(&harness, Some("child")).await,

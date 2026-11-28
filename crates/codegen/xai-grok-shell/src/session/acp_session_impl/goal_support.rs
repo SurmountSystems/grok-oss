@@ -1593,6 +1593,20 @@ impl SessionActor {
         }
         let tool_names = self.resolve_inherit_role_tool_names().await;
         let inherit_tool_names = tool_names.clone();
+        let parent_tokens = self.chat_state_handle.get_total_tokens().await;
+        let compaction_count = self
+            .compaction
+            .count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // A session that has not compacted, and whose accumulated tokens
+        // already fill the nested window, must not fork that history into
+        // the once-run role. The role cannot compact the fork. Skipping the
+        // fork is not enough. The planner writes the plan after research
+        // and recon so this session does not pause before a plan exists.
+        let fork_context = crate::session::goal_planner::goal_role_forks_uncompacted_parent(
+            parent_tokens,
+            compaction_count,
+        );
         let spawner: std::sync::Arc<dyn crate::session::goal_planner::GoalPlannerSpawner> =
             std::sync::Arc::new(crate::session::goal_planner::ChannelSpawner {
                 event_tx,
@@ -1606,6 +1620,7 @@ impl SessionActor {
                 role_override,
                 cancel_token,
                 events: Some(self.events.writer()),
+                fork_context,
             });
 
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;

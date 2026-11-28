@@ -210,6 +210,12 @@ impl SessionActor {
             return images;
         }
         let norm = crate::session::image_normalize::normalize_images(images, is_cursor).await;
+        for text in norm.recovered_text {
+            if !body.is_empty() && !body.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str(&text);
+        }
         if let Some((notice, notes)) =
             crate::session::image_normalize::dropped_to_envelope(norm.dropped, is_cursor)
         {

@@ -229,6 +229,14 @@ pub(crate) trait GoalPlannerSpawner: Send + Sync {
         role: GoalCreationRole,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError>;
+
+    /// Whether the once-run role forks parent history.
+    /// False when the parent session has not compacted and accumulated tokens
+    /// already fill the nested window. The planner then writes the plan after
+    /// research and recon. Skipping the fork alone does not produce a plan.
+    fn forks_parent_history(&self) -> bool {
+        true
+    }
 }
 
 /// Deliberately mirrored from the verifier rather than shared.
@@ -281,10 +289,37 @@ pub(crate) struct ChannelSpawner {
     pub(crate) cancel_token: tokio_util::sync::CancellationToken,
     /// Event sink for the spawn-and-retry-once fail-open telemetry; `None` in tests / when no event log is wired.
     pub(crate) events: Option<EventWriter>,
+    /// When false, the once-run role does not fork parent history.
+    /// That is a parent session that has not compacted and whose accumulated
+    /// tokens already fill the nested window. The role cannot compact a fork
+    /// of that history. Skipping the fork does not by itself write a plan.
+    pub(crate) fork_context: bool,
+}
+
+/// Once-run goal roles fork parent history and must not compact themselves.
+/// `parent_tokens` is accumulated tokens from `get_total_tokens`, not the live
+/// context line. A parent that has not compacted, and whose accumulated tokens
+/// are already at least 80% of the nested 200000-token cap (160000), is not forked.
+/// Under that line, compaction count 0 still forks. An empty plan from that fork
+/// is not a pause when the research file is non-empty. The planner writes the plan.
+/// A parent that has already compacted keeps the fork.
+pub(crate) fn goal_role_forks_uncompacted_parent(
+    parent_tokens: u64,
+    compaction_count: u64,
+) -> bool {
+    if compaction_count > 0 {
+        return true;
+    }
+    let safe = crate::util::config::NESTED_SESSION_CONTEXT_CAP * 80 / 100;
+    parent_tokens < safe
 }
 
 #[async_trait::async_trait]
 impl GoalPlannerSpawner for ChannelSpawner {
+    fn forks_parent_history(&self) -> bool {
+        self.fork_context
+    }
+
     async fn spawn_planner(
         &self,
         id: &str,
@@ -361,7 +396,7 @@ impl ChannelSpawner {
             surface_completion: false,
             // Goal roles are never auto-backgrounded: the planner runs until it finishes or the user interrupts.
             await_to_completion: true,
-            fork_context: true,
+            fork_context: self.fork_context,
             owner: SubagentOwner::Task,
             implement_loop_effort: None,
             cancel_token: self.cancel_token.clone(),
@@ -599,22 +634,51 @@ pub(crate) async fn run_goal_planner(
     )
     .await
     {
-        return stop;
+        // A written plan or a real interrupt still stops this attempt.
+        // A recon fail-closed with no plan file is not "No plan was produced."
+        // Research notes are already on disk. Continue.
+        if !matches!(stop, GoalPlannerOutcome::FailClosed { .. }) {
+            return stop;
+        }
+        tracing::info!("goal planner: recon stopped without a plan file; continuing");
     }
     if !non_empty_plan_file(&recon_file).await {
+        // An empty recon file is not a missing plan.
         tracing::info!(
             recon_file = %recon_file_str,
-            "goal planner: recon file missing or empty; failing closed",
-        );
-        return record_fail_closed(
-            GoalPlannerFailClosedReason::MissingPlan,
-            inputs.attempt,
-            started,
-            emit_event,
+            "goal planner: recon file missing or empty; continuing",
         );
     }
 
-    // Both artifact paths exist. The plan writer reads those two paths and writes only the plan.
+    // Compaction count 0 and accumulated tokens at or above 80% of the nested
+    // cap: do not fork. Write the plan after research and recon.
+    // Under that line the fork still runs. An empty plan from it is written
+    // after the plan writer when the research file is non-empty.
+    if !spawner.forks_parent_history() && !non_empty_plan_file(inputs.plan_file).await {
+        if let Err(err) =
+            write_plan_for_session_that_has_not_compacted(inputs.plan_file, inputs.objective).await
+        {
+            tracing::warn!(
+                plan_file = %plan_file_str,
+                error = %err,
+                "goal planner: could not write a plan for a session that has not compacted",
+            );
+            return record_fail_closed(
+                GoalPlannerFailClosedReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+            );
+        }
+        tracing::info!(
+            plan_file = %plan_file_str,
+            "goal planner: wrote the plan after research and recon; the session has not compacted",
+        );
+        return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+    }
+
+    // The plan writer reads the research file and the recon path. A missing
+    // recon file does not skip this role.
     let plan_prompt = goal_creation_prompt(
         GOAL_PLANNER_PROMPT_TEMPLATE,
         &[
@@ -641,6 +705,32 @@ pub(crate) async fn run_goal_planner(
         .await
         {
             return stop;
+        }
+        // Plan writer returned and left no plan. Empty research already
+        // failed closed above. An empty plan from the uncompacted under-160000
+        // fork must not store "No plan was produced" when research notes exist.
+        if non_empty_plan_file(&research_file).await {
+            if let Err(err) =
+                write_plan_for_session_that_has_not_compacted(inputs.plan_file, inputs.objective)
+                    .await
+            {
+                tracing::warn!(
+                    plan_file = %plan_file_str,
+                    error = %err,
+                    "goal planner: could not write a plan after an empty plan from the fork",
+                );
+                return record_fail_closed(
+                    GoalPlannerFailClosedReason::FileWriteFailed,
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                );
+            }
+            tracing::info!(
+                plan_file = %plan_file_str,
+                "goal planner: wrote the plan after an empty plan from the fork; research is not an empty file",
+            );
+            return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
         }
         tracing::info!(
             plan_file = %plan_file_str,
@@ -970,6 +1060,23 @@ async fn accept_written_plan_or_else(
     }
 }
 
+/// Plan written by the planner, not by the plan-writer role.
+/// Used when the session has not compacted and accumulated tokens are already
+/// at least 80% of the nested cap, and when a fork leaves the plan file empty
+/// after a non-empty research file. The headline is the operator objective.
+async fn write_plan_for_session_that_has_not_compacted(
+    plan_file: &Path,
+    objective: &str,
+) -> std::io::Result<()> {
+    if let Some(parent) = plan_file.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let headline = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = format!("# Plan: {headline}\n\n{objective}\n");
+    tokio::fs::write(plan_file, body).await?;
+    Ok(())
+}
+
 fn planned_outcome(
     plan_file: &Path,
     attempt: u32,
@@ -1150,6 +1257,7 @@ mod tests {
             role_override: RoleSpawnOverride::default(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
+            fork_context: true,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -1399,6 +1507,160 @@ mod tests {
         ));
         let log = log.lock().unwrap();
         assert!(log.iter().any(|t| t == "fail_closed:missing_plan_file"));
+    }
+
+    /// Research notes on disk, recon empty, plan writer returns `Done` without a plan.
+    /// `fork` is `goal_role_forks_uncompacted_parent` for this band.
+    struct NixJustfileForkSpawner {
+        plan_file: std::path::PathBuf,
+        fork: bool,
+        roles: Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GoalPlannerSpawner for NixJustfileForkSpawner {
+        fn forks_parent_history(&self) -> bool {
+            self.fork
+        }
+
+        async fn spawn_planner(
+            &self,
+            _id: &str,
+            role: GoalCreationRole,
+            _prompt: RoleRenderedPrompt,
+        ) -> Result<String, SpawnError> {
+            self.roles.lock().unwrap().push(role.description());
+            if role == GoalCreationRole::Research {
+                let research = goal_creation_artifact(&self.plan_file, "research");
+                if let Some(parent) = research.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .expect("research parent dir");
+                }
+                tokio::fs::write(&research, b"Nix and justfile lockfile notes for this run\n")
+                    .await
+                    .expect("research notes");
+            }
+            Ok("Done".to_string())
+        }
+    }
+
+    /// Nix and justfile lockfile `/goal`. Compaction count stays 0.
+    /// `goal_role_forks_uncompacted_parent` reads `parent_tokens`.
+    /// The production caller passes `get_total_tokens` (accumulated tokens),
+    /// not the live context line. 80% of the nested 200000 cap is 160000.
+    /// Research notes are on disk, so this is not an empty-file research failure.
+    #[tokio::test]
+    async fn nix_and_justfile_lockfile_goal_does_not_pause_with_no_plan_was_produced() {
+        const OPERATOR_GOAL: &str = "Made some changes and updates. Make sure those are reflected in Nix. Also please make sure that the justfile has good utilities to help me check, maintain, and update all lockfiles and flakes.";
+        const PAUSE: &str = "No plan was produced. Retry with /goal resume.";
+        // Strictly under 160000 accumulated tokens.
+        const BELOW: u64 = 159_999;
+        const AT_LINE: u64 = 160_000;
+        // Screenshot accumulated total. Not the 195K / 256K context line.
+        const SCREENSHOT: u64 = 345_400;
+
+        let safe = crate::util::config::NESTED_SESSION_CONTEXT_CAP * 80 / 100;
+        assert_eq!(
+            crate::util::config::NESTED_SESSION_CONTEXT_CAP,
+            200_000,
+            "the predicate compares parent_tokens with 80 percent of this nested cap"
+        );
+        assert_eq!(
+            safe, 160_000,
+            "80 percent of the nested 200000 cap is the write-the-plan line"
+        );
+        assert!(
+            goal_role_forks_uncompacted_parent(BELOW, 0),
+            "accumulated parent_tokens {BELOW} is under {safe}; compaction count 0 still forks. The field is parent_tokens from get_total_tokens."
+        );
+        assert!(
+            !goal_role_forks_uncompacted_parent(AT_LINE, 0),
+            "at {AT_LINE} accumulated tokens, compaction count 0 does not fork and writes the plan"
+        );
+        assert!(
+            !goal_role_forks_uncompacted_parent(SCREENSHOT, 0),
+            "screenshot accumulated total {SCREENSHOT}, compaction count 0, does not fork"
+        );
+        assert!(
+            goal_role_forks_uncompacted_parent(BELOW, 1),
+            "compaction count above 0 still forks"
+        );
+
+        for parent_tokens in [BELOW, AT_LINE, SCREENSHOT] {
+            let fork = goal_role_forks_uncompacted_parent(parent_tokens, 0);
+            let plan_file = tmp_plan_file(&format!("nix-justfile-{parent_tokens}"));
+            let spawner = Arc::new(NixJustfileForkSpawner {
+                plan_file: plan_file.clone(),
+                fork,
+                roles: Mutex::new(Vec::new()),
+            });
+            let (log, emit) = collect_events();
+            // Clone the concrete Arc first. An owned Arc<NixJustfileForkSpawner>
+            // coerces to Arc<dyn GoalPlannerSpawner>. Annotating Arc::clone
+            // itself would require &Arc<dyn GoalPlannerSpawner>.
+            let concrete = Arc::<NixJustfileForkSpawner>::clone(&spawner);
+            let for_planner: Arc<dyn GoalPlannerSpawner> = concrete;
+            let outcome = run_goal_planner(
+                for_planner,
+                GoalPlannerInputs {
+                    objective: OPERATOR_GOAL,
+                    context: "",
+                    plan_file: &plan_file,
+                    attempt: 1,
+                    model_id: "grok-test",
+                    tool_names: &RoleToolNames::inherit_defaults(),
+                    inherit_tool_names: &RoleToolNames::inherit_defaults(),
+                },
+                &emit,
+            )
+            .await;
+
+            let roles = spawner.roles.lock().unwrap().clone();
+            assert_eq!(
+                roles.first().copied(),
+                Some("goal research specialist"),
+                "research runs first, tokens {parent_tokens}, roles {roles:?}"
+            );
+            let research = goal_creation_artifact(&plan_file, "research");
+            let research_body = std::fs::read_to_string(&research).unwrap_or_default();
+            assert!(
+                !research_body.trim().is_empty(),
+                "research is not an empty-file failure, tokens {parent_tokens}, body {research_body:?}"
+            );
+            assert!(
+                matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+                "compaction count 0 and accumulated tokens {parent_tokens} must not store {PAUSE}. outcome={outcome:?} roles={roles:?}"
+            );
+            let tags = log.lock().unwrap().clone();
+            assert!(
+                !tags.iter().any(|tag| tag.starts_with("fail_closed")),
+                "fail closed stores {PAUSE}, tokens {parent_tokens}, log={tags:?}"
+            );
+            let plan_body = std::fs::read_to_string(&plan_file).unwrap_or_default();
+            assert!(
+                plan_body.starts_with("# Plan:"),
+                "product plan headline, tokens {parent_tokens}, got {plan_body:?}"
+            );
+            assert!(
+                plan_body.contains(OPERATOR_GOAL),
+                "plan carries the Nix and justfile work, tokens {parent_tokens}, got {plan_body:?}"
+            );
+            if fork {
+                assert!(
+                    roles.contains(&"goal plan writer"),
+                    "under {safe} the fork still runs the plan writer and an empty plan must not store {PAUSE}, tokens {parent_tokens}, roles {roles:?}"
+                );
+            } else {
+                assert!(
+                    !roles.contains(&"goal plan writer"),
+                    "at or above {safe} the planner writes the plan and does not spawn the plan writer, tokens {parent_tokens}, roles {roles:?}"
+                );
+            }
+            if let Some(parent) = plan_file.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
     }
 
     #[tokio::test]
@@ -2140,6 +2402,7 @@ mod tests {
             },
             cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
+            fork_context: true,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -2501,6 +2764,7 @@ mod tests {
             },
             cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
+            fork_context: true,
         });
         let (_log, emit) = collect_events();
         let outcome = run_goal_planner(
@@ -2563,6 +2827,7 @@ mod tests {
             },
             cancel_token: tokio_util::sync::CancellationToken::new(),
             events: None,
+            fork_context: true,
         });
         let (_log, emit) = collect_events();
         let outcome = run_goal_planner(

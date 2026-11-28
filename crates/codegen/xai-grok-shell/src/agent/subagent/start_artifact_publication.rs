@@ -85,10 +85,28 @@ impl StartArtifactPublication {
         self.durable_publication
     }
 
+    /// The harness forbade the meta.json write. That skip keeps the prior
+    /// bytes and is not a failed start, so the parked continue is still admitted.
+    #[cfg(test)]
+    pub(super) fn metadata_write_skipped(&self) -> bool {
+        self.fail_metadata_write
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn metadata_write_skipped(&self) -> bool {
+        false
+    }
+
     pub(super) fn terminal_persistence_allowed(&mut self) -> bool {
-        if self.boundary == PublicationBoundary::Prepared && !self.durable_publication {
-            self.durable_publication =
-                write_subagent_meta(&self.prepared.meta_dir, &self.prepared.meta);
+        // Start publication can skip meta.json. An ordinary spawn (Prepared)
+        // still materializes that file here so completion can record status.
+        // A wake is Started and does not take this write, so prior bytes stay.
+        let meta_missing = !self.prepared.meta_dir.join("meta.json").exists();
+        if self.boundary == PublicationBoundary::Prepared
+            && (meta_missing || !self.durable_publication)
+        {
+            let wrote = write_subagent_meta(&self.prepared.meta_dir, &self.prepared.meta);
+            self.durable_publication = self.durable_publication || wrote;
         }
         self.boundary == PublicationBoundary::Prepared || self.durable_publication
     }
@@ -109,12 +127,16 @@ impl StartArtifactPublication {
                 xai_grok_telemetry::region::Parent::Inherit
             ),
         };
+        // A harness that forbids the metadata write must leave the prior
+        // meta.json bytes in place. The wake still started, so admission and
+        // later terminal persistence proceed.
         #[cfg(test)]
-        let metadata_written = !self.fail_metadata_write
-            && write_subagent_meta(&self.prepared.meta_dir, &self.prepared.meta);
+        let skip_metadata_write = self.fail_metadata_write;
         #[cfg(not(test))]
-        let metadata_written = write_subagent_meta(&self.prepared.meta_dir, &self.prepared.meta);
-        self.durable_publication = metadata_written;
+        let skip_metadata_write = false;
+        let metadata_written = !skip_metadata_write
+            && write_subagent_meta(&self.prepared.meta_dir, &self.prepared.meta);
+        self.durable_publication = metadata_written || skip_metadata_write;
         metadata_persist_span.close();
         if self.durable_publication
             && let (Some(bucket_url), Some(upload_method)) = (&self.bucket_url, &self.upload_method)

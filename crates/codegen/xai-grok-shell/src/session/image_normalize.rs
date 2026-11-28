@@ -112,6 +112,10 @@ pub(crate) struct NormalizeResult {
     /// Images dropped entirely (integrity failure, too small, etc.).
     /// Reported via [`render_image_dropped_notice`].
     pub dropped: Vec<String>,
+    /// A text document that was labeled as an image. No image magic, at most
+    /// [`MAX_IMAGE_BYTES`], and at least one non-control character.
+    /// A README stays on the turn. A NUL buffer does not. It is not an integrity failure.
+    pub recovered_text: Vec<String>,
 }
 pub(crate) async fn normalize_images(
     images: Vec<ImageContent>,
@@ -129,9 +133,11 @@ pub(crate) async fn normalize_images_in(
     let mut compressed = Vec::new();
     let mut re_encode_fallbacks = Vec::new();
     let mut dropped = Vec::new();
+    let mut recovered_text = Vec::new();
     for (i, img) in images.into_iter().enumerate() {
         let one_based = i + 1;
         match normalize_one_in(img, one_based, is_cursor, cache).await {
+            Outcome::KeptText { text } => recovered_text.push(text),
             Outcome::Unchanged(c) => out.push(c),
             Outcome::ReEncodingOversized(c) => {
                 re_encode_fallbacks
@@ -158,6 +164,7 @@ pub(crate) async fn normalize_images_in(
         compressed,
         re_encode_fallbacks,
         dropped,
+        recovered_text,
     }
 }
 fn params_for(harness: HarnessVariant) -> &'static ReEncodeParams {
@@ -321,6 +328,26 @@ enum Outcome {
         index: usize,
         error: String,
     },
+    /// A text document mislabeled as an image. Not an image attachment.
+    KeptText {
+        text: String,
+    },
+}
+/// No image magic, at most [`MAX_IMAGE_BYTES`], valid UTF-8, and at least one
+/// non-control character. A README body qualifies. A run of NUL does not:
+/// NUL is valid UTF-8, and it is a control character. Bytes over the attachment
+/// cap are an oversized image payload and must fail validation instead of
+/// being pasted as text. A JPEG, including a short cut-off JPEG, still has
+/// JPEG magic, so this returns `None` and the integrity path still runs.
+fn recoverable_text_document(bytes: &[u8]) -> Option<&str> {
+    if image::guess_format(bytes).is_ok() || bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.chars().any(|c| !c.is_control()) {
+        return None;
+    }
+    Some(text)
 }
 async fn normalize_one_in(
     img: ImageContent,
@@ -332,6 +359,11 @@ async fn normalize_one_in(
         Ok(b) => b,
         Err(e) => return fail(index, format!("base64 decode: {e}")),
     };
+    if let Some(text) = recoverable_text_document(&raw_bytes) {
+        return Outcome::KeptText {
+            text: text.to_owned(),
+        };
+    }
     use xai_grok_tools::util::image_validate as iv;
     let (img, raw_bytes) = if iv::needs_endpoint_transcode(&raw_bytes) {
         let png = match run_blocking(move || match iv::transcode_to_endpoint_png(&raw_bytes) {

@@ -544,10 +544,11 @@ check-remote:
 	  export NIX_SSHOPTS="${extra_ssh}"
 	fi
 	# Snapshot tracked and untracked files. Skip gitignored cargo output.
+	# A cached path missing on disk is dropped here so the snapshot cannot send it again.
 	snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
 	trap 'rm -rf "$snapshot"' EXIT
 	git ls-files -z --cached --others --exclude-standard \
-	  | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+	  | rsync -a --from0 --delete-missing-args --files-from=- ./ "${snapshot}/"
 	if find "$snapshot" -type d -name target -print -quit | grep -q .; then
 	  echo "just check-remote: snapshot still contains a target directory" >&2
 	  exit 2
@@ -646,10 +647,6 @@ check-remote:
 	export NIX_ENFORCE_PURITY=0
 	if ! command -v mold >/dev/null 2>&1; then
 	  echo "just check-remote: mold is not on the dev-shell PATH" >&2
-	  exit 2
-	fi
-	if ! command -v python3 >/dev/null 2>&1; then
-	  echo "just check-remote: python3 is not on the dev-shell PATH" >&2
 	  exit 2
 	fi
 	unset CARGO_ENCODED_RUSTFLAGS
@@ -791,10 +788,11 @@ test-remote *args: require_system
 	else
 	  export NIX_SSHOPTS="${extra_ssh}"
 	fi
+	# A cached path missing on disk is dropped here so the snapshot cannot send it again.
 	snapshot="$(mktemp -d "${TMPDIR:-/tmp}/grok-oss-source.XXXXXX")"
 	trap 'rm -rf "$snapshot"' EXIT
 	git ls-files -z --cached --others --exclude-standard \
-	  | rsync -a --from0 --files-from=- ./ "${snapshot}/"
+	  | rsync -a --from0 --delete-missing-args --files-from=- ./ "${snapshot}/"
 	if find "$snapshot" -type d -name target -print -quit | grep -q .; then
 	  echo "just test-remote: snapshot still contains a target directory" >&2
 	  exit 2
@@ -890,10 +888,6 @@ test-remote *args: require_system
 	export NIX_ENFORCE_PURITY=0
 	if ! command -v mold >/dev/null 2>&1; then
 	  echo "just test-remote: mold is not on the dev-shell PATH" >&2
-	  exit 2
-	fi
-	if ! command -v python3 >/dev/null 2>&1; then
-	  echo "just test-remote: python3 is not on the dev-shell PATH" >&2
 	  exit 2
 	fi
 	unset CARGO_ENCODED_RUSTFLAGS

@@ -501,10 +501,24 @@ pub(super) fn handle_exit_plan_mode(
 }
 
 /// Apply a restore `exit_plan_mode` that arrived before the session was bound.
+///
+/// SessionLoaded can load a sticky resolved bit before this flush. That bit
+/// must not drop the held reverse-request. The flush parks the live waiter.
 pub(crate) fn flush_pending_exit_plan_mode(app: &mut AppView) -> bool {
+    use crate::views::plan_approval_view::ExitPlanModeExtRequest;
+
     let Some(ext) = app.pending_exit_plan_mode.take() else {
         return false;
     };
+    if let Ok(params) = serde_json::from_str::<ExitPlanModeExtRequest>(ext.request.params.get())
+        && let Some(id) = interaction_target_agent(app, &params.session_id)
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        // A resume that is already bound still honors plan_decision_resolved.
+        // This request was held because the session was unbound. Parking it
+        // is the SessionLoaded flush. Do not treat the sticky bit as a skip.
+        agent.plan_decision_resolved = false;
+    }
     handle_exit_plan_mode(ext, app)
 }
 

@@ -186,7 +186,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                             completed: Box::new(completed),
                         });
                 self.completed_order.retain(|id| id != &subagent_id);
-                self.spawn_ready.push(parked);
                 self.start_child(
                     wake_request,
                     None,
@@ -197,6 +196,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     Some(wake_origin),
                     completed,
                 );
+                // Hold the live oneshot only until the child notes. A skipped
+                // metadata note takes it back out and the receive handler
+                // accepts that oneshot. It is not left in `spawn_ready`.
+                // A wake that does not note stays parked so a later reject
+                // can still return NotActiveOrFinalizing.
+                self.spawn_ready.push(parked);
+                let ready_runs = self.poll_ready_runs();
+                self.drain_internal_until_skipped_metadata_note(&subagent_id);
+                if self.child_noted_skipped_metadata(&subagent_id) {
+                    for parked in self.spawn_ready.take(&subagent_id) {
+                        self.deliver_live_skipped_metadata_oneshot(parked);
+                    }
+                }
+                self.settle_polled_runs(ready_runs);
             }
             AdmissionDecision::Enqueue => {
                 self.notify_limit(

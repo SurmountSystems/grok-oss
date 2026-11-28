@@ -2419,3 +2419,6 @@ async fn resume_with_planner_disabled_keeps_infra_recap() {
 
 #[path = "goal_two_failed_subagents_pause_tests.rs"]
 mod goal_two_failed_subagents_pause_tests;
+
+#[path = "goal_nix_justfile_lockfile_pause_tests.rs"]
+mod goal_nix_justfile_lockfile_pause_tests;

@@ -111,10 +111,9 @@ impl ChildRunner for DeliveryRunner {
                     child_session_id: request.id.clone(),
                 },
             };
-            let promoted = match tokio::time::timeout(WAIT_BOUND, reporter.started(child)).await {
-                Ok(promoted) => promoted,
-                Err(_) => false,
-            };
+            let promoted: bool = tokio::time::timeout(WAIT_BOUND, reporter.started(child))
+                .await
+                .unwrap_or_default();
             if !promoted {
                 return cancelled_output(&request);
             }

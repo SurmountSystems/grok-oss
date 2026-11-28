@@ -42,7 +42,6 @@ let
       nativeBuildInputs = nativeBuildInputs ++ [
         pkgs.cargo-nextest
         pkgs.git
-        pkgs.python3
       ];
       doInstallCargoArtifacts = false;
       doCheck = false;

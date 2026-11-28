@@ -1,6 +1,6 @@
 //! Regenerate `src/prompt/prompt_encrypted.rs` from `templates/`.
 //!
-//! Rust replacement for `scripts/encrypt_templates.py`. grok-oss does not
+//! This bin is the prompt-template codegen job. grok-oss does not
 //! spawn python3 for this helper. Run the `encrypt_templates` bin in this
 //! crate. Do not use python3.
 

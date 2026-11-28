@@ -278,6 +278,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn insert_child_wi
             spawner_session_id: None,
             active_messages: ActiveMessageLifecycle::default(),
             deferred_wake: None,
+            admit_continue_on_finish: false,
             control: TestControl { admissions },
         },
     );
@@ -307,6 +308,7 @@ pub(in super::super) fn insert_pending(coordinator: &mut TestCoordinator, id: &s
             agent_address: None,
             spawner_session_id: None,
             wake_of: None,
+            admit_continue_on_finish: false,
         },
     );
 }
@@ -330,6 +332,7 @@ pub(in super::super) fn promote_pending(
             control: TestControl { admissions },
         },
         defer_admission: false,
+        admit_skipped_metadata: false,
         respond_to,
     });
 }
@@ -1504,6 +1507,7 @@ async fn human_pending_address_is_not_active() {
             agent_address: Some(address),
             spawner_session_id: None,
             wake_of: None,
+            admit_continue_on_finish: false,
         },
     );
     let mut response = begin_human_send(&mut coordinator, &command_tx, &address_text, "parent");
